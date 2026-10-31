@@ -1,0 +1,23 @@
+{
+  "name": "agentlink",
+  "version": "0.1.0",
+  "description": "Let AI agents on different machines and Claude accounts message each other — incoming messages wake idle Claude Code sessions",
+  "keywords": ["claude", "claude-code", "mcp", "agents", "multi-agent", "channels", "messaging", "lan"],
+  "type": "module",
+  "bin": { "agentlink": "bin/agentlink.js" },
+  "files": ["bin", "src", "install.sh", "README.md", "LICENSE", "SECURITY.md"],
+  "engines": { "node": ">=22.13" },
+  "os": ["darwin", "linux"],
+  "repository": { "type": "git", "url": "git+https://github.com/polyhub/agentlink.git" },
+  "homepage": "https://github.com/polyhub/agentlink#readme",
+  "bugs": { "url": "https://github.com/polyhub/agentlink/issues" },
+  "scripts": {
+    "test": "npm run test:unit && npm run test:e2e",
+    "test:unit": "node --no-warnings --test test/unit/*.test.js",
+    "test:e2e": "node --no-warnings test/e2e.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2"
+  },
+  "license": "MIT"
+}
