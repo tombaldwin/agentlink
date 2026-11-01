@@ -182,5 +182,22 @@ keys and a pre-built roster.
    pre-sign `add` records for hidden keys before it's removed; those must be removed too (status
    shows who added each machine), or the network re-created with `setup --new-network`.
 2. **Invite tokens are single-use and expire after 24h.** No `--uses N`.
-3. **ECDSA P-256 keys.** The spike also tries Ed25519; switch only if stock macOS curl and Ubuntu
-   curl both handle it.
+3. **ECDSA P-256 keys** (final: see spike results).
+
+## Spike results (2026-11-01, macOS, Node 23.6, stock curl 8.7.1)
+
+- The ~50-line DER builder makes self-signed P-256 and Ed25519 certificates that
+  `crypto.X509Certificate` parses and verifies, and that `openssl x509` reads.
+- Mutual TLS works: the server reads the client's key fingerprint from `getPeerX509Certificate()`.
+- Pinning with the expected certificate as the sole `ca` plus a fingerprint check in
+  `checkServerIdentity` blocks impostors **before any request bytes are sent**: a TLS impostor with
+  its own key got 0 application bytes; a plain-TCP impostor got only the TLS ClientHello (no request
+  line, no body). The request fails with an error the node can log and retry on.
+- `curl -k --pinnedpubkey sha256//<fp>` accepts the right key and refuses a wrong one
+  (`(90) public key does not match pinned public key`) on stock macOS curl with both its LibreSSL
+  (default) and SecureTransport backends, with a P-256 key.
+- **Ed25519 fails on stock macOS curl** (LibreSSL 3.3.6: handshake failure), so P-256 is final.
+- **SecureTransport has no TLS 1.3**, so the server accepts TLS 1.2+ (curl's installer fetch);
+  node-to-node clients require TLS 1.3.
+- Not yet checked: Ubuntu's stock curl (OpenSSL 3, expected to work). Docker wasn't responding
+  locally; CI's install-smoke job on ubuntu-latest covers it once the installer uses the pinned curl.
