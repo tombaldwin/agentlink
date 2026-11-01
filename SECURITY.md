@@ -41,8 +41,10 @@ included in the invite. Anyone holding the secret is a full member of the networ
 
 ## Rotating the secret
 
-Run `agentlink setup` on one machine (with no argument) to create a new network, then join the
-other machines with the new invite. Machines on the old secret can no longer talk to it.
+Run `agentlink setup --new-network` on one machine to create a new network with a fresh secret,
+then join each of the other machines with the new invite (on each of them, run the invite line;
+it replaces the old secret). Machines still on the old secret can no longer talk to the new
+network. (Plain `agentlink setup` keeps the existing secret, so it does not rotate anything.)
 
 ## Reporting a vulnerability
 

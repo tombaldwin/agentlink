@@ -68,11 +68,17 @@ See [SECURITY.md](SECURITY.md) for details.
 ## Caveats
 
 - Claude Code channels are a research preview, so `claude-link` passes
-  `--dangerously-load-development-channels server:agentlink` and Claude Code shows a warning at
-  startup. A session started with plain `claude` isn't woken: its messages wait for the `inbox`
-  tool instead.
+  `--dangerously-load-development-channels=server:agentlink` and Claude Code shows a warning at
+  startup. A session started with plain `claude` (or `claude-link -p`) isn't woken: its messages
+  wait for the `inbox` tool instead.
+- Claude Code doesn't confirm that a pushed message reached the session, so senders see "pushed to
+  … live session" rather than "read". If your organisation doesn't allow channels (claude.ai
+  Team/Enterprise without `channelsEnabled`, Bedrock, Vertex), Claude Code silently drops pushes:
+  start sessions with `AGENTLINK_POLL=1 claude-link` so messages wait for the `inbox` tool.
 - Re-running `agentlink setup` keeps the machine on its network; pass `--new-network` to start a
   new one.
+- If a machine is renamed, messages already queued for its old name wait until they expire;
+  resend them to the new name.
 - macOS and Linux. macOS asks once to allow incoming connections for `node`.
 
 ## Development

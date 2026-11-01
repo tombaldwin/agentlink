@@ -15,15 +15,23 @@ const sleep = (/** @type {number} */ ms) => new Promise(r => setTimeout(r, ms))
 
 /**
  * Was the Claude Code session that started us launched with the agentlink channel enabled?
- * Without it Claude Code silently drops channel notifications, so pushing (and acking) a message
- * would lose it. The adapter's parent is the claude process: check its command line, falling back
- * to the AGENTLINK_CHANNEL hint set by `agentlink claude` when ps isn't available.
+ * Without it Claude Code silently drops channel notifications, so pushing a message would lose it.
+ * The adapter's parent is the claude process: check its command line, falling back to the
+ * AGENTLINK_CHANNEL hint set by `agentlink claude` when ps isn't available. Print mode (-p) ignores
+ * channels even when the flag is given. AGENTLINK_POLL=1 forces inbox mode (e.g. for an account
+ * whose organisation doesn't allow channels: Claude Code can't tell us it dropped them).
  */
 export function channelEnabled() {
+  if (process.env.AGENTLINK_POLL === '1') return false
+  let args
   try {
-    const args = execFileSync('ps', ['-ww', '-o', 'args=', '-p', String(process.ppid)], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] })
-    return /(^|[\s,=])server:agentlink(?=$|[\s,])/.test(args)
+    args = execFileSync('ps', ['-ww', '-o', 'args=', '-p', String(process.ppid)], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] })
   } catch { return process.env.AGENTLINK_CHANNEL === '1' }
+  return channelArgs(args)
+}
+/** Does a claude command line enable the agentlink channel (and run interactively)? @param {string} args */
+export function channelArgs(args) {
+  return /(^|[\s,=])server:agentlink(?=$|[\s,])/.test(args) && !/(^|\s)(-p|--print)(?=$|[\s=])/.test(args)
 }
 
 /**
@@ -51,13 +59,14 @@ export async function runAdapter(cfg, { name, poll = false, channel } = {}) {
   const token = crypto.randomUUID()   // identifies this session to the node across reconnects
   /** @type {Map<string, number>} msg id -> failed push attempts */
   const failures = new Map()
-  const ack = (/** @type {string[]} */ ids) => local.req('POST', '/local/ack', { name: myName, ids }).catch(e => log('ack failed:', errMsg(e)))
+  // channel pushes are acked as 'pushed' (shown, no read receipt from Claude Code); inbox reads as 'delivered'
+  const ack = (/** @type {string[]} */ ids, state = 'delivered') => local.req('POST', '/local/ack', { name: myName, ids, state }).catch(e => log('ack failed:', errMsg(e)))
   const nack = (/** @type {string[]} */ ids) => local.req('POST', '/local/nack', { name: myName, ids }).catch(() => {})
 
   /** @param {InboundMessage} m */
   async function onMessage(m) {
     if (!ready) { early.push(m); return }
-    if (seen.has(m.id)) return ack([m.id])
+    if (seen.has(m.id)) return ack([m.id], poll ? 'delivered' : 'pushed')
     if (poll) {
       if (!inbox.some(x => x.id === m.id)) inbox.push(m)
       return
@@ -78,7 +87,7 @@ export async function runAdapter(cfg, { name, poll = false, channel } = {}) {
       return
     }
     seen.add(m.id)
-    await ack([m.id])
+    await ack([m.id], 'pushed')
   }
 
   // ---- connect to the local node (auto-start it), keep reconnecting forever ----
@@ -97,7 +106,7 @@ export async function runAdapter(cfg, { name, poll = false, channel } = {}) {
           } else if (ev === 'message') {
             await onMessage(d).catch(e => log('deliver failed:', errMsg(e)))
           }
-        })
+        }, { poll })
       } catch (e) { log('node connection:', errMsg(e)) }
       await sleep(delay)
       delay = Math.min(delay * 2, 10_000)
@@ -105,11 +114,12 @@ export async function runAdapter(cfg, { name, poll = false, channel } = {}) {
   })()
   await Promise.race([helloP, sleep(8000)])
 
+  // the name can change if the session reconnects and its name is taken: the tools report the current one
   const instructions = poll
-    ? `You are on the agentlink agent network as ${address}. Other AI agents (possibly on other machines or accounts) can message you. ` +
+    ? `You are on the agentlink agent network as ${address} (the peers tool shows your current address). Other AI agents (possibly on other machines or accounts) can message you. ` +
       `Call the inbox tool to read new messages, send to message an agent by address (name@host), and peers to see who is online. ` +
       PEER_TRUST
-    : `You are on the agentlink agent network as ${address}. Other AI agents (other Claude sessions or other AI agents, possibly on other machines or accounts) ` +
+    : `You are on the agentlink agent network as ${address} (the peers tool shows your current address). Other AI agents (other Claude sessions or other AI agents, possibly on other machines or accounts) ` +
       `can message you. Their messages arrive as <channel source="agentlink" from="name@host" msg_id="..." sent_at="...">. ` +
       `To reply, call the send tool with "to" set to the from attribute. Use peers to see who is online, inbox to re-read recent messages. ` +
       PEER_TRUST
@@ -134,13 +144,14 @@ export async function runAdapter(cfg, { name, poll = false, channel } = {}) {
         case 'peers': return text(formatPeers(await local.req('GET', '/local/peers'), address))
         case 'inbox': {
           if (poll) {
+            if (!inbox.length) return text('No new messages.')
+            const out = inbox.map(fmtMsg).join('\n\n')   // format first: nothing is acked unless it's returned
             const msgs = inbox.splice(0)
-            if (!msgs.length) return text('No new messages.')
             msgs.forEach(m => seen.add(m.id))
             await ack(msgs.map(m => m.id))
-            return text(msgs.map(fmtMsg).join('\n\n'))
+            return text(out)
           }
-          const limit = Math.min(Number(a.limit) || 10, 100)
+          const limit = Math.max(1, Math.min(Math.floor(Number(a.limit)) || 10, 100))
           const r = await local.req('GET', '/local/history', undefined, `?name=${encodeURIComponent(myName)}&limit=${limit}`)
           return text(r.messages.length ? r.messages.reverse().map(fmtMsg).join('\n\n') : 'No messages yet.')
         }
@@ -191,7 +202,10 @@ const TOOLS = [
 /** @param {string} t */
 function text(t, isError = false) { return { content: [{ type: 'text', text: t }], ...(isError ? { isError: true } : {}) } }
 /** @param {{ id: string, from: string, body: string, sent_at: number }} m */
-function fmtMsg(m) { return `[${new Date(m.sent_at).toISOString()}] from ${m.from} (id ${m.id}):\n${m.body}` }
+function fmtMsg(m) {
+  const t = new Date(m.sent_at)
+  return `[${Number.isNaN(t.getTime()) ? 'unknown time' : t.toISOString()}] from ${m.from} (id ${m.id}):\n${m.body}`
+}
 
 /** @param {import('./types.js').PeersReply} p @param {string} me */
 function formatPeers(p, me) {

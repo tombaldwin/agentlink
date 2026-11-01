@@ -3,13 +3,22 @@ import os from 'node:os'
 import fs from 'node:fs'
 import path from 'node:path'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
-import { writeConfig, loadConfig, newSecret, homeDir, tailscaleName, errMsg } from './config.js'
+import crypto from 'node:crypto'
+import { writeConfig, readConfigFile, loadConfig, newSecret, homeDir, ensureHomeDir, normHost, tailscaleName, errMsg } from './config.js'
 import { Local } from './local.js'
-import { claudeAccounts, register, unregister, writeShellBlock, removeShellBlock, which, nodePath } from './claude.js'
+import { claudeAccounts, register, unregister, writeShellBlock, removeShellBlock, claudeBin, nodePath, BIN } from './claude.js'
 
-const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'agentlink.js')
-const LABEL = 'com.agentlink.node'
+/**
+ * Service names. The usual install (~/.agentlink) gets the plain names; any other agentlink home
+ * (AGENTLINK_HOME, or a different $HOME such as a test sandbox) gets its own, so setting one up
+ * never boots out and replaces the user's real service.
+ */
+function serviceNames() {
+  const dir = path.resolve(homeDir())
+  const usual = path.join(os.userInfo().homedir, '.agentlink')
+  const suffix = dir === usual ? '' : '-' + crypto.createHash('sha256').update(dir).digest('hex').slice(0, 8)
+  return { label: `com.agentlink.node${suffix}`, unit: `agentlink${suffix}` }
+}
 const uid = () => process.getuid?.() ?? 0   // launchd domain (macOS only, where getuid exists)
 const sleep = (/** @type {number} */ ms) => new Promise(r => setTimeout(r, ms))
 const ok = (/** @type {string} */ m) => console.log(`  ✓ ${m}`)
@@ -21,10 +30,10 @@ const warn = (/** @type {string} */ m) => console.log(`  ! ${m}`)
 export async function setup({ secret, host, peers = [], noService, noClaude, noAlias, newNetwork }) {
   noService ||= process.env.AGENTLINK_NO_SERVICE === '1'
   if (secret && String(secret).length < 24) throw new Error('network secret must be at least 24 characters (omit it to generate one)')
+  if (host) host = normHost(host)   // throws before anything is written
   console.log(`agentlink setup`)
-  /** @type {import('./types.js').ConfigFile} */
-  let existing = {}
-  try { existing = JSON.parse(fs.readFileSync(path.join(homeDir(), 'config.json'), 'utf8')) } catch {}
+  // an unreadable config.json stops setup: treating it as empty would replace the network secret
+  const existing = readConfigFile() || {}
   // the running node (if any) only accepts requests signed with the secret it was started with
   /** @type {import('./types.js').Config | null} */
   let prev = null
@@ -48,8 +57,11 @@ export async function setup({ secret, host, peers = [], noService, noClaude, noA
   await stopRunningNode(prev ? [prev, cfg] : [cfg])
 
   if (!noService) {
-    try { installService(); ok('background node installed (starts at login, restarts if it dies)') }
-    catch (e) { warn(`could not install background service (${errMsg(e)}); sessions will start the node on demand`) }
+    try {
+      installService()
+      ok('background node installed (starts at login, restarts if it dies)')
+      for (let i = 0; i < 50 && !await local.health(); i++) await sleep(100)   // let the service win the port
+    } catch (e) { warn(`could not install background service (${errMsg(e)}); sessions will start the node on demand`) }
   }
   try { const h = await local.ensureNode(); ok(`node running on port ${cfg.port} (pid ${h.pid})`) }
   catch (e) { warn(errMsg(e)) }
@@ -113,7 +125,7 @@ Keep it private: it contains this network's secret.${ts ? '' : `
 }
 
 function registerClaude() {
-  if (!which('claude')) return warn('claude not found on PATH — sessions started with `agentlink claude` will register automatically once it is installed')
+  if (!claudeBin()) return warn('claude not found on PATH — sessions started with `agentlink claude` will register automatically once it is installed')
   for (const acct of claudeAccounts()) {
     const label = acct.dir ? `${acct.alias} (${acct.dir})` : 'default account'
     try { register(acct.dir); ok(`enabled for Claude account: ${label}`) }
@@ -123,8 +135,8 @@ function registerClaude() {
 
 // ---------- services ----------
 export function installService() {
-  const cfgDir = homeDir()
-  fs.mkdirSync(cfgDir, { recursive: true, mode: 0o700 })
+  const cfgDir = ensureHomeDir()
+  const { label: LABEL, unit: UNIT } = serviceNames()
   const logFile = path.join(cfgDir, 'node.log')
   const env = { PATH: process.env.PATH, ...(process.env.AGENTLINK_HOME ? { AGENTLINK_HOME: cfgDir } : {}) }
   if (process.platform === 'darwin') {
@@ -150,7 +162,7 @@ export function installService() {
     return
   }
   if (process.platform === 'linux') {
-    const unit = path.join(os.homedir(), '.config', 'systemd', 'user', 'agentlink.service')
+    const unit = path.join(os.homedir(), '.config', 'systemd', 'user', `${UNIT}.service`)
     fs.mkdirSync(path.dirname(unit), { recursive: true })
     fs.writeFileSync(unit, `[Unit]
 Description=agentlink agent messaging node
@@ -165,7 +177,7 @@ RestartSec=5
 WantedBy=default.target
 `)
     execFileSync('systemctl', ['--user', 'daemon-reload'])
-    execFileSync('systemctl', ['--user', 'enable', '--now', 'agentlink'])
+    execFileSync('systemctl', ['--user', 'enable', '--now', UNIT])
     spawnSync('loginctl', ['enable-linger', os.userInfo().username], { stdio: 'ignore' }) // keep running when logged out
     return
   }
@@ -173,8 +185,9 @@ WantedBy=default.target
 }
 
 export async function uninstall() {
+  const { label: LABEL, unit: UNIT } = serviceNames()
   // stops open sessions from restarting the node
-  try { fs.mkdirSync(homeDir(), { recursive: true }); fs.writeFileSync(path.join(homeDir(), 'disabled'), '') } catch {}
+  try { ensureHomeDir(); fs.writeFileSync(path.join(homeDir(), 'disabled'), '') } catch {}
   try {
     const local = new Local(loadConfig())
     if (await local.health()) await local.req('POST', '/local/shutdown')
@@ -183,8 +196,8 @@ export async function uninstall() {
     spawnSync('launchctl', ['bootout', `gui/${uid()}/${LABEL}`], { stdio: 'ignore' })
     fs.rmSync(path.join(os.homedir(), 'Library', 'LaunchAgents', `${LABEL}.plist`), { force: true })
   } else if (process.platform === 'linux') {
-    spawnSync('systemctl', ['--user', 'disable', '--now', 'agentlink'], { stdio: 'ignore' })
-    fs.rmSync(path.join(os.homedir(), '.config', 'systemd', 'user', 'agentlink.service'), { force: true })
+    spawnSync('systemctl', ['--user', 'disable', '--now', UNIT], { stdio: 'ignore' })
+    fs.rmSync(path.join(os.homedir(), '.config', 'systemd', 'user', `${UNIT}.service`), { force: true })
   }
   for (const acct of claudeAccounts()) unregister(acct.dir)
   removeShellBlock()

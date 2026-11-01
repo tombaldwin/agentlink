@@ -7,7 +7,8 @@ import { DatabaseSync } from 'node:sqlite'
  *   inbox  - recipient is on this machine; must push to the local session
  * messages.state:
  *   pending (outbox/held: still to hand over) -> forwarded
- *   queued  (inbox: waiting for session)      -> delivered
+ *   queued  (inbox: waiting for session)      -> pushed (shown in a channel session; no read receipt)
+ *                                             -> delivered (read with the inbox tool)
  *   expired | failed
  */
 /** @param {string} file */

@@ -63,8 +63,15 @@ test('request auth binds method, path and body, and rejects stale timestamps', (
   assert.ok(!checkAuth('other', h, 'POST', '/v1/deliver', '{"a":1}'))
   assert.ok(!checkAuth('s', undefined, 'POST', '/v1/deliver', ''))
   assert.ok(!checkAuth('s', 'garbage', 'POST', '/v1/deliver', ''))
-  const stale = String(Date.now() - MAX_SKEW_MS - 1000) + h.slice(h.indexOf('.'))
-  assert.ok(!checkAuth('s', stale, 'POST', '/v1/deliver', '{"a":1}'))
+  // a correctly signed header from just outside the window (signed with a clock set back)
+  const realNow = Date.now
+  Date.now = () => realNow() - MAX_SKEW_MS - 1000
+  const stale = authHeader('s', 'POST', '/v1/deliver', '{"a":1}')
+  Date.now = () => realNow() - MAX_SKEW_MS + 5000
+  const old = authHeader('s', 'POST', '/v1/deliver', '{"a":1}')
+  Date.now = realNow
+  assert.ok(!checkAuth('s', stale, 'POST', '/v1/deliver', '{"a":1}'), 'outside the window')
+  assert.ok(checkAuth('s', old, 'POST', '/v1/deliver', '{"a":1}'), 'inside the window')
 })
 
 test('request auth binds the node identity header and rejects replays', () => {
@@ -102,4 +109,72 @@ test('invite line encodes secrets with URL- and shell-special characters', async
   const url = line.match(/curl -fsSL "([^"]+)"/)[1]
   assert.match(url, /^[A-Za-z0-9:\/._?=%-]+$/)
   assert.equal(new URL(url).searchParams.get('k'), secret)
+})
+
+test('peers given with a port are dialed by the name as written (MagicDNS short names)', () => {
+  assert.deepEqual(parsePeer('desk:7777'), { host: 'desk.local', addr: 'desk:7777' })
+  assert.deepEqual(parsePeer('desk'), { host: 'desk.local', addr: null })
+  assert.deepEqual(parsePeer('desk.tail1.ts.net:7777'), { host: 'desk.tail1.ts.net', addr: 'desk.tail1.ts.net:7777' })
+  assert.deepEqual(parsePeer('10.0.0.5:7777'), { host: '10.0.0.5', addr: '10.0.0.5:7777' })
+})
+
+test('generated secrets never look like a command-line flag', () => {
+  for (let i = 0; i < 20000; i++) assert.ok(!newSecret().startsWith('-'))
+})
+
+test('the channel is only considered enabled for interactive sessions that load it', async () => {
+  const { channelArgs } = await import('../../src/mcp.js')
+  assert.ok(channelArgs('claude --dangerously-load-development-channels=server:agentlink'))
+  assert.ok(channelArgs('claude --dangerously-load-development-channels server:agentlink fix it'))
+  assert.ok(!channelArgs('claude'))
+  assert.ok(!channelArgs('claude --dangerously-load-development-channels=server:agentlink -p "say hi"'))
+  assert.ok(!channelArgs('claude --print --dangerously-load-development-channels=server:agentlink'))
+  assert.ok(!channelArgs('claude --dangerously-load-development-channels=server:agentlinkx'))
+})
+
+/** Run a snippet with HOME and AGENTLINK_HOME in a fresh temp dir; returns its JSON output. */
+async function inSandbox(files, code, env = {}) {
+  const fs = await import('node:fs'), os = await import('node:os'), path = await import('node:path')
+  const { execFileSync } = await import('node:child_process')
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agentlink-unit-'))
+  try {
+    for (const [f, text] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(home, f)), { recursive: true }); fs.writeFileSync(path.join(home, f), text) }
+    const src = new URL('../../src/', import.meta.url).href
+    const out = execFileSync(process.execPath, ['--no-warnings', '--input-type=module', '-e', code.replaceAll('SRC/', src)],
+      { env: { ...process.env, HOME: home, AGENTLINK_HOME: path.join(home, '.agentlink'), ...env }, encoding: 'utf8' })
+    return { home, out: JSON.parse(out) }
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+}
+
+test('account aliases are read as the shell sees them, including escaped quotes', async () => {
+  const rc = [
+    `alias claude2='CLAUDE_CONFIG_DIR="$HOME/.claude2" claude'`,
+    `alias work='echo it'\\''s work; CLAUDE_CONFIG_DIR=$HOME/.work claude'`,
+    `alias dq="CLAUDE_CONFIG_DIR=\\"$HOME/.dq\\" claude"`,
+  ].join('\n') + '\n'
+  const { home, out } = await inSandbox({ '.zshrc': rc },
+    `import { claudeAccounts } from 'SRC/claude.js'; console.log(JSON.stringify(claudeAccounts()))`, { SHELL: '/bin/zsh' })
+  const by = Object.fromEntries(out.map(a => [a.alias, a]))
+  assert.equal(by.claude2.dir, `${home}/.claude2`)
+  assert.equal(by.work.dir, `${home}/.work`)
+  assert.equal(by.work.aliasValue, `echo it's work; CLAUDE_CONFIG_DIR=$HOME/.work claude`)
+  assert.equal(by.dq.dir, `${home}/.dq`)
+  assert.equal(by.dq.aliasValue, `CLAUDE_CONFIG_DIR="$HOME/.dq" claude`)
+})
+
+test('config: bad files throw, ttl is capped, and "localhost" is never an identity', async () => {
+  const load = `import { loadConfig } from 'SRC/config.js'
+    let r; try { const c = loadConfig(); r = { ttlDays: c.ttlMs / 86400000, host: c.host, aliases: c.aliases } } catch (e) { r = { error: e.message } }
+    console.log(JSON.stringify(r))`
+  const secret = 'x'.repeat(32)
+  let { out } = await inSandbox({ '.agentlink/config.json': '{"secret": "s",}' }, load)
+  assert.match(out.error, /bad config/)
+  ;({ out } = await inSandbox({ '.agentlink/config.json': JSON.stringify({ secret, host: 'box', ttlDays: 1e9 }) }, load))
+  assert.equal(out.ttlDays, 30)
+  ;({ out } = await inSandbox({ '.agentlink/config.json': JSON.stringify({ secret, host: 'localhost' }) }, load))
+  assert.match(out.error, /can't identify this machine/)
+  // a machine given its own name doesn't answer for the OS hostname
+  ;({ out } = await inSandbox({ '.agentlink/config.json': JSON.stringify({ secret, host: 'renamed-clone' }) }, load))
+  const os = await import('node:os')
+  assert.ok(!out.aliases.includes(normHost(os.hostname())), 'OS hostname is not an alias')
 })

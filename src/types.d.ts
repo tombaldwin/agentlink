@@ -37,7 +37,7 @@ export interface Envelope {
 }
 
 export type MessageRole = 'outbox' | 'held' | 'inbox'
-export type MessageState = 'pending' | 'forwarded' | 'queued' | 'delivered' | 'expired' | 'failed'
+export type MessageState = 'pending' | 'forwarded' | 'queued' | 'pushed' | 'delivered' | 'expired' | 'failed'
 
 /** A row of the messages table (see store.js). */
 export interface MessageRow {

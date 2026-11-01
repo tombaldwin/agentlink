@@ -2,21 +2,28 @@
 import { loadConfig, VERSION } from '../src/config.js'
 
 const [cmd, ...rest] = process.argv.slice(2)
+// Only these are flags; anything else (a secret or a message that happens to start with "--") is an
+// argument, and "--" ends the flags.
+const VALUE_FLAGS = ['name', 'from', 'host', 'peer']
+const BOOL_FLAGS = ['no-service', 'no-claude', 'no-alias', 'new-network', 'poll', 'channel', 'on-demand']
 /** @type {Record<string, any>} */
 const flags = {}
 /** @type {string[]} */
 const pos = []
 for (let i = 0; i < rest.length; i++) {
   const a = rest[i]
-  if (a.startsWith('--')) {
-    const [k, v] = a.slice(2).split('=')
-    /** @type {string | true} */
-    let val = v
-    if (val === undefined) val = rest[i + 1] && !rest[i + 1].startsWith('--') && ['name', 'from', 'host', 'peer'].includes(k) ? rest[++i] : true
+  if (a === '--') { pos.push(...rest.slice(i + 1)); break }
+  const eq = a.indexOf('=')
+  const k = a.startsWith('--') ? a.slice(2, eq < 0 ? undefined : eq) : ''
+  if (VALUE_FLAGS.includes(k)) {
+    const val = eq >= 0 ? a.slice(eq + 1) : rest[++i]
+    if (val === undefined) throw usage(`--${k} needs a value`)
     if (k === 'peer') (flags.peer ||= []).push(val)
     else flags[k] = val
-  } else pos.push(a)
+  } else if (BOOL_FLAGS.includes(k) && eq < 0) flags[k] = true
+  else pos.push(a)
 }
+function usage(/** @type {string} */ m) { console.error(`agentlink: ${m}`); process.exit(2) }
 
 const HELP = `agentlink ${VERSION} — wake-on-message networking for AI agents
 
@@ -44,8 +51,9 @@ async function main() {
       const fs = await import('node:fs')
       const path = await import('node:path')
       const { homeDir } = await import('../src/config.js')
-      // If another agentlink node already serves this port (e.g. one a session started), wait
-      // quietly and take over when it exits, instead of crash-looping under launchd/systemd.
+      // If another agentlink node already serves this port (e.g. one a session started), the service
+      // waits quietly and takes over when it exits, instead of crash-looping under launchd/systemd.
+      // A node started on demand by a session (--on-demand) just exits: one node is enough.
       // Every attempt re-reads the config and honours `agentlink uninstall`, so a long-waiting
       // standby never revives an uninstalled node or serves a config that setup has since replaced.
       for (let waited = false; ;) {
@@ -53,8 +61,10 @@ async function main() {
         const cfg = loadConfig()
         try { await runNode(cfg); return } catch (e) {
           if (/** @type {NodeJS.ErrnoException} */ (e).code !== 'EADDRINUSE') throw e
-          const h = await new Local(cfg).health()
-          if (!h || h.net !== cfg.net) { console.error(`port ${cfg.port} is in use by something else`); process.exit(1) }
+          const local = new Local(cfg)
+          const h = await local.health()
+          if (!h || h.net !== cfg.net || !await local.verify()) { console.error(`port ${cfg.port} is in use by something else`); process.exit(1) }
+          if (flags['on-demand']) { console.error(`another agentlink node (pid ${h.pid}) is already running`); return }
           if (!waited) { console.error(`another agentlink node (pid ${h.pid}) is running; standing by`); waited = true }
           await new Promise(r => setTimeout(r, 5000))
         }
@@ -67,7 +77,7 @@ async function main() {
     case 'claude': {
       const { launchClaude } = await import('../src/claude.js')
       const { Local } = await import('../src/local.js')
-      return launchClaude(process.argv.slice(3), () => new Local(loadConfig()).ensureNode())
+      return launchClaude(process.argv.slice(3), async () => new Local(loadConfig()).ensureNode())
     }
     case 'send': {
       if (pos.length < 2) throw new Error('usage: agentlink send <name@host> <message>')

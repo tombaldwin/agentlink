@@ -11,6 +11,17 @@ export function homeDir() {
 }
 export const configPath = () => path.join(homeDir(), 'config.json')
 
+/** Create the agentlink home directory, private to this user even if something (an older installer,
+ * a umask-created parent) made it before us: it holds the secret, messages and logs. */
+export function ensureHomeDir(dir = homeDir()) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  try { if ((fs.statSync(dir).mode & 0o077) !== 0) fs.chmodSync(dir, 0o700) } catch {}
+  return dir
+}
+
+/** Longest a message may live, whatever the config says (keeps timestamps well inside SQLite/JS integer range). */
+export const MAX_TTL_MS = 30 * 86400_000
+
 /** Normalise a machine name (lowercase, `.local` for bare names); throws if invalid. @param {unknown} input @returns {string} */
 export function normHost(input) {
   let h = String(input || '').trim().toLowerCase().replace(/\.$/, '')
@@ -59,7 +70,10 @@ export function parsePeer(p) {
   let host
   try { host = normHost(m[1]) } catch { return null }
   if (/^\d+\.\d+\.\d+\.\d+\.local$/.test(host)) host = host.slice(0, -6)
-  const addr = m[2] ? `${host}:${m[2]}` : null
+  // with an explicit port, dial the name exactly as given: a bare name may be a MagicDNS/DNS short
+  // name ("desk:7777") that only resolves without the ".local" we add for identity
+  const literal = m[1].replace(/\.$/, '')
+  const addr = m[2] ? `${/^[a-z0-9-]+$/.test(literal) ? literal : host}:${m[2]}` : null
   if (addr && !validAddr(addr)) return null
   return { host, addr }
 }
@@ -85,11 +99,16 @@ export function tailscaleName() {
 const hostSafe = h => String(h).trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63) || 'agentlink-host'
 
 export function detectHost() {
+  let h = null
   if (process.platform === 'darwin') {
-    try { return normHost(hostSafe(execFileSync('scutil', ['--get', 'LocalHostName']).toString())) } catch {}
+    try { h = normHost(hostSafe(execFileSync('scutil', ['--get', 'LocalHostName']).toString())) } catch {}
   }
-  return normHost(hostSafe(os.hostname().split('.')[0]))
+  h ||= normHost(hostSafe(os.hostname().split('.')[0]))
+  // every node treats "localhost" as itself, so it can't be a machine's network identity
+  if (isLocalhost(h)) throw new Error(`this machine's hostname is "${os.hostname()}", which can't identify it on the network; run: agentlink setup --host <name>`)
+  return h
 }
+const isLocalhost = (/** @type {string} */ h) => h === 'localhost' || h.startsWith('localhost.')
 
 /** Short public fingerprint of the secret: lets nodes recognise their own network on the LAN. */
 export const networkId = (/** @type {string} */ secret) => crypto.createHash('sha256').update('agentlink-net:' + secret).digest('hex').slice(0, 12)
@@ -97,17 +116,20 @@ export const networkId = (/** @type {string} */ secret) => crypto.createHash('sh
 /** @returns {import('./types.js').Config} */
 export function loadConfig() {
   /** @type {import('./types.js').ConfigFile} */
-  let file = {}
-  try { file = JSON.parse(fs.readFileSync(configPath(), 'utf8')) } catch (e) {
-    if (/** @type {NodeJS.ErrnoException} */ (e).code !== 'ENOENT') throw new Error(`bad config ${configPath()}: ${errMsg(e)}`)
-  }
+  const file = readConfigFile() || {}
   const secret = process.env.AGENTLINK_SECRET || file.secret
   if (!secret) throw new Error(`agentlink is not set up (no ${configPath()}). Run: agentlink setup <secret>`)
-  const host = normHost(process.env.AGENTLINK_HOST || file.host || detectHost())
+  const explicit = process.env.AGENTLINK_HOST || file.host
+  const host = normHost(explicit || detectHost())
+  if (isLocalhost(host)) throw new Error(`"${host}" can't identify this machine on the network; run: agentlink setup --host <name>`)
   const aliases = new Set([...(file.aliases || []).map(normHost), 'localhost'])
-  try { aliases.add(normHost(os.hostname())) } catch {}   // skipped if the OS name isn't a valid host
   const autoAliases = process.env.AGENTLINK_AUTO_ALIASES ? process.env.AGENTLINK_AUTO_ALIASES !== '0' : file.autoAliases !== false
-  if (autoAliases) for (const ip of localIPv4s()) aliases.add(ip)
+  if (autoAliases) {
+    for (const ip of localIPv4s()) aliases.add(ip)
+    // the OS hostname is only one of our names when we use it for identity: a machine given its own
+    // name (e.g. a clone renamed with --host) must not answer for its twin's hostname
+    if (!explicit) try { const o = normHost(os.hostname()); if (!isLocalhost(o)) aliases.add(o) } catch {}   // skipped if not a valid host
+  }
   aliases.delete(host)
   return {
     dir: homeDir(),
@@ -120,22 +142,43 @@ export function loadConfig() {
     routes: file.routes || {},                        // host -> "ip:port" overrides
     discoveryPort: Number(process.env.AGENTLINK_DISCOVERY_PORT || file.discoveryPort || 0) || undefined,
     discovery: process.env.AGENTLINK_DISCOVERY ? process.env.AGENTLINK_DISCOVERY !== '0' : file.discovery !== false,
-    ttlMs: (file.ttlDays || 7) * 86400_000,
+    ttlMs: Math.min(Number(file.ttlDays) > 0 ? Number(file.ttlDays) * 86400_000 : 7 * 86400_000, MAX_TTL_MS),
     autoAliases,
   }
 }
 
 /** Merge `obj` into config.json. @param {import('./types.js').ConfigFile} obj */
 export function writeConfig(obj) {
-  fs.mkdirSync(homeDir(), { recursive: true, mode: 0o700 })
-  let cur = {}
-  try { cur = JSON.parse(fs.readFileSync(configPath(), 'utf8')) } catch {}
-  const next = { ...cur, ...obj }
+  ensureHomeDir()
+  const next = { ...readConfigFile(), ...obj }
   fs.writeFileSync(configPath(), JSON.stringify(next, null, 2) + '\n', { mode: 0o600 })
   return next
 }
 
-export const newSecret = () => crypto.randomBytes(24).toString('base64url')
+/** config.json's contents, or null if there is none; a file that exists but can't be read or parsed
+ * throws (never treated as empty, which would silently replace the network secret). */
+/** @returns {import('./types.js').ConfigFile | null} */
+export function readConfigFile() {
+  let text
+  try { text = fs.readFileSync(configPath(), 'utf8') } catch (e) {
+    if (/** @type {NodeJS.ErrnoException} */ (e).code === 'ENOENT') return null
+    throw new Error(`cannot read ${configPath()}: ${errMsg(e)}`)
+  }
+  try {
+    const v = JSON.parse(text)
+    if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('not a JSON object')
+    return v
+  } catch (e) { throw new Error(`bad config ${configPath()}: ${errMsg(e)} — fix the file (or delete it to start over)`) }
+}
 
-/** The message of a caught value (which may not be an Error). @param {unknown} e */
-export const errMsg = e => e instanceof Error ? e.message : String(e)
+/** A random network secret (base64url, never starting with "-" so it can't be read as a CLI flag). */
+export function newSecret() {
+  for (;;) { const s = crypto.randomBytes(24).toString('base64url'); if (!s.startsWith('-')) return s }
+}
+
+/** The message of a caught value (which may not be an Error), with a network cause code if any. @param {unknown} e */
+export const errMsg = e => {
+  if (!(e instanceof Error)) return String(e)
+  const code = /** @type {any} */ (e).cause?.code
+  return code && !e.message.includes(code) ? `${e.message} (${code})` : e.message
+}

@@ -13,6 +13,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         node: [22, 24]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -26,6 +27,7 @@ jobs:
 
   install-smoke:
     # Runs the real installer against the packed package, in a throwaway HOME.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -50,6 +52,19 @@ jobs:
           grep -q "mcp add -s user agentlink" "$HOME/claude-calls.log"
           "$RUNNER_TEMP/npm/bin/agentlink" status
           "$RUNNER_TEMP/npm/bin/agentlink" send someone "smoke test"
+      - name: Install with the private Node runtime
+        # what machines without Node 22.13+ get: the runtime must stay off PATH and the home private
+        run: |
+          export HOME="$RUNNER_TEMP/home2" SHELL=/bin/bash
+          mkdir -p "$HOME" "$RUNNER_TEMP/bin"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+          AGENTLINK_PRIVATE_NODE=1 AGENTLINK_PKG="$TGZ" AGENTLINK_NO_SERVICE=1 AGENTLINK_DISCOVERY=0 sh install.sh | tee out.txt
+          grep -q "Join my agentlink network" out.txt
+          test "$(ls -ld "$HOME/.agentlink" | cut -c1-10)" = drwx------
+          "$HOME/.agentlink/bin/agentlink" status
+          test ! -e "$HOME/.agentlink/bin/node"
+          # a new shell (rc written by setup) finds agentlink, but node is still the system one
+          bash -c '. ~/.bashrc 2>/dev/null || . ~/.bash_profile; test "$(command -v agentlink)" = "$HOME/.agentlink/bin/agentlink"; test "$(command -v node)" != "$HOME/.agentlink/node/bin/node"'
 
   shellcheck:
     runs-on: ubuntu-latest
