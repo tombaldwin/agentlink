@@ -136,7 +136,7 @@ test('roster: only earlier machines can remove, and a removed machine cannot fig
   const sign = rec => ({ ...rec, sig: signRecord(c.key, rec) })
   const attack = [
     sign({ type: 'remove', fp: b.fp, at: rm.at - 1, by: c.fp, dk: newDiscoveryKey(), seen: [] }),
-    sign({ type: 'add', host: 'e.local', fp: e.fp, cert: certDer(e.cert), at: rm.at - 1, by: c.fp }),
+    sign({ type: 'add', host: 'e.local', fp: e.fp, cert: certDer(e.cert), at: rm.at, by: c.fp }),
   ]
   for (const list of [attack, [...attack].reverse()]) {
     const x = new Roster({ net: r.net, records: [] })
@@ -187,7 +187,29 @@ test('roster: concurrent removals all stand, and the result never depends on arr
   }
 })
 
-test('roster: a member can sign any number of records (only non-members are capped)', () => {
+test('roster: a removed machine cannot fill the roster with records that never count', () => {
+  const [a, b, r, y] = Array.from({ length: 4 }, () => newIdentity())
+  const ro = Roster.genesis(a, 'a.local')
+  ro.add(a, 'b.local', b.cert); ro.add(a, 'r.local', r.cert)
+  const rm = ro.remove(a, r.fp)
+  const before = ro.records.length
+  // r adds a throwaway key y (backdated), and y signs junk
+  const addY = { type: 'add', host: 'y.local', fp: y.fp, cert: certDer(y.cert), at: rm.at, by: r.fp }   // unseen by the removal
+  const junk = [{ ...addY, sig: signRecord(r.key, addY) }]
+  for (let i = 0; i < 50; i++) {
+    const z = newIdentity()
+    const rec = { type: 'add', host: `z${i}.local`, fp: z.fp, cert: certDer(z.cert), at: rm.at + i, by: y.fp }
+    junk.push({ ...rec, sig: signRecord(y.key, rec) })
+  }
+  ro.merge(junk)
+  assert.equal(ro.records.length, before + 1, 'none of it is kept, apart from the add that marks y as dropped')
+  assert.ok(ro.dropped.has(y.fp) && !ro.members.has(y.fp))
+  const c = newIdentity()
+  ro.add(b, 'c.local', c.cert)
+  assert.ok(ro.members.has(c.fp), 'members can still add machines')
+})
+
+test('roster: a member can sign any number of records ', () => {
   const a = newIdentity(), r = Roster.genesis(a, 'a.local')
   const ids = Array.from({ length: 520 }, () => newIdentity())
   ids.forEach((x, i) => r.add(a, `h${i}.local`, x.cert))

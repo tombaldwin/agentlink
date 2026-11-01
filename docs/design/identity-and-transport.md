@@ -215,9 +215,14 @@ So:
 - **Adds by a removed machine count only if every removal of it lists them in `seen`** (`recId`
   ids of the target's records the remover had). Backdated or concurrent adds don't count, and
   their keys are marked `dropped`: messages from them are rejected rather than retried.
-- **Records are kept even when they don't count.** That way a node that receives them later
-  computes the same thing. Records are dropped only when their signer has no chain of adds from the
-  founder, and keys that aren't members keep at most 500 records each.
+- **Records are kept only if they could ever count.** That means everything signed by current
+  members (who are trusted), and of what removed machines signed, only what counts: adds every
+  remover had seen, and the first standing removal per target. Nothing else from a removed or
+  dropped key can ever count, whatever arrives later (removals only accumulate), so discarding it
+  doesn't make nodes disagree, and a removed machine can't fill the roster. Up to 50 adds per
+  removed machine that didn't count are also kept, so those keys stay known as dropped.
+- **Before authentication,** a client can submit only a chain of adds that ends at a current
+  member and passes through no removed or dropped key.
 - **Trade-offs.** The founding machine can't be removed, so if it's lost, start a new network. A
   compromised machine could backdate the adds it makes while still a member, giving those machines
   an earlier rank, but only up to its own: every machine ranked before it can still remove them.

@@ -25,7 +25,7 @@ import { normHost } from './config.js'
 const MAX_RECORDS = 5000
 const MAX_FUTURE_MS = 3600_000     // a record stamped further ahead than this is refused (bad clock)
 const MAX_SEEN = 2000
-const MAX_PER_SIGNER = 500             // records kept per signing key (a removed machine can't flood the roster)
+const MAX_DROPPED = 50                 // adds that didn't count, kept per removed machine (so their keys stay known as dropped)
 // a replaced discovery key still opens other members' gates for this long, so a machine that was
 // offline during a removal can catch up; after that it needs a new invite
 export const DK_GRACE_MS = 30 * 86400_000
@@ -140,9 +140,9 @@ export class Roster {
    * - The discovery key is the newest one introduced by a machine that is still a member, so a
    *   key made by a removed machine is never current.
    *
-   * Records signed by keys outside the network (no chain of adds from the founder) are dropped.
-   * The rest are kept, even when they don't count, so a node that receives them later reaches the
-   * same result; a key that isn't a member keeps at most MAX_PER_SIGNER of them.
+   * Records are kept if they could ever count: everything signed by current members, and what
+   * counts of what removed machines signed. Anything else can never count, whatever arrives later
+   * (removals only accumulate), so every node reaches the same result.
    */
   replay() {
     this.records.sort((a, b) => a.at - b.at || (a.sig < b.sig ? -1 : a.sig > b.sig ? 1 : 0))
@@ -203,8 +203,6 @@ export class Roster {
     const nameHolder = new Map()
     /** @type {Set<string>} keys whose add didn't count because their adder was removed first */
     const dropped = new Set()
-    /** @type {Set<string>} keys with a chain of adds from the founder (whether or not they count) */
-    const chained = new Set()
     let rank = 0
     for (const r of this.records) {
       if (r.type !== 'add') continue
@@ -212,12 +210,11 @@ export class Roster {
       if (!c) continue
       const genesis = r.by === r.fp
       if (genesis) {
-        if (r.fp !== this.net || chained.size || !ok(c.publicKey, r)) continue
+        if (r.fp !== this.net || ranked.size || !ok(c.publicKey, r)) continue
       } else {
         const s = ranked.get(r.by)
         if (!s || !ok(s.publicKey, r)) continue
       }
-      chained.add(r.fp)
       if (ranked.has(r.fp)) continue
       if (!genesis && !counts(r.by, r)) { dropped.add(r.fp); continue }
       const holder = nameHolder.get(c.host)
@@ -251,16 +248,30 @@ export class Roster {
       if (standing) { dks.push(r.dk); dkAt.push(r.at) }
     }
 
-    // keep what's signed by keys in the network; at most MAX_PER_SIGNER each from keys that are no
-    // longer (or never became) members, so a removed machine can't flood the roster
+    // Keep every record signed by a current member (members are trusted), and of what removed
+    // machines signed only what counts: adds every remover had seen, and the first standing removal
+    // per target. Nothing else from a removed or dropped key can ever count, whatever arrives later,
+    // so dropping it keeps every node's result the same, and a removed machine can't fill the roster.
+    // Adds that didn't count are kept too (at most MAX_DROPPED per removed machine), so their keys
+    // stay known as dropped: messages from them are refused instead of retried.
+    /** @type {Set<string>} */
+    const firstRemove = new Set()
     /** @type {Map<string, number>} */
-    const per = new Map()
+    const droppedKept = new Map()
     const kept = this.records.filter(r => {
-      if (!chained.has(r.by)) return false
       if (members.has(r.by)) return true
-      const n = (per.get(r.by) || 0) + 1
-      per.set(r.by, n)
-      return n <= MAX_PER_SIGNER
+      if (!ranked.has(r.by)) return r.by === r.fp && r.fp === this.net          // (the founder's genesis)
+      if (r.type === 'add') {
+        if (ranked.get(r.fp)?.by === r.by && counts(r.by, r)) return true
+        if (!dropped.has(r.fp) || ranked.has(r.fp)) return false
+        const n = (droppedKept.get(r.by) || 0) + 1
+        droppedKept.set(r.by, n)
+        return n <= MAX_DROPPED
+      }
+      const t = ranked.get(r.fp), s = /** @type {Member} */ (ranked.get(r.by))
+      if (!t || s.rank >= t.rank || !this.verified.has(r.sig) || firstRemove.has(`${r.by} ${r.fp}`)) return false
+      firstRemove.add(`${r.by} ${r.fp}`)
+      return true
     })
     Object.assign(this, { members, byHost, removed, dropped, dks, dkAt, records: kept, sigs: new Set(kept.map(r => r.sig)) })
   }

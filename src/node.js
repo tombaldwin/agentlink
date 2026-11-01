@@ -729,20 +729,21 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
   }
 
   /**
-   * The add records for `fp`, then for whoever signed that, and so on (at most a few): what an
-   * unknown client may submit before it has proved who it is.
+   * The add records for `fp`, then for whoever signed that, and so on (at most a few), ending at a
+   * current member: what an unknown client may submit before it has proved who it is.
    * @param {unknown} records @param {string} fp
    */
   function joinChain(records, fp) {
     const adds = Array.isArray(records) ? records.filter(r => r?.type === 'add').slice(0, MAX_JOIN_CHAIN * 50) : []
     const out = []
     for (let want = fp; out.length < MAX_JOIN_CHAIN && !roster.members.has(want);) {
+      if (roster.removed.has(want) || roster.dropped.has(want)) return []   // a chain through a removed machine counts for nothing
       const r = adds.find(x => x.fp === want)
       if (!r || typeof r.by !== 'string' || r.by === want) break
       out.push(r)
       want = r.by
     }
-    return out
+    return out.length && roster.members.has(String(out[out.length - 1].by)) ? out : []
   }
 
   // ---------- HTTPS ----------
