@@ -8,9 +8,9 @@
   "files": ["bin", "src", "install.sh", "README.md", "LICENSE", "SECURITY.md"],
   "engines": { "node": ">=22.13" },
   "os": ["darwin", "linux"],
-  "repository": { "type": "git", "url": "git+https://github.com/polyhub/agentlink.git" },
-  "homepage": "https://github.com/polyhub/agentlink#readme",
-  "bugs": { "url": "https://github.com/polyhub/agentlink/issues" },
+  "repository": { "type": "git", "url": "git+https://github.com/tombaldwin/agentlink.git" },
+  "homepage": "https://github.com/tombaldwin/agentlink#readme",
+  "bugs": { "url": "https://github.com/tombaldwin/agentlink/issues" },
   "scripts": {
     "test": "npm run test:unit && npm run test:e2e",
     "test:unit": "node --no-warnings --test test/unit/*.test.js",

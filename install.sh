@@ -1,7 +1,7 @@
 #!/bin/sh
 # agentlink installer — wake-on-message networking for AI agents (Claude Code and others)
 #
-#   New network:   curl -fsSL https://raw.githubusercontent.com/polyhub/agentlink/main/install.sh | sh
+#   New network:   curl -fsSL https://raw.githubusercontent.com/tombaldwin/agentlink/main/install.sh | sh
 #   Join network:  paste the line printed by `agentlink invite` on a machine that's already set up
 #
 # Installs (no sudo): a private Node.js runtime if a recent one isn't present, the agentlink
