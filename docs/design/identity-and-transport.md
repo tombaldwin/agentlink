@@ -1,6 +1,6 @@
 # Design: per-machine identity and pinned TLS
 
-Status: accepted, for 0.1.0 (before first public release)
+Status: implemented, for 0.1.0 (before first public release)
 
 ## Why
 

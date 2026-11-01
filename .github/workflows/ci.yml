@@ -66,6 +66,22 @@ jobs:
           test ! -e "$HOME/.agentlink/bin/node"
           # a new shell (rc written by setup) finds agentlink, but node is still the system one
           bash -c '. ~/.bashrc 2>/dev/null || . ~/.bash_profile; test "$(command -v agentlink)" = "$HOME/.agentlink/bin/agentlink"; test "$(command -v node)" != "$HOME/.agentlink/node/bin/node"'
+      - name: Join the first network with its invite line (the stock curl, pinned to the inviter's key)
+        run: |
+          INVITE=$(HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/npm/bin/agentlink" invite | grep -o 'curl -fsSL -k --pinnedpubkey "[^"]*" "https://[^"]*"' | head -1)
+          test -n "$INVITE"
+          # the inviter's name may not resolve on a runner: reach it on 127.0.0.1 instead
+          INVITE=$(printf '%s' "$INVITE" | sed -E 's#https://[^/]+/#https://127.0.0.1:7777/#')
+          export HOME="$RUNNER_TEMP/home3" SHELL=/bin/bash AGENTLINK_PORT=7779 AGENTLINK_HOST=joiner
+          mkdir -p "$HOME"
+          export PATH="$RUNNER_TEMP/bin:$PATH" NPM_CONFIG_PREFIX="$RUNNER_TEMP/npm3" AGENTLINK_NO_SERVICE=1 AGENTLINK_DISCOVERY=0
+          eval "$INVITE" | sh | tee out.txt
+          grep -q "Joined the network" out.txt
+          "$RUNNER_TEMP/npm3/bin/agentlink" status | grep -q '"host": "joiner.local"'
+          # a wrong key is refused before anything is downloaded
+          if curl -fsSL -k --pinnedpubkey "sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" "https://127.0.0.1:7777/join/install?t=x"; then
+            echo "a wrong pinned key was accepted"; exit 1
+          fi
 
   shellcheck:
     runs-on: ubuntu-latest

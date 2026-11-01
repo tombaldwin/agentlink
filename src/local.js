@@ -1,76 +1,73 @@
 // Client for the local node's loopback API, plus auto-start of the node.
+//
+// The local API runs over TLS on 127.0.0.1, pinned to this machine's own certificate, and the
+// client presents that same certificate: only a process that can read this machine's private key
+// (this user) gets in, and a process squatting on the port is refused at the handshake.
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
-import { authHeader, verifyResponse } from './crypto.js'
+import { pinnedRequest, pinnedRaw, PinError } from './tls.js'
 import { ensureHomeDir, errMsg } from './config.js'
 import { BIN, nodePath } from './claude.js'
 
 const sleep = (/** @type {number} */ ms) => new Promise(r => setTimeout(r, ms))
 
 export class Local {
-  /** @param {import('./types.js').Config} cfg */
+  /** @param {Pick<import('./types.js').Config, 'identity' | 'port' | 'dir'>} cfg */
   constructor(cfg) {
     this.cfg = cfg
-    this.base = `http://127.0.0.1:${cfg.port}`
+    this.addr = `127.0.0.1:${cfg.port}`
+    this.trust = [{ pem: cfg.identity.cert, fp: cfg.identity.fp }]
+  }
+
+  /** @param {unknown} e */
+  wrap(e) {
+    if (e instanceof PinError || /** @type {any} */ (e)?.code === 'EPROTO') return new Error(`port ${this.cfg.port} is not answered by this machine's agentlink node`)
+    return new Error(`cannot reach the agentlink node on port ${this.cfg.port}: ${errMsg(e)}`)
   }
 
   /**
-   * Signed request to the local node's API; throws with the node's error message on failure.
-   * The reply must carry the node's signature (bound to this request), so a process squatting on
-   * the port without the secret can't read sends, fake receipts or answer for the node.
+   * Request to the local node's API; throws with the node's error message on failure.
    * @param {'GET'|'POST'} method
    * @param {string} p
    * @param {object} [obj]
    * @returns {Promise<any>}
    */
   async req(method, p, obj, query = '') {
-    const body = obj === undefined ? '' : JSON.stringify(obj)
-    const auth = authHeader(this.cfg.secret, method, p, body)
-    let res
+    let r
     try {
-      res = await fetch(this.base + p + query, {
-        method,
-        headers: { 'content-type': 'application/json', 'x-agentlink-auth': auth },
-        body: method === 'GET' ? undefined : body,
-        signal: AbortSignal.timeout(15_000),
-      })
-    } catch (e) { throw new Error(`cannot reach the agentlink node on port ${this.cfg.port}: ${errMsg(e)}`) }
-    const text = await res.text()
-    if (!verifyResponse(this.cfg.secret, auth, res.headers.get('x-agentlink-node') || '', text, res.headers.get('x-agentlink-sig'))) {
-      if (res.status === 401) throw new Error(`the agentlink node on port ${this.cfg.port} rejected our credentials (it was started with a different secret; re-run agentlink setup)`)
-      throw new Error(`port ${this.cfg.port} is not answered by this machine's agentlink node`)
-    }
+      r = await pinnedRequest({ addr: this.addr, method, path: p + query, body: obj === undefined ? '' : JSON.stringify(obj), identity: this.cfg.identity, trust: this.trust, timeout: 15_000 })
+    } catch (e) { throw this.wrap(e) }
     /** @type {any} */
     let data = {}
-    try { data = text ? JSON.parse(text) : {} } catch {}
-    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+    try { data = r.text ? JSON.parse(r.text) : {} } catch {}
+    if (r.status < 200 || r.status >= 300) throw new Error(data.error || `HTTP ${r.status}`)
     return data
   }
 
-  /** Unauthenticated liveness check (anything could answer it: use verify() before trusting it). */
-  /** @returns {Promise<import('./types.js').Health | null>} */
+  /**
+   * Is a node running on the port? null: nothing is listening. { foreign: true }: something that
+   * isn't this machine's node (another network's node, another user's, or not agentlink at all).
+   * @returns {Promise<import('./types.js').Health | { foreign: true } | null>}
+   */
   async health() {
     try {
-      const r = await fetch(this.base + '/health', { signal: AbortSignal.timeout(1000) })
-      return r.ok ? await r.json() : null
-    } catch { return null }
-  }
-
-  /** Is the process on the port really a node holding our secret? */
-  async verify() {
-    try { await this.req('GET', '/local/whoami'); return true } catch { return false }
+      const r = await pinnedRequest({ addr: this.addr, path: '/health', identity: this.cfg.identity, trust: this.trust, timeout: 1000 })
+      return r.status === 200 ? JSON.parse(r.text) : { foreign: true }
+    } catch (e) {
+      const code = /** @type {any} */ (e)?.code
+      if (code === 'ECONNREFUSED' || code === 'ECONNRESET') return null
+      if (e instanceof PinError || code === 'EPROTO') return { foreign: true }
+      return null
+    }
   }
 
   /** Make sure a node is running on this machine (start one in the background if not). */
   async ensureNode() {
     const h = await this.health()
-    if (!h && fs.existsSync(path.join(this.cfg.dir, 'disabled'))) throw new Error('agentlink is uninstalled on this machine (run `agentlink setup` to re-enable)')
-    if (h) {
-      if (h.net !== this.cfg.net) throw new Error(`port ${this.cfg.port} is used by an agentlink node on a different network`)
-      if (!await this.verify()) throw new Error(`port ${this.cfg.port} is used by something that is not this network's agentlink node (pid ${h.pid})`)
-      return h
-    }
+    if (h && 'foreign' in h) throw new Error(`port ${this.cfg.port} is used by something that is not this machine's agentlink node`)
+    if (h) return h
+    if (fs.existsSync(path.join(this.cfg.dir, 'disabled'))) throw new Error('agentlink is uninstalled on this machine (run `agentlink setup` to re-enable)')
     ensureHomeDir(this.cfg.dir)
     const out = fs.openSync(path.join(this.cfg.dir, 'node.log'), 'a', 0o600)
     let exited = false, spawnErr = ''
@@ -85,11 +82,11 @@ export class Local {
     for (let i = 0; i < 60; i++) {
       await sleep(100)
       const h2 = await this.health()
-      if (h2) return h2
+      if (h2 && !('foreign' in h2)) return h2
       if (exited && i > 5) break   // it died (lost the race to a node still starting, or failed): one last look below
     }
     const h3 = await this.health()
-    if (h3) return h3
+    if (h3 && !('foreign' in h3)) return h3
     throw new Error(`could not start agentlink node${spawnErr ? ` (${spawnErr})` : ''} (see ${path.join(this.cfg.dir, 'node.log')})`)
   }
 
@@ -101,20 +98,17 @@ export class Local {
    * @param {{ signal?: AbortSignal, poll?: boolean }} [opts] poll: messages are read with the inbox tool, not pushed
    */
   async stream(name, token, onEvent, { signal, poll = false } = {}) {
-    const p = '/local/stream'
-    const auth = authHeader(this.cfg.secret, 'GET', p, '')
-    const res = await fetch(`${this.base}${p}?name=${encodeURIComponent(name)}&token=${encodeURIComponent(token)}${poll ? '&mode=poll' : ''}`, {
-      headers: { 'x-agentlink-auth': auth },
-      signal,
-    })
-    if (!res.ok || !res.body) throw new Error(`stream HTTP ${res.status}`)
-    if (!verifyResponse(this.cfg.secret, auth, res.headers.get('x-agentlink-node') || '', '', res.headers.get('x-agentlink-sig'))) {
-      await res.body.cancel().catch(() => {})
-      throw new Error(`port ${this.cfg.port} is not answered by this machine's agentlink node`)
-    }
+    let res
+    try {
+      ({ res } = await pinnedRaw({
+        addr: this.addr, identity: this.cfg.identity, trust: this.trust, timeout: 0, signal,
+        path: `/local/stream?name=${encodeURIComponent(name)}&token=${encodeURIComponent(token)}${poll ? '&mode=poll' : ''}`,
+      }))
+    } catch (e) { throw /** @type {any} */ (e)?.name === 'AbortError' ? e : this.wrap(e) }
+    if (res.statusCode !== 200) { res.destroy(); throw new Error(`stream HTTP ${res.statusCode}`) }
     const dec = new TextDecoder()
     let buf = ''
-    for await (const chunk of res.body) {
+    for await (const chunk of res) {
       buf += dec.decode(chunk, { stream: true })
       let i
       while ((i = buf.indexOf('\n\n')) >= 0) {

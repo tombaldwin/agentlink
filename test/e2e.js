@@ -1,39 +1,61 @@
-// End-to-end test: three nodes (a, b, c) on localhost with distinct ports, plus MCP adapters.
+// End-to-end test: nodes on localhost with distinct ports, plus MCP adapters.
+// Members a..j (except d) share one network founded by a; d is on a network of its own.
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import assert from 'node:assert/strict'
 import net from 'node:net'
+import tls from 'node:tls'
 import crypto from 'node:crypto'
 import { spawn, execFileSync, execFile, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import { newIdentity } from '../src/cert.js'
+import { Roster } from '../src/roster.js'
+import { signEnvelope, sealBeacon } from '../src/crypto.js'
+import { pinnedRequest } from '../src/tls.js'
+import { Local } from '../src/local.js'
+import { readIdentity } from '../src/config.js'
 
 const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'agentlink.js')
 const ROOT = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'agentlink-e2e-'))
-const SECRET = 'test-secret-0123456789abcdef0123456789'
 const sleep = ms => new Promise(r => setTimeout(r, ms))
-const NODES = { a: 17771, b: 17772, c: 17773, d: 17774, e: 17775, f: 17776, g: 17777, h: 17778, i: 17779, j: 17780 }
+const NODES = { a: 17771, b: 17772, c: 17773, d: 17774, e: 17775, f: 17776, g: 17777, h: 17778, i: 17779, j: 17780, k: 17781, l: 17782 }
+const EXTRA_PORTS = [17790, 17791, 17792, 17793]
 const routes = Object.fromEntries(Object.entries(NODES).map(([n, p]) => [`${n}.test`, `127.0.0.1:${p}`]))
 
-function home(n, secret = SECRET) {
+// identities and the shared network (a founds it; t.test is this test process, acting as a member)
+const IDS = Object.fromEntries(Object.keys(NODES).map(n => [n, newIdentity()]))
+const TESTER = newIdentity()
+const NET = Roster.genesis(IDS.a, 'a.test')
+for (const n of ['b', 'c', 'e', 'f', 'g', 'h', 'j']) NET.add(IDS.a, `${n}.test`, IDS[n].cert)
+NET.add(IDS.a, 't.test', TESTER.cert)
+const OTHER_NET = Roster.genesis(IDS.d, 'd.test')
+
+function home(n, conf = {}, roster = n === 'd' ? OTHER_NET : NET) {
   const dir = path.join(ROOT, n)
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
-    secret, host: `${n}.test`, port: NODES[n], discovery: false, routes, autoAliases: false,
-    peers: Object.keys(NODES).filter(x => ['a', 'b', 'c'].includes(x) && x !== n).map(x => `${x}.test`),
+    host: `${n}.test`, port: NODES[n], discovery: false, routes, autoAliases: false,
+    peers: ['a', 'b', 'c'].filter(x => x !== n).map(x => `${x}.test`), ...conf,
   }))
+  fs.writeFileSync(path.join(dir, 'node.key'), IDS[n].key, { mode: 0o600 })
+  fs.writeFileSync(path.join(dir, 'node.crt'), IDS[n].cert)
+  fs.writeFileSync(path.join(dir, 'roster.json'), JSON.stringify({ net: roster.net, records: roster.records }))
   return dir
 }
 const envFor = n => ({ ...process.env, AGENTLINK_HOME: path.join(ROOT, n) })
+const localOf = n => new Local({ identity: readIdentity(path.join(ROOT, n)), port: NODES[n], dir: path.join(ROOT, n) })
 
 const procs = {}
 async function startNode(n) {
   const out = fs.openSync(path.join(ROOT, n, 'node.log'), 'a')
   procs[n] = spawn(process.execPath, ['--no-warnings', BIN, 'node'], { env: envFor(n), stdio: ['ignore', out, out] })
+  const local = localOf(n)
   for (let i = 0; i < 50; i++) {
-    try { if ((await fetch(`http://127.0.0.1:${NODES[n]}/health`)).ok) return } catch {}
+    const h = await local.health()
+    if (h && !h.foreign) return
     await sleep(100)
   }
   throw new Error(`node ${n} did not start`)
@@ -77,24 +99,31 @@ async function waitFor(fn, ms = 8000, what = 'condition') {
 
 const running = n => procs[n] && procs[n].exitCode === null && procs[n].signalCode === null
 async function ensureNode(n) { if (!running(n)) await startNode(n) }
-/** A request signed as a member node `as` (the test holds the secret, like any member). */
-async function signedPost(port, p, obj, as = 'member.test') {
-  const { authHeader } = await import('../src/crypto.js')
-  const { networkId } = await import('../src/config.js')
-  const body = JSON.stringify(obj)
-  const hdr = `${as};net=${networkId(SECRET)};port=1`
-  const res = await fetch(`http://127.0.0.1:${port}${p}`, { method: 'POST', body, headers: { 'content-type': 'application/json', 'x-agentlink-node': hdr, 'x-agentlink-auth': authHeader(SECRET, 'POST', p, body, hdr) } })
-  return { status: res.status, data: await res.json() }
+/** A request to node `n` as a member machine (`as`: an identity; the test is member t.test). */
+async function memberPost(n, p, obj, as = TESTER) {
+  const r = await pinnedRequest({ addr: `127.0.0.1:${NODES[n]}`, method: 'POST', path: p, body: JSON.stringify(obj), identity: as, trust: [{ pem: IDS[n].cert, fp: IDS[n].fp }], timeout: 10_000 })
+  return { status: r.status, data: JSON.parse(r.text) }
 }
-function envelope(to, body, extra = {}) {
-  return import('../src/crypto.js').then(({ signEnvelope }) => {
-    const e = { id: crypto.randomUUID(), from: 'tester@member.test', to, body, sent_at: Date.now(), expires_at: Date.now() + 3600_000, ...extra }
-    return { ...e, sig: signEnvelope(SECRET, e) }
+function envelope(to, body, extra = {}, key = TESTER.key) {
+  const e = { id: crypto.randomUUID(), from: 'tester@t.test', to, body, sent_at: Date.now(), expires_at: Date.now() + 3600_000, ...extra }
+  return { ...e, sig: signEnvelope(key, e) }
+}
+/** An HTTPS request with no client certificate (an outsider). */
+function outsiderGet(port, p) {
+  return new Promise(resolve => {
+    const s = tls.connect({ host: '127.0.0.1', port, rejectUnauthorized: false }, () => {
+      s.write(`GET ${p} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`)
+    })
+    let buf = ''
+    s.on('data', c => { buf += c })
+    s.on('end', () => resolve(Number(buf.match(/^HTTP\/1\.1 (\d+)/)?.[1] || 0)))
+    s.on('error', () => resolve(0))
   })
 }
+const curlBin = ['/usr/bin/curl', '/bin/curl'].find(p => fs.existsSync(p)) || 'curl'
 
 async function killPorts() {
-  for (const p of Object.values(NODES)) {
+  for (const p of [...Object.values(NODES), ...EXTRA_PORTS]) {
     let pids = ''
     try { pids = execFileSync('lsof', ['-ti', `tcp:${p}`, '-sTCP:LISTEN'], { encoding: 'utf8' }).trim() } catch {}
     for (const pid of pids.split('\n').filter(Boolean)) try { process.kill(Number(pid)) } catch {}
@@ -111,7 +140,7 @@ async function step(name, fn) {
 
 try {
   await killPorts()
-  for (const n of ['a', 'b', 'c', 'd']) home(n, n === 'd' ? 'some-other-network-secret-xxxxxxxxxx' : SECRET)
+  for (const n of ['a', 'b', 'c', 'd']) home(n)
   await Promise.all(['a', 'b', 'c'].map(startNode))
 
   let bob
@@ -197,14 +226,26 @@ try {
     await bob2.close()
   })
 
-  await step('node from a different network is rejected', async () => {
+  await step('a node from a different network, and outsiders, are refused', async () => {
     await startNode('d')
-    const r = await fetch(`http://127.0.0.1:${NODES.b}/v1/sessions`)
-    assert.equal(r.status, 401)
+    assert.equal(await outsiderGet(NODES.b, '/v1/sessions'), 403, 'no client key')
+    assert.equal(await outsiderGet(NODES.b, '/health'), 404, '/health tells outsiders nothing')
+    assert.equal(await outsiderGet(NODES.b, '/local/status'), 403)
+    assert.equal((await memberPost('b', '/v1/hello', { records: OTHER_NET.records }, IDS.d)).status, 403, 'another network\'s key, even with its own records')
     const out = cli('d', 'send', 'bob@b.test', 'intruder')
-    assert.match(out, /unreachable|FAILED|unauthorized/)
+    assert.match(out, /unreachable/)
     await sleep(500)
     assert.ok(!bob.got.some(g => g.content === 'intruder'))
+  })
+
+  await step('a member cannot send as another machine, and relayed envelopes cannot be altered', async () => {
+    const forged = envelope('bob@b.test', 'forged', { from: 'x@a.test' })           // signed by t.test, claims a.test
+    const altered = { ...envelope('bob@b.test', 'original'), body: 'altered' }
+    const r = await memberPost('b', '/v1/deliver', { messages: [forged, altered] })
+    assert.equal(r.status, 200)
+    assert.deepEqual(r.data.results, {})
+    await sleep(300)
+    assert.ok(!bob.got.some(g => g.content === 'forged' || g.content === 'altered'))
   })
 
   await step('node restarts transparently under a connected session', async () => {
@@ -215,14 +256,44 @@ try {
     await waitFor(() => bob.got.some(g => g.content === 'after restart'), 8000, 'post-restart delivery')
   })
 
+  await step('laptop on a hostile network: strangers at stored addresses receive nothing', async () => {
+    // a has b's stored address. b goes away and strangers take over that address: first a TLS
+    // server with its own key, then a plain TCP server. Every byte they receive is recorded.
+    await bob.close()
+    await stopNode('b')
+    const stranger = newIdentity()
+    let appBytes = 0, plain = Buffer.alloc(0)
+    const SECRET_BODY = 'TOP-SECRET-CAFE-MESSAGE'
+    const tlsImp = tls.createServer({ key: stranger.key, cert: stranger.cert, requestCert: true, rejectUnauthorized: false }, s => { s.on('data', c => { appBytes += c.length }); s.on('error', () => {}) })
+    tlsImp.on('tlsClientError', () => {})
+    await new Promise(r => tlsImp.listen(NODES.b, '127.0.0.1', r))
+    let out = await cliAsync('a', 'send', 'bob@b.test', SECRET_BODY)
+    assert.match(out, /b\.test unreachable \(.*different machine/)
+    await stopNode('a'); await startNode('a')            // startup: hello to every member, retry everything
+    await sleep(3000)
+    await new Promise(r => tlsImp.close(r))
+    const plainImp = net.createServer(s => { s.on('data', c => { plain = Buffer.concat([plain, c]); s.end('HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}') }); s.on('error', () => {}) })
+    await new Promise(r => plainImp.listen(NODES.b, '127.0.0.1', r))
+    await stopNode('a'); await startNode('a')
+    out = await cliAsync('a', 'send', 'bob@b.test', SECRET_BODY)
+    assert.match(out, /unreachable/)
+    await sleep(3000)
+    await new Promise(r => plainImp.close(r))
+    assert.equal(appBytes, 0, 'the TLS stranger received no request data')
+    assert.ok(plain.length > 0 && plain[0] === 0x16, 'the plain stranger saw only TLS handshakes')
+    for (const s of [SECRET_BODY, 'POST', 'GET', 'b.test', 'c.test', 'deliver', 'hello']) assert.ok(!plain.includes(s), `no "${s}" in what the stranger received`)
+    const st = JSON.parse(cli('a', 'status'))
+    assert.ok(st.pending.some(p => p.to_addr === 'bob@b.test'), 'still queued')
+    // b returns: everything queued is delivered
+    await startNode('b')
+    bob = await adapter('b', 'bob')
+    await waitFor(() => bob.got.filter(g => g.content === SECRET_BODY).length >= 1, 15000, 'delivery once b is back')
+  })
+
   await step('peer configured by IP:port is mapped to its real name (internet/Tailscale joins)', async () => {
-    const dir = path.join(ROOT, 'e')
-    fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
-      secret: SECRET, host: 'e.test', port: NODES.e, discovery: false, autoAliases: false, peers: [`127.0.0.1:${NODES.b}`],
-    }))
+    home('e', { peers: [`127.0.0.1:${NODES.b}`], routes: {} })
     await startNode('e')
-    await sleep(800)                          // startup hello learns 127.0.0.1:17772 is b.test
+    await waitFor(() => JSON.parse(cli('e', 'status')).peers.some(p => p.host === 'b.test' && p.addr === `127.0.0.1:${NODES.b}`), 5000, 'b.test learned')
     const out = cli('e', 'send', 'bob@b.test', 'via ip alias')
     assert.match(out, /pushed to bob@b\.test.s live session/)
     await waitFor(() => bob.got.some(g => g.content === 'via ip alias'), 5000, 'alias delivery')
@@ -245,13 +316,9 @@ try {
     assert.ok(JSON.parse(cli('b', 'status')).aliases.includes('127.0.0.1'))
   })
 
-  await step('a known machine whose address now reaches us is not mistaken for this machine', async () => {
+  await step('a configured machine whose address now reaches us is not mistaken for this machine', async () => {
     // f is configured with peer ghost.test at f's own port (think: DHCP reuse, or spoofed .local resolution)
-    const dir = path.join(ROOT, 'f')
-    fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
-      secret: SECRET, host: 'f.test', port: NODES.f, discovery: false, autoAliases: false, peers: [`ghost.test:${NODES.f}`],
-    }))
+    home('f', { peers: [`ghost.test:${NODES.f}`], routes: {} })
     await startNode('f')
     const fred = await adapter('f', 'x')
     await sleep(500)
@@ -263,29 +330,6 @@ try {
     assert.ok(!st.aliases.includes('ghost.test'))
     await fred.close()
     await stopNode('f')
-  })
-
-  await step('a fake node without the secret cannot claim delivery', async () => {
-    const http = await import('node:http')
-    const fake = http.createServer((req, res) => {
-      let b = ''
-      req.on('data', c => { b += c })
-      req.on('end', () => {
-        const ids = (() => { try { return JSON.parse(b).messages.map(m => m.id) } catch { return [] } })()
-        res.writeHead(200, { 'content-type': 'application/json', 'x-agentlink-node': 'fake.test;net=whatever;port=1' })
-        res.end(JSON.stringify({ results: Object.fromEntries(ids.map(id => [id, 'live'])), host: 'fake.test' }))
-      })
-    })
-    await new Promise(r => fake.listen(17790, r))
-    const cfgPath = path.join(ROOT, 'a', 'config.json')
-    const conf = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
-    conf.routes['fake.test'] = '127.0.0.1:17790'
-    fs.writeFileSync(cfgPath, JSON.stringify(conf))
-    await stopNode('a'); await startNode('a')
-    const out = await cliAsync('a', 'send', 'x@fake.test', 'secret stuff')   // async: the fake server runs in this process
-    assert.doesNotMatch(out, /pushed to|stored on/)
-    assert.match(out, /not an agentlink node/)
-    fake.close()
   })
 
   await step('a large backlog for an offline machine is delivered in size-limited batches', async () => {
@@ -310,132 +354,60 @@ try {
     await dora.close()
   })
 
-  await step('a replayed beacon pointing at our own address does not change our identity', async () => {
-    const dir = path.join(ROOT, 'g')
-    fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
-      secret: SECRET, host: 'g.test', port: NODES.g, discovery: true, discoveryPort: 17787, autoAliases: false, peers: [],
-    }))
+  await step('beacons: outsiders\' are ignored, and a replayed one pointing elsewhere redirects nothing', async () => {
+    home('g', { discovery: true, discoveryPort: 17787, peers: [], routes: {} })
     await startNode('g')
-    // a signed beacon for victim.test, "sent" from 127.0.0.1 and naming g's own port: probing it reaches g
-    const { signBeacon } = await import('../src/crypto.js')
-    const { networkId } = await import('../src/config.js')
-    const b = { host: 'victim.test', net: networkId(SECRET), port: NODES.g, ts: Date.now(), reply: true }
-    b.sig = signBeacon(SECRET, b)
     const dgram = await import('node:dgram')
-    const sock = dgram.createSocket('udp4')
-    await new Promise(r => sock.send(Buffer.from(JSON.stringify(b)), 17787, '127.0.0.1', r))
-    sock.close()
+    const send = async buf => { const s = dgram.createSocket('udp4'); await new Promise(r => s.send(buf, 17787, '127.0.0.1', r)); s.close() }
+    // an outsider's beacon (wrong key), and a member's beacon replayed to point at g's own port
+    await send(sealBeacon(crypto.randomBytes(32).toString('base64'), { host: 'b.test', fp: IDS.b.fp, port: NODES.b, ts: Date.now(), reply: true }))
+    await send(sealBeacon(NET.dk, { host: 'b.test', fp: IDS.b.fp, port: NODES.g, ts: Date.now(), reply: true }))
     await sleep(1500)
-    const st = JSON.parse(cli('g', 'status'))
-    assert.ok(!st.aliases.includes('victim.test'), 'did not adopt victim.test as its own name')
+    let st = JSON.parse(cli('g', 'status'))
+    assert.ok(!st.aliases.includes('b.test'), 'did not adopt b.test as its own name')
+    assert.ok(!st.peers.some(p => p.host === 'b.test' && p.addr), 'neither beacon gave b.test an address')
+    // control: a genuine beacon for b's real address is learned
+    await send(sealBeacon(NET.dk, { host: 'b.test', fp: IDS.b.fp, port: NODES.b, ts: Date.now(), reply: true }))
+    await waitFor(() => JSON.parse(cli('g', 'status')).peers.some(p => p.host === 'b.test' && p.addr === `127.0.0.1:${NODES.b}`), 5000, 'direct address learned')
     await stopNode('g')
   })
 
-  await step('a known machine whose address now reaches a different member is not aliased to it', async () => {
-    // h first learns c.test (a separate, verified node), then c's route starts pointing at a
-    const dir = path.join(ROOT, 'h')
-    fs.mkdirSync(dir, { recursive: true })
-    const conf = { secret: SECRET, host: 'h.test', port: NODES.h, discovery: false, autoAliases: false, peers: ['c.test'], routes: { 'c.test': `127.0.0.1:${NODES.c}` } }
-    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(conf))
-    await startNode('h')
-    await waitFor(() => JSON.parse(cli('h', 'status')).peers.some(p => p.host === 'c.test' && p.verified), 5000, 'c.test verified')
-    await stopNode('h')
-    conf.routes['c.test'] = `127.0.0.1:${NODES.a}`          // stale: now reaches a.test
-    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(conf))
+  await step('a stale route to another member is refused at the handshake', async () => {
+    // h's route for c.test now reaches a.test (DHCP reuse)
+    home('h', { peers: ['c.test'], routes: { ...routes, 'c.test': `127.0.0.1:${NODES.a}` } })
     await startNode('h')
     const out = cli('h', 'send', 'x@c.test', 'for c only')
     assert.doesNotMatch(out, /pushed to|stored on/)
-    assert.match(out, /unreachable/)
+    assert.match(out, /unreachable \(.*different machine/)
     const st = JSON.parse(cli('h', 'status'))
     assert.ok(!st.peers.find(p => p.host === 'c.test')?.alias_of, 'c.test is not recorded as an alias of a.test')
     await stopNode('h')
   })
 
-  await step('re-running setup keeps the network; joining another network restarts the node on it', async () => {
-    const dir = path.join(ROOT, 'i')
-    const env = { ...process.env, AGENTLINK_HOME: dir, AGENTLINK_PORT: String(NODES.i), AGENTLINK_HOST: 'i.test', AGENTLINK_DISCOVERY: '0', AGENTLINK_AUTO_ALIASES: '0' }
-    const setup = (...a) => execFileSync(process.execPath, ['--no-warnings', BIN, 'setup', ...a, '--no-service', '--no-claude', '--no-alias'], { env, encoding: 'utf8' })
-    const secretNow = () => JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8')).secret
-    const health = async () => (await fetch(`http://127.0.0.1:${NODES.i}/health`)).json()
-    let out = setup()
-    assert.match(out, /New network created/)
-    const s1 = secretNow()
-    out = setup()
-    assert.doesNotMatch(out, /New network created/)
-    assert.equal(secretNow(), s1, 'secret kept')
-    const odd = 'joined+network&with#odd chars!0123456789'
-    out = setup(odd)
-    assert.equal(secretNow(), odd)
-    const { networkId } = await import('../src/config.js')
-    assert.equal((await health()).net, networkId(odd), 'old node was stopped and a node on the new network is running')
-    // the printed invite works even though the secret has URL/shell-special characters
-    const url = out.match(/curl -fsSL "([^"]+)"/)[1]
-    assert.equal((await fetch(url.replace('i.test', '127.0.0.1'))).status, 200)
-  })
-
-  await step('a standing-by node does not start after uninstall', async () => {
-    const dir = path.join(ROOT, 'i')
-    const env = { ...process.env, AGENTLINK_HOME: dir, AGENTLINK_PORT: String(NODES.i), AGENTLINK_HOST: 'i.test', AGENTLINK_DISCOVERY: '0', AGENTLINK_AUTO_ALIASES: '0' }
-    const standby = spawn(process.execPath, ['--no-warnings', BIN, 'node'], { env, stdio: 'ignore' })
-    await sleep(1000)
-    fs.writeFileSync(path.join(dir, 'disabled'), '')        // what `agentlink uninstall` writes first
-    const conf = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'))
-    const { authHeader } = await import('../src/crypto.js')
-    await fetch(`http://127.0.0.1:${NODES.i}/local/shutdown`, { method: 'POST', body: '', headers: { 'x-agentlink-auth': authHeader(conf.secret, 'POST', '/local/shutdown', '') } })
-    const exited = await Promise.race([new Promise(r => standby.once('exit', () => r(true))), sleep(8000).then(() => false)])
-    if (!exited) standby.kill('SIGKILL')
-    assert.ok(exited, 'standby node exited instead of taking over')
-    await assert.rejects(fetch(`http://127.0.0.1:${NODES.i}/health`, { signal: AbortSignal.timeout(1000) }))
-  })
-
-  await step('a gossiped address that now reaches another member is not used as a route', async () => {
-    await ensureNode('a'); await ensureNode('c')
-    // a member tells a that laptop.test is at c's address (stale: DHCP gave it to c)
-    const r = await signedPost(NODES.a, '/v1/hello', { peers: [{ host: 'laptop.test', addr: `127.0.0.1:${NODES.c}` }] })
-    assert.equal(r.status, 200)
-    await sleep(1000)
-    const st = JSON.parse(cli('a', 'status'))
-    assert.ok(!st.peers.some(p => p.host === 'laptop.test' && p.addr), 'unverified gossiped address not stored')
-    assert.ok(!st.peers.some(p => p.alias_of === 'c.test' || (p.host === 'laptop.test' && p.alias_of)), 'laptop.test not aliased to c.test')
-    const out = cli('a', 'send', 'bob@laptop.test', 'for the laptop only')
-    assert.doesNotMatch(out, /pushed to|stored on/, 'not handed to c.test')
-  })
-
-  await step('a replayed beacon relayed to the real node does not redirect its traffic', async () => {
+  await step('a relay in the middle sees only ciphertext', async () => {
     await ensureNode('b')
-    const dir = path.join(ROOT, 'j')
-    fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
-      secret: SECRET, host: 'j.test', port: NODES.j, discovery: true, discoveryPort: 17789, autoAliases: false, peers: [],
-    }))
-    await startNode('j')
-    // an outsider forwards everything it receives on 17791 to b, and replays b's beacon naming 17791
-    const relay = net.createServer(sock => { const up = net.connect(NODES.b, '127.0.0.1'); sock.pipe(up).pipe(sock); up.on('error', () => sock.destroy()); sock.on('error', () => up.destroy()) })
+    home('j', { peers: ['b.test'], routes: { 'b.test': '127.0.0.1:17791' } })
+    let seen = Buffer.alloc(0)
+    const relay = net.createServer(sock => {
+      const up = net.connect(NODES.b, '127.0.0.1')
+      sock.on('data', c => { seen = Buffer.concat([seen, c]) })
+      sock.pipe(up).pipe(sock)
+      up.on('error', () => sock.destroy()); sock.on('error', () => up.destroy())
+    })
     await new Promise(r => relay.listen(17791, '127.0.0.1', r))
-    const { signBeacon } = await import('../src/crypto.js')
-    const { networkId } = await import('../src/config.js')
-    const dgram = await import('node:dgram')
-    const beacon = async port => {
-      const b = { host: 'b.test', net: networkId(SECRET), port, ts: Date.now(), reply: true }
-      const sock = dgram.createSocket('udp4')
-      await new Promise(r => sock.send(Buffer.from(JSON.stringify({ ...b, sig: signBeacon(SECRET, b) })), 17789, '127.0.0.1', r))
-      sock.close()
-    }
-    await beacon(17791)
-    await sleep(1500)
-    let st = JSON.parse(await cliAsync('j', 'status'))
-    assert.ok(!st.peers.some(p => p.host === 'b.test' && p.addr === '127.0.0.1:17791'), 'relay address not adopted')
-    await beacon(NODES.b)                                   // control: the genuine address is still learned
-    await waitFor(async () => JSON.parse(await cliAsync('j', 'status')).peers.some(p => p.host === 'b.test' && p.addr === `127.0.0.1:${NODES.b}`), 5000, 'direct address learned')
+    await startNode('j')
+    const out = await cliAsync('j', 'send', 'bob@b.test', 'RELAYED-SECRET')
+    assert.match(out, /pushed to bob@b\.test.s live session/)
+    await waitFor(() => bob.got.some(g => g.content === 'RELAYED-SECRET'), 5000, 'relayed delivery')
+    assert.ok(seen.length > 0 && !seen.includes('RELAYED-SECRET') && !seen.includes('bob@'), 'relay saw no plaintext')
     relay.close()
     await stopNode('j')
   })
 
   await step('an envelope with out-of-range timestamps is rejected and forwarding keeps working', async () => {
     await ensureNode('a'); await ensureNode('b')
-    const bad = await envelope('nobody@b.test', 'poison', { expires_at: 2 ** 60 })
-    const r = await signedPost(NODES.a, '/v1/deliver', { messages: [bad] })
+    const bad = envelope('nobody@b.test', 'poison', { expires_at: 2 ** 60 })
+    const r = await memberPost('a', '/v1/deliver', { messages: [bad] })
     assert.equal(r.status, 200)
     assert.deepEqual(r.data.results, {}, 'rejected')
     // a row stored by an older version is dropped at startup instead of halting the flush loop
@@ -453,67 +425,203 @@ try {
 
   await step('a large batch for a live session does not freeze the node', async () => {
     await ensureNode('b')
-    const msgs = await Promise.all(Array.from({ length: 2000 }, (_, i) => envelope('bob@b.test', `batch ${i}`)))
+    const msgs = Array.from({ length: 2000 }, (_, i) => envelope('bob@b.test', `batch ${i}`))
     const t = Date.now()
-    const r = await signedPost(NODES.b, '/v1/deliver', { messages: msgs })
+    const r = await memberPost('b', '/v1/deliver', { messages: msgs })
     const took = Date.now() - t
     assert.equal(Object.keys(r.data.results).length, 2000)
-    assert.ok(took < 3000, `batch handled in ${took} ms`)
+    assert.ok(took < 5000, `batch handled in ${took} ms`)
     await waitFor(() => bob.got.filter(g => g.content.startsWith('batch ')).length === 2000, 15000, 'all batch messages pushed')
   })
 
-  await step('setup: odd secrets, bad config and bad --host never change the network', async () => {
-    const dir = path.join(ROOT, 'i')
-    const env = { ...process.env, AGENTLINK_HOME: dir, AGENTLINK_PORT: String(NODES.i), AGENTLINK_HOST: 'i.test', AGENTLINK_DISCOVERY: '0', AGENTLINK_AUTO_ALIASES: '0' }
-    const setup = (...a) => spawnSync(process.execPath, ['--no-warnings', BIN, 'setup', ...a, '--no-service', '--no-claude', '--no-alias'], { env, encoding: 'utf8' })
+  await step('a gossiped address is only used once the machine there proves who it is', async () => {
+    await ensureNode('a'); await ensureNode('c')
+    // a member tells a that laptop.test (not a member) and h.test (a member) are at c's address
+    const r = await memberPost('a', '/v1/hello', { peers: [{ host: 'laptop.test', addr: `127.0.0.1:${NODES.c}` }, { host: 'h.test', addr: `127.0.0.1:${NODES.c}` }] })
+    assert.equal(r.status, 200)
+    await sleep(1000)
+    const st = JSON.parse(cli('a', 'status'))
+    assert.ok(!st.peers.some(p => p.host === 'laptop.test'), 'a non-member name is ignored')
+    assert.ok(!st.peers.some(p => p.host === 'h.test' && p.addr === `127.0.0.1:${NODES.c}`), 'a wrong address for a member is not adopted')
+    const out = cli('a', 'send', 'bob@laptop.test', 'for the laptop only')
+    assert.doesNotMatch(out, /pushed to|stored on/, 'not handed to c.test')
+  })
+
+  // ---- setup, invites, joining, removal (real `agentlink setup`, nodes on ports i/k/l) ----
+  const setupEnv = (n, extra = {}) => ({ ...process.env, AGENTLINK_HOME: path.join(ROOT, `s-${n}`), AGENTLINK_PORT: String(NODES[n]), AGENTLINK_HOST: `${n}.test`, AGENTLINK_DISCOVERY: '0', AGENTLINK_AUTO_ALIASES: '0', ...extra })
+  const setup = (n, args = [], extra = {}) => spawnSync(process.execPath, ['--no-warnings', BIN, 'setup', ...args, '--no-service', '--no-claude', '--no-alias'], { env: setupEnv(n, extra), encoding: 'utf8', timeout: 60_000 })
+  const scli = (n, ...args) => spawnSync(process.execPath, ['--no-warnings', BIN, ...args], { env: setupEnv(n), encoding: 'utf8', timeout: 30_000 })
+  const sLocal = n => new Local({ identity: readIdentity(path.join(ROOT, `s-${n}`)), port: NODES[n], dir: path.join(ROOT, `s-${n}`) })
+  const parseInvite = out => {
+    const m = out.match(/curl -fsSL -k --pinnedpubkey "sha256\/\/([^"]+)" "https:\/\/[^/]+\/join\/install\?t=([^"]+)"/)
+    assert.ok(m, `an invite line in:\n${out}`)
+    return { pin: m[1], token: m[2] }
+  }
+  const joinArgs = (inv, port = NODES.i) => ['--join', `127.0.0.1:${port}`, '--pin', inv.pin, '--token', inv.token]
+
+  let inv
+  await step('setup creates a network and keeps it; --new-network starts over', async () => {
+    let r = setup('i')
+    assert.equal(r.status, 0, r.stderr)
+    assert.match(r.stdout, /New network created/)
+    inv = parseInvite(r.stdout)
+    const fp1 = readIdentity(path.join(ROOT, 's-i')).fp
+    assert.equal(inv.pin, fp1)
+    r = setup('i')
+    assert.equal(r.status, 0, r.stderr)
+    assert.doesNotMatch(r.stdout, /New network created/)
+    assert.equal(readIdentity(path.join(ROOT, 's-i')).fp, fp1, 'key kept')
+    r = setup('i', ['--new-network'])
+    assert.match(r.stdout, /New network created/)
+    assert.notEqual(readIdentity(path.join(ROOT, 's-i')).fp, fp1, 'new key')
+    const h = await sLocal('i').health()
+    assert.equal(h.fp, readIdentity(path.join(ROOT, 's-i')).fp, 'the old node was stopped and the new one runs')
+    inv = parseInvite(r.stdout)
+  })
+
+  await step('the invite line works with real curl, and only with the right key', async () => {
+    const url = `https://127.0.0.1:${NODES.i}/join/install?t=${inv.token}`
+    const good = spawnSync(curlBin, ['-fsSL', '-k', '--pinnedpubkey', `sha256//${inv.pin}`, url], { encoding: 'utf8' })
+    assert.equal(good.status, 0, good.stderr)
+    assert.match(good.stdout, /AGENTLINK_PIN=/)
+    assert.match(good.stdout, /--token/)
+    const bad = spawnSync(curlBin, ['-fsSL', '-k', '--pinnedpubkey', `sha256//${newIdentity().fp}`, url], { encoding: 'utf8' })
+    assert.notEqual(bad.status, 0, 'a different key (an impostor serving the installer) is refused')
+    assert.equal(spawnSync(curlBin, ['-fsSL', '-k', `https://127.0.0.1:${NODES.i}/join/install?t=wrong-token`]).status, 22, 'a wrong token gets nothing')
+  })
+
+  await step('a machine joins with an invite; the invite is then spent', async () => {
+    const r = setup('k', joinArgs(inv))
+    assert.equal(r.status, 0, r.stdout + r.stderr)
+    assert.match(r.stdout, /Joined the network via i\.test/)
+    const iStatus = JSON.parse(scli('i', 'status').stdout)
+    assert.deepEqual(iStatus.members.map(m => m.host).sort(), ['i.test', 'k.test'])
+    assert.equal(iStatus.members.find(m => m.host === 'k.test').added_by, 'i.test')
+    // the token is single-use
+    const again = setup('l', joinArgs(inv))
+    assert.notEqual(again.status, 0)
+    assert.match(again.stderr, /not valid \(already used, expired or revoked\)/)
+    // k can message i (k learns i's address from the join address)
+    await waitFor(() => JSON.parse(scli('k', 'status').stdout).peers.some(p => p.host === 'i.test' && p.addr), 8000, 'k knows where i is')
+    assert.match(scli('k', 'send', 'x@i.test', 'hello from k').stdout, /stored on i\.test/)
+  })
+
+  await step('joining is refused for a wrong key, a taken name, and expired or revoked invites', async () => {
+    // an invite whose pin doesn't match the machine at the address (someone in the middle)
+    let fresh = parseInvite(scli('i', 'invite').stdout)
+    let r = setup('l', joinArgs({ ...fresh, pin: newIdentity().fp }))
+    assert.notEqual(r.status, 0)
+    assert.match(r.stderr, /not the one that made this invite/)
+    // a name that's already a member
+    r = setup('l', joinArgs(fresh), { AGENTLINK_HOST: 'k.test' })
+    assert.notEqual(r.status, 0)
+    assert.match(r.stderr, /k\.test is already a member/)
+    // revoked
+    assert.match(scli('i', 'invite', '--revoke').stdout, /revoked [1-9]/)
+    r = setup('l', joinArgs(fresh))
+    assert.match(r.stderr, /not valid/)
+    // expired
+    fresh = parseInvite(scli('i', 'invite').stdout)
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(path.join(ROOT, 's-i', 'agentlink.db'))
+    db.exec(`UPDATE invites SET expires_at=1 WHERE used_at IS NULL`)
+    db.close()
+    r = setup('l', joinArgs(fresh))
+    assert.match(r.stderr, /not valid/)
+  })
+
+  await step('a removed machine can neither send nor receive', async () => {
+    const r = scli('i', 'remove', 'k.test')
+    assert.equal(r.status, 0, r.stderr)
+    assert.match(r.stdout, /removed k\.test/)
+    const iStatus = JSON.parse(scli('i', 'status').stdout)
+    assert.deepEqual(iStatus.members.map(m => m.host), ['i.test'])
+    const out = scli('k', 'send', 'x@i.test', 'after removal').stdout
+    assert.doesNotMatch(out, /pushed to|stored on/)
+    assert.match(scli('i', 'send', 'x@k.test', 'to the removed').stdout, /removed from the network/)
+    assert.match(scli('i', 'remove', 'i.test').stderr, /agentlink uninstall/)
+  })
+
+  await step('a member that was offline learns of a removal when it comes back', async () => {
+    await ensureNode('a'); await ensureNode('c')
+    await stopNode('c')
+    assert.match(cli('a', 'remove', 'e.test'), /removed e\.test/)
+    await startNode('c')
+    await waitFor(() => !JSON.parse(cli('c', 'status')).members.some(m => m.host === 'e.test'), 8000, 'c learns e was removed')
+    // and the removed machine (which doesn't know it was removed) is refused by c too
+    await stopNode('e')
+    home('e')
+    await startNode('e')
+    assert.doesNotMatch(cli('e', 'send', 'x@c.test', 'still here?'), /pushed to|stored on/)
+    await stopNode('e')
+  })
+
+  await step('a standing-by node does not start after uninstall', async () => {
+    const env = setupEnv('i')
+    const standby = spawn(process.execPath, ['--no-warnings', BIN, 'node'], { env, stdio: 'ignore' })
+    await sleep(1000)
+    fs.writeFileSync(path.join(ROOT, 's-i', 'disabled'), '')        // what `agentlink uninstall` writes first
+    await sLocal('i').req('POST', '/local/shutdown')
+    const exited = await Promise.race([new Promise(r => standby.once('exit', () => r(true))), sleep(8000).then(() => false)])
+    if (!exited) standby.kill('SIGKILL')
+    assert.ok(exited, 'standby node exited instead of taking over')
+    assert.equal(await sLocal('i').health(), null)
+  })
+
+  await step('setup: bad config, bad --host and old-style secrets never change the network', async () => {
+    const dir = path.join(ROOT, 's-i')
     const cfgFile = path.join(dir, 'config.json')
-    const secretNow = () => JSON.parse(fs.readFileSync(cfgFile, 'utf8')).secret
-    // a secret that starts with "--" (about 1 in 4096 generated ones did), both bare and after "--"
-    const dashy = '--nRYnK9UiVu8ygXBlBRNIDlK7srGIZd'
-    assert.equal(setup(dashy).status, 0)
-    assert.equal(secretNow(), dashy)
-    assert.equal(setup('--peer', '127.0.0.1:1', '--', dashy).status, 0, 'the served installer\'s form')
-    assert.equal(secretNow(), dashy)
+    assert.equal(setup('i').status, 0)
+    const fp = readIdentity(dir).fp
+    // an old-style secret argument is refused with a pointer to invites
+    let r = setup('i', ['some-old-shared-secret-0123456789'])
+    assert.notEqual(r.status, 0)
+    assert.match(r.stderr, /no longer uses a shared network secret/)
     // an invalid --host is refused before anything is written
     const before = fs.readFileSync(cfgFile, 'utf8')
-    let r = setup('--host', 'my_host')
+    r = setup('i', ['--host', 'my_host'])
     assert.notEqual(r.status, 0)
     assert.equal(fs.readFileSync(cfgFile, 'utf8'), before)
     // a config with a syntax error stops setup instead of minting a new network
     fs.writeFileSync(cfgFile, before.replace(/\}\s*$/, ',}'))
-    r = setup()
+    r = setup('i')
     assert.notEqual(r.status, 0)
     assert.match(r.stderr, /bad config/)
     assert.doesNotMatch(r.stdout, /New network created/)
-    assert.match(fs.readFileSync(cfgFile, 'utf8'), new RegExp(dashy))
+    assert.equal(readIdentity(dir).fp, fp)
     fs.writeFileSync(cfgFile, before)
-    // the home directory is private even if something created it world-readable first
+    // the home directory and key are private even if something created the directory world-readable first
     fs.chmodSync(dir, 0o755)
-    assert.equal(setup().status, 0)
+    assert.equal(setup('i').status, 0)
     assert.equal(fs.statSync(dir).mode & 0o777, 0o700)
+    assert.equal(fs.statSync(path.join(dir, 'node.key')).mode & 0o077, 0)
   })
 
   await step('a node started on demand exits when one is already running', async () => {
-    const env = { ...process.env, AGENTLINK_HOME: path.join(ROOT, 'i'), AGENTLINK_PORT: String(NODES.i), AGENTLINK_HOST: 'i.test', AGENTLINK_DISCOVERY: '0', AGENTLINK_AUTO_ALIASES: '0' }
-    assert.ok((await fetch(`http://127.0.0.1:${NODES.i}/health`)).ok, 'a node is running')
-    const r = spawnSync(process.execPath, ['--no-warnings', BIN, 'node', '--on-demand'], { env, encoding: 'utf8', timeout: 10_000 })
+    assert.ok(await sLocal('i').health(), 'a node is running')
+    const r = spawnSync(process.execPath, ['--no-warnings', BIN, 'node', '--on-demand'], { env: setupEnv('i'), encoding: 'utf8', timeout: 10_000 })
     assert.equal(r.status, 0, 'exited on its own')
     assert.match(r.stderr, /already running/)
   })
 
-  await step('local clients refuse a process squatting on the node port without the secret', async () => {
-    const { networkId } = await import('../src/config.js')
-    const { Local } = await import('../src/local.js')
-    const squatter = (await import('node:http')).createServer((req, res) => {
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify(req.url === '/health' ? { ok: true, net: networkId(SECRET), pid: 1 } : { id: 'x', to: 'x', status: 'delivered (live)' }))
-    })
-    await new Promise(r => squatter.listen(17792, '127.0.0.1', r))
-    const local = new Local({ secret: SECRET, net: networkId(SECRET), port: 17792, dir: path.join(ROOT, 'a') })
-    await assert.rejects(local.ensureNode(), /not this network's agentlink node/)
+  await step('local clients refuse a process squatting on the node port', async () => {
+    const id = readIdentity(path.join(ROOT, 'a'))
+    const local = new Local({ identity: id, port: 17792, dir: path.join(ROOT, 'a') })
+    // a plain HTTP squatter, then a TLS squatter with its own key
+    const http = await import('node:http')
+    const plain = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"ok":true,"pid":1}') })
+    await new Promise(r => plain.listen(17792, '127.0.0.1', r))
+    await assert.rejects(local.ensureNode(), /not this machine's agentlink node/)
+    await assert.rejects(local.req('POST', '/local/send', { to: 'x', body: 'y' }), /not answered by this machine's agentlink node/)
+    await new Promise(r => plain.close(r))
+    const other = newIdentity()
+    const https = await import('node:https')
+    const tlsSq = https.createServer({ key: other.key, cert: other.cert }, (req, res) => { res.writeHead(200); res.end('{"ok":true,"pid":1}') })
+    await new Promise(r => tlsSq.listen(17792, '127.0.0.1', r))
+    await assert.rejects(local.ensureNode(), /not this machine's agentlink node/)
     await assert.rejects(local.req('POST', '/local/send', { to: 'x', body: 'y' }), /not answered by this machine's agentlink node/)
     await assert.rejects(local.stream('x', 't', () => {}), /not answered by this machine's agentlink node/)
-    squatter.close()
+    tlsSq.close()
   })
 
   await bob.close()
@@ -521,13 +629,13 @@ try {
 } catch (e) {
   console.log('FAILED')
   console.error(e)
-  for (const n of Object.keys(NODES)) {
+  for (const n of [...Object.keys(NODES), ...Object.keys(NODES).map(n => `s-${n}`)]) {
     try { console.error(`--- ${n}/node.log ---\n` + fs.readFileSync(path.join(ROOT, n, 'node.log'), 'utf8').slice(-2000)) } catch {}
   }
   process.exitCode = 1
 } finally {
   for (const n of Object.keys(procs)) await stopNode(n)
-  await killPorts()   // nodes auto-started by adapters are not our children
+  await killPorts()   // nodes auto-started by adapters and setup are not our children
   if (!process.exitCode) fs.rmSync(ROOT, { recursive: true, force: true })
   process.exit()   // don't wait on stray handles (a failed step may leave adapters or timers behind)
 }

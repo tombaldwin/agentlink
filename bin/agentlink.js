@@ -2,10 +2,10 @@
 import { loadConfig, VERSION } from '../src/config.js'
 
 const [cmd, ...rest] = process.argv.slice(2)
-// Only these are flags; anything else (a secret or a message that happens to start with "--") is an
-// argument, and "--" ends the flags.
-const VALUE_FLAGS = ['name', 'from', 'host', 'peer']
-const BOOL_FLAGS = ['no-service', 'no-claude', 'no-alias', 'new-network', 'poll', 'channel', 'on-demand']
+// Only these are flags; anything else (a message that happens to start with "--") is an argument,
+// and "--" ends the flags.
+const VALUE_FLAGS = ['name', 'from', 'host', 'peer', 'join', 'pin', 'token']
+const BOOL_FLAGS = ['no-service', 'no-claude', 'no-alias', 'new-network', 'poll', 'channel', 'on-demand', 'revoke']
 /** @type {Record<string, any>} */
 const flags = {}
 /** @type {string[]} */
@@ -27,13 +27,14 @@ function usage(/** @type {string} */ m) { console.error(`agentlink: ${m}`); proc
 
 const HELP = `agentlink ${VERSION} — wake-on-message networking for AI agents
 
-  agentlink setup [secret]      set up this machine (no secret = keep this machine's network,
-                                or create one if it has none; --new-network to start over)
+  agentlink setup               set up this machine (keeps its network, or creates one if it has
+                                none; --new-network to start over). Joining uses the invite line.
   agentlink claude [args...]    start Claude Code (current account) with agentlink enabled
   agentlink send <to> <msg...>  send a message, e.g. agentlink send buffy@anya.local "hi"
   agentlink peers               who's online
   agentlink status              node status, queues, known machines
-  agentlink invite              print the prompt/command to add another machine
+  agentlink invite [--revoke]   print a one-time line to add another machine (--revoke: cancel unused ones)
+  agentlink remove <host>       remove a machine from the network (it can no longer send or receive)
   agentlink uninstall           remove service and Claude Code registration
 
   agentlink node                run the node (normally run by the background service)
@@ -43,7 +44,8 @@ async function main() {
   switch (cmd) {
     case 'setup': {
       const { setup } = await import('../src/setup.js')
-      return setup({ secret: pos[0], host: flags.host, peers: flags.peer || [], noService: flags['no-service'], noClaude: flags['no-claude'], noAlias: flags['no-alias'], newNetwork: flags['new-network'] })
+      if (pos.length) throw new Error('agentlink no longer uses a shared network secret: to join a network, run the line printed by `agentlink invite` on a member')
+      return setup({ host: flags.host, peers: flags.peer || [], noService: flags['no-service'], noClaude: flags['no-claude'], noAlias: flags['no-alias'], newNetwork: flags['new-network'], join: flags.join, pin: flags.pin, token: flags.token })
     }
     case 'node': {
       const { runNode } = await import('../src/node.js')
@@ -63,7 +65,7 @@ async function main() {
           if (/** @type {NodeJS.ErrnoException} */ (e).code !== 'EADDRINUSE') throw e
           const local = new Local(cfg)
           const h = await local.health()
-          if (!h || h.net !== cfg.net || !await local.verify()) { console.error(`port ${cfg.port} is in use by something else`); process.exit(1) }
+          if (!h || 'foreign' in h) { console.error(`port ${cfg.port} is in use by something else`); process.exit(1) }
           if (flags['on-demand']) { console.error(`another agentlink node (pid ${h.pid}) is already running`); return }
           if (!waited) { console.error(`another agentlink node (pid ${h.pid}) is running; standing by`); waited = true }
           await new Promise(r => setTimeout(r, 5000))
@@ -94,8 +96,15 @@ async function main() {
     case 'status':
       return console.log(JSON.stringify(await (await client()).req('GET', '/local/status'), null, 2))
     case 'invite': {
+      const local = await client()
+      if (flags.revoke) return console.log(`revoked ${(await local.req('POST', '/local/invite/revoke')).revoked} unused invite(s)`)
       const { invitePrompt } = await import('../src/setup.js')
-      return console.log(invitePrompt(loadConfig()))
+      return console.log(invitePrompt(await local.req('POST', '/local/invite')))
+    }
+    case 'remove': {
+      if (pos.length !== 1) throw new Error('usage: agentlink remove <host>')
+      const r = await (await client()).req('POST', '/local/remove', { host: pos[0] })
+      return console.log(`removed ${r.removed}: it can no longer send to or receive from this network`)
     }
     case 'uninstall': {
       const { uninstall } = await import('../src/setup.js')
