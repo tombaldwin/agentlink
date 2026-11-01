@@ -183,9 +183,12 @@ export class Roster {
       const m = ranked.get(fp)
       /** @type {RosterRecord[]} */
       const stand = []
+      /** @type {Set<string>} */
+      const signers = new Set()
+      // one removal per signer counts: its earliest (so signing more can't change the outcome)
       if (m) for (const r of removesOf.get(fp) || []) {
         const s = ranked.get(r.by)
-        if (s && s.rank < m.rank && ok(s.publicKey, r)) stand.push(r)
+        if (s && s.rank < m.rank && !signers.has(r.by) && ok(s.publicKey, r)) { stand.push(r); signers.add(r.by) }
       }
       const st = stand.length
         ? { removed: /** @type {const} */ (true), at: stand[0].at, by: stand[0].by, seen: stand.map(r => new Set(r.seen ?? [])) }
@@ -268,6 +271,7 @@ export class Roster {
         droppedKept.set(r.by, n)
         return n <= MAX_DROPPED
       }
+      // the removal that counts for this signer and target (the only one status() looks at)
       const t = ranked.get(r.fp), s = /** @type {Member} */ (ranked.get(r.by))
       if (!t || s.rank >= t.rank || !this.verified.has(r.sig) || firstRemove.has(`${r.by} ${r.fp}`)) return false
       firstRemove.add(`${r.by} ${r.fp}`)

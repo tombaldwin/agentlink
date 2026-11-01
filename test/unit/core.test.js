@@ -184,7 +184,24 @@ test('roster: concurrent removals all stand, and the result never depends on arr
     const h = view([...base.records, ...ex.slice(0, 2)]); h.merge(ex.slice(2))
     assert.deepEqual([...h.byHost.keys()], [...ref.byHost.keys()])
     assert.deepEqual(h.records.map(r => r.sig).sort(), ref.records.map(r => r.sig).sort(), 'the same records are kept')
+    const rebuilt = view(x.records)
+    assert.deepEqual([[...rebuilt.byHost.keys()], [...rebuilt.dropped], rebuilt.dks], [[...x.byHost.keys()], [...x.dropped], x.dks], 'rebuilding from what was kept changes nothing')
   }
+})
+
+test('roster: rebuilding from the records kept gives the same result (restarts, peers)', () => {
+  const [A, M, T, X] = Array.from({ length: 4 }, () => newIdentity())
+  const r = Roster.genesis(A, 'a.local')
+  r.add(A, 'm.local', M.cert); r.add(A, 't.local', T.cert); r.add(T, 'x.local', X.cert)
+  // M removes T twice: one removal saw T's add of X, the other (signed elsewhere) didn't
+  const r1 = new Roster({ net: r.net, records: r.records }).remove(M, T.fp)
+  const bare = { type: 'remove', fp: T.fp, at: r1.at + 1, by: M.fp, dk: newDiscoveryKey(), seen: [] }
+  r.merge([r1, { ...bare, sig: signRecord(M.key, bare) }])
+  r.remove(A, M.fp)
+  const again = new Roster({ net: r.net, records: r.records })
+  const sum = x => JSON.stringify([[...x.members.keys()].sort(), [...x.removed.keys()].sort(), [...x.dropped].sort(), x.dks])
+  assert.equal(sum(again), sum(r))
+  assert.ok(r.members.has(X.fp), 'the removal that counts (M\'s first) had seen the add of x')
 })
 
 test('roster: a removed machine cannot fill the roster with records that never count', () => {

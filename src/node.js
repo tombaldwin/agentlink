@@ -143,6 +143,8 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     return invite
   }
   let presenting = '', rotatedAt = 0
+  /** @type {NodeJS.Timeout | null} */
+  let rotateTimer = null
   rotate = () => {
     let inv = null
     try { inv = inviteIdentity() } catch (e) { log('invite key:', errMsg(e)) }
@@ -150,7 +152,14 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       if (presenting !== inv.fp) { server.setSecureContext(tlsOpts(inv)); presenting = inv.fp }
       return
     }
-    if (presenting === 'throwaway' && now() - rotatedAt < 1000) return
+    // the current key has just been shown: replace it now, or once a second has passed since the last
+    // replacement, so no two connections a second or more apart ever see the same key
+    const wait = presenting === 'throwaway' ? 1000 - (now() - rotatedAt) : 0
+    if (wait > 0) {
+      rotateTimer ||= setTimeout(() => { rotateTimer = null; rotate() }, wait)
+      rotateTimer.unref()
+      return
+    }
     server.setSecureContext(tlsOpts(newIdentity()))
     presenting = 'throwaway'
     rotatedAt = now()
