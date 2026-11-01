@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { openStore } from './store.js'
 import { startDiscovery } from './discovery.js'
 import { signEnvelope, verifyEnvelope, authHeader, checkAuth, signResponse, verifyResponse, NonceCache, safeEq } from './crypto.js'
-import { parseAddr, normHost, sanitizeName, validAddr, tailscaleName, VERSION } from './config.js'
+import { parseAddr, normHost, sanitizeName, validAddr, tailscaleName, errMsg, VERSION } from './config.js'
 
 const MAX_REQ = 2 << 20
 const MAX_BATCH = 1 << 20              // bytes of envelopes per request (well under MAX_REQ)
@@ -20,26 +20,39 @@ const REPLICATE_TO = 3                 // max other nodes that hold a copy for a
 const PEER_FORGET_MS = 30 * 86400_000
 const IN_FLIGHT_MS = 30_000            // a send being delivered directly is hidden from the flush loop
 
+/** @typedef {import('./types.js').Config} Config */
+/** @typedef {import('./types.js').Envelope} Envelope */
+/** @typedef {import('./types.js').MessageRow} MessageRow */
+/** @typedef {import('./types.js').PeerRow} PeerRow */
+/** @typedef {http.ServerResponse & { reqAuth?: string }} Res */
+
 const execFileP = promisify(execFile)
 const now = () => Date.now()
-const backoff = n => Math.min(BACKOFF_MAX, 2000 * 2 ** Math.min(n, 5))
-const errText = err => String(err.cause?.code || err.message || err)
+const backoff = (/** @type {number} */ n) => Math.min(BACKOFF_MAX, 2000 * 2 ** Math.min(n, 5))
+const errText = (/** @type {any} */ err) => String(err.cause?.code || err.message || err)
 
+/**
+ * @param {import('./types.js').Config} cfg
+ * @param {(...a: any[]) => void} [log]
+ */
 export async function runNode(cfg, log = (...a) => console.error(new Date().toISOString(), ...a)) {
   fs.mkdirSync(cfg.dir, { recursive: true, mode: 0o700 })
   // Bind the port before touching the shared database: a node that loses the race for the port
   // (a standby service, a second session-started node) must not reset retry state or leak handles.
+  /** @type {(req: http.IncomingMessage, res: Res) => void} */
   let onRequest = (req, res) => { res.writeHead(503, { 'content-type': 'application/json' }); res.end('{"error":"starting"}') }
   const server = http.createServer((req, res) => onRequest(req, res))
-  await new Promise((resolve, reject) => {
+  await new Promise(/** @param {(v?: void) => void} resolve */ (resolve, reject) => {
     server.once('error', reject)
     server.listen(cfg.port, () => { server.off('error', reject); resolve() })
   })
+  /** @type {import('node:sqlite').DatabaseSync} */
   let db
   try { db = openStore(path.join(cfg.dir, 'agentlink.db')) } catch (e) { server.close(); throw e }
   const nodeHeader = `${cfg.host};net=${cfg.net};port=${cfg.port}`
   const nonces = new NonceCache()
-  const sessions = new Map()           // name -> { res, sent:Set<id>, token }
+  /** @type {Map<string, { res: Res, sent: Set<string>, token: string }>} name -> live session stream */
+  const sessions = new Map()
 
   const q = {
     insert: db.prepare(`INSERT OR IGNORE INTO messages
@@ -73,12 +86,21 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     clearAddr: db.prepare(`UPDATE peers SET addr=NULL WHERE host=?`),
   }
 
+  // typed views of the rows node:sqlite returns
+  const peerRow = (/** @type {string} */ host) => /** @type {PeerRow | undefined} */ (q.peer.get(host))
+  const allPeers = () => /** @type {PeerRow[]} */ (/** @type {unknown} */ (q.peers.all()))
+  const msgRow = (/** @type {string} */ id) => /** @type {MessageRow | undefined} */ (q.get.get(id))
+  /** @type {(...a: import('node:sqlite').SQLInputValue[]) => MessageRow[]} */
+  const dueRows = (...a) => /** @type {MessageRow[]} */ (/** @type {unknown} */ (q.due.all(...a)))
+  /** @type {(name: string, t: number) => MessageRow[]} */
+  const inboxRows = (name, t) => /** @type {MessageRow[]} */ (/** @type {unknown} */ (q.inboxQueued.all(name, t)))
+
   // ---------- identity ----------
   const selfAliases = new Set(cfg.aliases)
   const ts = cfg.autoAliases ? tailscaleName() : null
   if (ts) selfAliases.add(ts)
   selfAliases.delete(cfg.host)
-  const isSelf = h => h === cfg.host || selfAliases.has(h)
+  const isSelf = (/** @type {string} */ h) => h === cfg.host || selfAliases.has(h)
 
   /**
    * A request for `name` was answered by this node. If `name` is a machine we know to be a separate
@@ -87,10 +109,11 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
    * is one of our own names (an IP, a Tailscale name used by a sender): take delivery of anything
    * queued for it. Learned aliases are kept in memory only.
    * Returns true if adopted.
+   * @param {string} name
    */
   function reachedSelfAs(name) {
     if (!name || name === cfg.host) return true
-    const row = q.peer.get(name)
+    const row = peerRow(name)
     if (row && (row.verified || row.configured)) {
       log(`address ${row.addr || name} for ${name} now reaches this machine; forgetting it`)
       q.clearAddr.run(name)
@@ -99,7 +122,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     if (!selfAliases.has(name)) log(`learned that ${name} is this machine`)
     selfAliases.add(name)
     if (row) q.deletePeer.run(name)
-    const names = new Set(q.toInbox.all(cfg.host, now(), name).map(r => r.to_name))
+    const names = new Set(q.toInbox.all(cfg.host, now(), name).map(r => String(r.to_name)))
     for (const n of names) pump(n)
     return true
   }
@@ -108,10 +131,20 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
   db.exec(`UPDATE messages SET next_attempt=0 WHERE state='pending'`)   // fresh start: retry everything now
 
   // ---------- peers ----------
-  const addrOf = host => cfg.routes[host] || q.peer.get(host)?.addr || `${host}:${cfg.port}`
-  const hostOf = hdr => { try { return normHost(String(hdr || '').split(';')[0]) } catch { return null } }
+  const addrOf = (/** @type {string} */ host) => cfg.routes[host] || peerRow(host)?.addr || `${host}:${cfg.port}`
+  /** The machine name in an x-agentlink-node header ("host;net=..;port=.."), or null. */
+  const hostOf = (/** @type {unknown} */ hdr) => { try { return normHost(String(hdr || '').split(';')[0]) } catch { return null } }
 
-  /** Authenticated request to another node. Returns { data, real } where real is the host that answered. */
+  /**
+   * Authenticated request to another node. Returns { data, real } where real is the host that answered.
+   * `addr` dials an explicit, not yet verified address instead of the stored route for `host`.
+   * @param {string} host
+   * @param {'GET'|'POST'} method
+   * @param {string} p
+   * @param {object} [obj]
+   * @param {{ timeout?: number, addr?: string }} [opts]
+   * @returns {Promise<{ data: any, real: string | null }>}
+   */
   async function request(host, method, p, obj, { timeout = 4000, addr } = {}) {
     const body = obj === undefined ? '' : JSON.stringify(obj)
     const auth = authHeader(cfg.secret, method, p, body, nodeHeader)
@@ -146,7 +179,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       q.clearAlias.run(real)                      // a node answering as itself is nobody's alias
     }
     if (!addr && real && real !== host) {
-      const row = q.peer.get(host)
+      const row = peerRow(host)
       if (row?.verified && row.alias_of !== real) {
         // `host` is a separate node (it has answered as itself before): the address we used now
         // reaches a different member (DHCP reuse, a stale gossiped address, a laptop that moved).
@@ -167,13 +200,15 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     }
     return { data: text ? JSON.parse(text) : {}, real }
   }
+  /** @type {(...a: Parameters<typeof request>) => Promise<any>} */
   const call = async (...a) => (await request(...a)).data
 
   /** Start routing `host` to `addr`, but only once a node there proves (with the secret) that it is `host`. */
   const probing = new Set()
+  /** @param {string} host @param {string} addr */
   async function probe(host, addr) {
     if (!validAddr(addr) || isSelf(host)) return
-    const cur = q.peer.get(host)
+    const cur = peerRow(host)
     if (cur?.addr === addr) {
       q.upsertPeer.run(host, null, now(), 0)
       if (q.wake.run(host).changes) kick()
@@ -193,9 +228,10 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
   }
 
   /** Track a peer that sent us an authenticated request. */
+  /** @param {string} hdr @param {string | undefined} remoteIp */
   function notePeer(hdr, remoteIp) {
     if (!hdr) return null
-    const parts = Object.fromEntries(hdr.split(';').slice(1).map(kv => kv.split('=')))
+    const parts = Object.fromEntries(hdr.split(';').slice(1).map((/** @type {string} */ kv) => kv.split('=')))
     if (parts.net !== cfg.net) return null
     const host = hostOf(hdr)
     if (!host || isSelf(host)) return null
@@ -205,20 +241,21 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     const port = Number(parts.port)
     if (ip && !/^(127\.|::1$)/.test(ip) && port > 0 && port < 65536) {
       const addr = ip.includes(':') ? `[${ip}]:${port}` : `${ip}:${port}`
-      if (q.peer.get(host)?.addr !== addr && !cfg.routes[host]) probe(host, addr)
+      if (peerRow(host)?.addr !== addr && !cfg.routes[host]) probe(host, addr)
     }
     return host
   }
 
   function knownPeers({ includeAliases = true } = {}) {
-    return q.peers.all().filter(r => !isSelf(r.host) && (includeAliases || !r.alias_of)).map(r => r.host)
+    return allPeers().filter(r => !isSelf(r.host) && (includeAliases || !r.alias_of)).map(r => r.host)
   }
 
   /** Peers worth telling others about (so every node learns the whole network). */
   function shareablePeers() {
     const cutoff = now() - 86400_000
-    return q.peers.all().filter(r => !r.alias_of && r.last_seen >= cutoff && r.addr).map(r => ({ host: r.host, addr: r.addr }))
+    return allPeers().filter(r => !r.alias_of && r.last_seen >= cutoff && r.addr).map(r => ({ host: r.host, addr: r.addr }))
   }
+  /** Remember peers another node told us about (untrusted: they're probed before use). @param {unknown} list */
   function learnPeers(list) {
     for (const pe of Array.isArray(list) ? list.slice(0, 200) : []) {
       if (typeof pe?.host !== 'string' || !validAddr(pe?.addr)) continue
@@ -227,6 +264,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     }
   }
 
+  /** @param {string} host */
   async function hello(host) {
     try {
       const r = await call(host, 'POST', '/v1/hello', { peers: shareablePeers() }, { timeout: 2500 })
@@ -237,8 +275,10 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
   function helloAll() { for (const h of knownPeers()) hello(h) }
 
   // ---------- messages ----------
+  /** @type {(r: import('./types.js').MessageRow) => import('./types.js').Envelope} */
   const envOf = r => ({ id: r.id, from: r.from_addr, to: r.to_addr, body: r.body, sent_at: r.sent_at, expires_at: r.expires_at, sig: r.sig })
 
+  /** @param {any} e @returns {e is Envelope} */
   function validEnv(e) {
     return e && typeof e === 'object' &&
       ['id', 'from', 'to', 'body', 'sig'].every(k => typeof e[k] === 'string') &&
@@ -252,13 +292,14 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
    * null means the envelope itself is bad (the sender must not retry it). Storage errors (disk full,
    * database busy) throw, so callers can report a temporary failure and the sender retries.
    */
+  /** @param {unknown} e @returns {import('./types.js').AcceptResult} */
   function accept(e) {
     let to
     try {
       if (!validEnv(e)) return null
       to = parseAddr(e.to, cfg.host)
     } catch (err) {
-      log('rejected envelope:', err.message)
+      log('rejected envelope:', errMsg(err))
       return null
     }
     if (e.expires_at <= now()) return 'expired'
@@ -272,10 +313,11 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     return 'held'
   }
 
+  /** Offer `name`'s queued messages to its live session, if it has one. @param {string} name */
   function pump(name) {
     const s = sessions.get(name)
     if (!s) return
-    for (const r of q.inboxQueued.all(name, now())) {
+    for (const r of inboxRows(name, now())) {
       if (s.sent.has(r.id)) continue
       s.sent.add(r.id)
       sse(s.res, 'message', { id: r.id, from: r.from_addr, to: r.to_addr, body: r.body, sent_at: r.sent_at })
@@ -283,9 +325,13 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
   }
 
   /** Split rows into request-sized batches. */
+  /** @param {MessageRow[]} rows */
   function batches(rows) {
+    /** @type {MessageRow[][]} */
     const out = []
-    let cur = [], size = 0
+    /** @type {MessageRow[]} */
+    let cur = []
+    let size = 0
     for (const r of rows) {
       const n = Buffer.byteLength(JSON.stringify(envOf(r))) + 1
       if (cur.length && size + n > MAX_BATCH) { out.push(cur); cur = []; size = 0 }
@@ -297,6 +343,11 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
   }
 
   /** Hand rows to `host`'s node. Returns null on success, else the error. */
+  /**
+   * @param {string} host
+   * @param {MessageRow[]} rows
+   * @returns {Promise<null | { err: unknown, rest: MessageRow[] }>}
+   */
   async function handOver(host, rows) {
     for (const batch of batches(rows)) {
       try {
@@ -307,7 +358,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
           else q.failed.run(`rejected by ${host} (invalid or malformed message)`, now(), r.id)
         }
       } catch (err) {
-        if (err.self) return null            // rows were taken into our own inbox
+        if (isSelfErr(err)) return null      // rows were taken into our own inbox
         const rest = rows.slice(rows.indexOf(batch[0]))
         for (const r of rest) q.retry.run(now() + backoff(r.attempts), errText(err), now(), r.id)
         return { err, rest }
@@ -317,7 +368,9 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
   }
 
   // ---------- forwarding loop ----------
-  let flushing = null, again = false
+  /** @type {Promise<void> | null} */
+  let flushing = null
+  let again = false
   function flush() {
     if (flushing) { again = true; return flushing }
     flushing = (async () => {
@@ -333,7 +386,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     const t = now()
     q.expire.run(t, t)
     const byHost = new Map()
-    for (const r of q.due.all(t, t)) {
+    for (const r of dueRows(t, t)) {
       if (isSelf(r.to_host)) { reachedSelfAs(r.to_host); continue }
       if (!byHost.has(r.to_host)) byHost.set(r.to_host, [])
       byHost.get(r.to_host).push(r)
@@ -345,15 +398,17 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
   }
 
   /** Hand copies to other reachable nodes so they can deliver when `host` comes back. */
+  /** @param {string} host @param {MessageRow[]} rows */
   async function replicate(host, rows) {
-    try { await replicateInner(host, rows) } catch (e) { log('replicate error', e.message) }
+    try { await replicateInner(host, rows) } catch (e) { log('replicate error', errMsg(e)) }
   }
+  /** @param {string} host @param {MessageRow[]} rows */
   async function replicateInner(host, rows) {
     if (!rows.length) return
     const cutoff = now() - 10 * 60_000
-    const candidates = q.peers.all()
+    const candidates = allPeers()
       .filter(p => !isSelf(p.host) && p.host !== host && !p.alias_of && p.alias_of !== host && p.last_seen >= cutoff)
-      .filter(p => q.peer.get(host)?.alias_of !== p.host)
+      .filter(p => peerRow(host)?.alias_of !== p.host)
       .sort((a, b) => b.last_seen - a.last_seen)
     let held = 0
     for (const p of candidates) {
@@ -372,16 +427,18 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
   }
 
   // ---------- local API helpers ----------
+  /** @param {{ from?: unknown, to?: unknown, body?: unknown, ttl_ms?: unknown }} d */
   async function localSend(d) {
     if (typeof d.body !== 'string' || !d.body) throw httpErr(400, 'message body required')
     if (Buffer.byteLength(d.body) > MAX_MSG) throw httpErr(413, `message too large (max ${MAX_MSG} bytes)`)
     if (!d.to) throw httpErr(400, 'recipient required (name@host)')
     let to
-    try { to = parseAddr(d.to, cfg.host) } catch (e) { throw httpErr(400, `bad recipient "${d.to}": ${e.message}`) }
-    const real = q.peer.get(to.host)?.alias_of          // e.g. desk.tailnet.ts.net -> desk.local
+    try { to = parseAddr(d.to, cfg.host) } catch (e) { throw httpErr(400, `bad recipient "${d.to}": ${errMsg(e)}`) }
+    const real = peerRow(to.host)?.alias_of          // e.g. desk.tailnet.ts.net -> desk.local
     if (real) to.host = real
     if (isSelf(to.host)) to.host = cfg.host
-    const e = {
+    /** @type {Omit<Envelope, 'sig'>} */
+    const unsigned = {
       id: crypto.randomUUID(),
       from: `${sanitizeName(d.from || 'cli')}@${cfg.host}`,
       to: `${to.name}@${to.host}`,
@@ -389,10 +446,11 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       sent_at: now(),
       expires_at: now() + (Number(d.ttl_ms) > 0 ? Math.min(Number(d.ttl_ms), cfg.ttlMs) : cfg.ttlMs),
     }
-    e.sig = signEnvelope(cfg.secret, e)
+    /** @type {Envelope} */
+    const e = { ...unsigned, sig: signEnvelope(cfg.secret, unsigned) }
     if (to.host === cfg.host) {
       let st
-      try { st = accept(e) } catch (err) { throw httpErr(503, `could not queue message: ${err.message}`) }
+      try { st = accept(e) } catch (err) { throw httpErr(503, `could not queue message: ${errMsg(err)}`) }
       if (!st) throw httpErr(500, 'could not queue message')
       return { id: e.id, to: e.to, status: st === 'live' ? 'delivered (live session on this machine)' : `queued on this machine until ${e.to} connects` }
     }
@@ -405,15 +463,16 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       if (remote) q.forwarded.run(now(), e.id)
       else q.failed.run(`rejected by ${to.host} (invalid or malformed message)`, now(), e.id)
     } catch (err) {
-      if (!err.self) {
+      if (!isSelfErr(err)) {
         q.retry.run(now() + backoff(0), errText(err), now(), e.id)
-        const row = q.get.get(e.id)
+        const row = msgRow(e.id)
         // the message is stored durably now: answer the client and hand out copies in the background
         // (trying several offline candidates in turn could otherwise outlast the client's timeout)
         if (row?.state === 'pending') { replicating = true; replicate(to.host, [row]) }
       }
     }
-    const r = q.get.get(e.id)
+    const r = msgRow(e.id)
+    if (!r) throw httpErr(500, 'message vanished from the store')
     let status
     if (r.role === 'inbox') status = `${to.host} is this machine — ${sessions.has(to.name) ? 'delivered (live)' : `queued until ${to.name} connects`}`
     else if (r.state === 'forwarded') status = remote === 'live' ? `delivered to ${e.to} (live)` : `stored on ${to.host}; will be delivered when ${to.name} connects`
@@ -436,8 +495,10 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
 
   // ---------- HTTP ----------
   /** JSON reply, signed when answering an authenticated request. */
+  /** @param {Res} res @param {number} status @param {unknown} obj */
   function reply(res, status, obj) {
     const body = JSON.stringify(obj)
+    /** @type {Record<string, string>} */
     const headers = { 'content-type': 'application/json' }
     if (res.reqAuth) headers['x-agentlink-sig'] = signResponse(cfg.secret, res.reqAuth, nodeHeader, body)
     res.writeHead(status, headers)
@@ -450,8 +511,9 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     if (!err.status) log('request error', req.method, req.url, err)
   })
 
+  /** @param {http.IncomingMessage} req @param {Res} res */
   async function handle(req, res) {
-    const u = new URL(req.url, 'http://x')
+    const u = new URL(req.url || '/', 'http://x')
     const p = u.pathname
     res.setHeader('x-agentlink-node', nodeHeader)
     if (p === '/health') return reply(res, 200, { ok: true, host: cfg.host, net: cfg.net, version: VERSION, pid: process.pid })
@@ -470,12 +532,14 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       })
       return
     }
-    const nodeHdr = req.headers['x-agentlink-node'] || ''
+    const nodeHdr = String(req.headers['x-agentlink-node'] || '')
     const auth = req.headers['x-agentlink-auth']
     const body = req.method === 'POST' ? await readBody(req) : ''
-    if (!checkAuth(cfg.secret, auth, req.method, p, body, nodeHdr, nonces))
+    const method = req.method || 'GET'
+    if (!checkAuth(cfg.secret, auth, method, p, body, nodeHdr, nonces))
       return reply(res, 401, { error: 'unauthorized (different network secret, replayed request, or clocks more than 5 minutes apart)' })
-    res.reqAuth = auth
+    res.reqAuth = /** @type {string} checked above */ (auth)
+    /** @type {Record<string, any>} request body (untrusted: every field is checked where it's used) */
     let d = {}
     if (body) { try { d = JSON.parse(body) } catch { return reply(res, 400, { error: 'bad JSON' }) } }
     if (!d || typeof d !== 'object') d = {}
@@ -486,13 +550,14 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     switch (`${req.method} ${p}`) {
       // ---- node <-> node ----
       case 'POST /v1/deliver': {
+        /** @type {Record<string, string>} */
         const results = {}
         for (const e of Array.isArray(d.messages) ? d.messages.slice(0, 2000) : []) {
           let st
           try { st = accept(e) } catch (err) {
             // temporary storage failure: 503 makes the sender back off and retry the whole batch
             // (already-stored ids are deduplicated), instead of marking messages permanently failed
-            log('could not store delivered messages:', err.message)
+            log('could not store delivered messages:', errMsg(err))
             throw httpErr(503, 'temporarily unable to store messages; retry later')
           }
           if (st) results[e.id] = st
@@ -548,7 +613,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       case 'GET /local/status':
         return reply(res, 200, {
           host: cfg.host, aliases: [...selfAliases], net: cfg.net, port: cfg.port, version: VERSION, pid: process.pid,
-          sessions: [...sessions.keys()], counts: q.counts.all(), peers: q.peers.all(),
+          sessions: [...sessions.keys()], counts: q.counts.all(), peers: allPeers(),
           pending: db.prepare(`SELECT id,to_addr,role,attempts,replicated,last_error FROM messages WHERE state='pending' ORDER BY sent_at LIMIT 20`).all(),
         })
       case 'POST /local/shutdown':
@@ -594,21 +659,24 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 let packing = null
 /** npm-pack this installation so another machine can install it from us. */
+/** @param {string} dir @returns {Promise<string>} path of the tarball */
 function packTarball(dir) {
   return packing ||= (async () => {
     const out = path.join(dir, 'dist')
     fs.rmSync(out, { recursive: true, force: true })
     fs.mkdirSync(out, { recursive: true })
     const { stdout } = await execFileP('npm', ['pack', '--silent', '--pack-destination', out], { cwd: PKG_ROOT })
-    return path.join(out, stdout.trim().split('\n').pop())
+    return path.join(out, stdout.trim().split('\n').pop() || '')
   })().finally(() => setTimeout(() => { packing = null }, 60_000))
 }
 
 /** install.sh with this network preset: package from us, secret, and how to reach us. */
+/** @param {string | undefined} hostHeader @param {Config} cfg */
 function installScript(hostHeader, cfg) {
-  const sh = v => `'${String(v).replace(/'/g, `'\\''`)}'`
+  const sh = (/** @type {unknown} */ v) => `'${String(v).replace(/'/g, `'\\''`)}'`
   // the name the joining machine used to reach us is, by definition, one that works for it
-  const used = /^[a-z0-9.-]+(:\d{1,5})?$/i.test(String(hostHeader || '')) ? hostHeader : `${cfg.host}:${cfg.port}`
+  const hh = String(hostHeader || '')
+  const used = /^[a-z0-9.-]+(:\d{1,5})?$/i.test(hh) ? hh : `${cfg.host}:${cfg.port}`
   const peers = [...new Set([used.includes(':') ? used : `${used}:${cfg.port}`, `${cfg.host}:${cfg.port}`])]
   const preset = [
     `AGENTLINK_PKG=${sh(`http://${used}/pkg.tgz?k=${encodeURIComponent(cfg.secret)}`)}`,
@@ -617,15 +685,19 @@ function installScript(hostHeader, cfg) {
   return fs.readFileSync(path.join(PKG_ROOT, 'install.sh'), 'utf8').replace('#@@PRESET@@', preset)
 }
 
+/** @param {http.ServerResponse} res @param {string} event @param {unknown} data */
 function sse(res, event, data) { res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`) }
+/** An error carrying the HTTP status to reply with. @param {number} status @param {string} message */
 function httpErr(status, message) { return Object.assign(new Error(message), { status }) }
-const isLoopback = a => a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1'
+const isLoopback = (/** @type {string | undefined} */ a) => a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1'
 
+/** @param {http.IncomingMessage} req @returns {Promise<string>} */
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let size = 0
+    /** @type {Buffer[]} */
     const chunks = []
-    req.on('data', c => {
+    req.on('data', (/** @type {Buffer} */ c) => {
       size += c.length
       if (size > MAX_REQ) { reject(httpErr(413, 'request too large')); req.destroy() } else chunks.push(c)
     })
@@ -633,3 +705,6 @@ function readBody(req) {
     req.on('error', reject)
   })
 }
+
+/** A request() failure meaning "that name is this machine; the rows were taken into our inbox". */
+const isSelfErr = (/** @type {unknown} */ err) => !!(err && typeof err === 'object' && 'self' in err && err.self)

@@ -11,8 +11,9 @@ export function homeDir() {
 }
 export const configPath = () => path.join(homeDir(), 'config.json')
 
-export function normHost(h) {
-  h = String(h || '').trim().toLowerCase().replace(/\.$/, '')
+/** Normalise a machine name (lowercase, `.local` for bare names); throws if invalid. @param {unknown} input @returns {string} */
+export function normHost(input) {
+  let h = String(input || '').trim().toLowerCase().replace(/\.$/, '')
   if (!h) throw new Error('empty host')
   // hostnames / IPv4 only: keeps addresses from being turned into arbitrary URLs
   if (!/^[a-z0-9]([a-z0-9-]{0,62})(\.[a-z0-9]([a-z0-9-]{0,62}))*$/.test(h) || h.length > 253) throw new Error(`invalid host "${h}"`)
@@ -21,26 +22,37 @@ export function normHost(h) {
 }
 
 /** A dialable "host:port" (hostname or IPv4, or [IPv6]) — anything else is refused. */
+/** @param {unknown} a @returns {a is string} */
 export function validAddr(a) {
   if (typeof a !== 'string') return false
   const m = a.match(/^(\[[0-9a-f:.]+\]|[a-z0-9.-]+):(\d{1,5})$/i)
   return !!m && Number(m[2]) > 0 && Number(m[2]) < 65536
 }
 
+/** @param {unknown} n */
 export function sanitizeName(n) {
   const s = String(n || '').toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 48)
   return s || 'agent'
 }
 
-/** "name@host" | "name" -> {name, host} */
-export function parseAddr(a, selfHost) {
-  a = String(a || '').trim()
+/**
+ * "name@host" | "name" -> {name, host}
+ * @param {unknown} input
+ * @param {string} selfHost
+ * @returns {{ name: string, host: string }}
+ */
+export function parseAddr(input, selfHost) {
+  const a = String(input || '').trim()
   const i = a.lastIndexOf('@')
   if (i < 0) return { name: sanitizeName(a), host: selfHost }
   return { name: sanitizeName(a.slice(0, i)), host: normHost(a.slice(i + 1)) }
 }
 
-/** "host" | "host:port" | "1.2.3.4:7777" -> { host, addr|null } */
+/**
+ * "host" | "host:port" | "1.2.3.4:7777" -> { host, addr|null }
+ * @param {unknown} p
+ * @returns {import('./types.js').PeerSpec | null}
+ */
 export function parsePeer(p) {
   const m = String(p || '').trim().toLowerCase().match(/^([^:\s]+)(?::(\d+))?$/)
   if (!m) return null
@@ -69,6 +81,7 @@ export function tailscaleName() {
   return null
 }
 
+/** @param {string} h */
 const hostSafe = h => String(h).trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63) || 'agentlink-host'
 
 export function detectHost() {
@@ -79,12 +92,14 @@ export function detectHost() {
 }
 
 /** Short public fingerprint of the secret: lets nodes recognise their own network on the LAN. */
-export const networkId = secret => crypto.createHash('sha256').update('agentlink-net:' + secret).digest('hex').slice(0, 12)
+export const networkId = (/** @type {string} */ secret) => crypto.createHash('sha256').update('agentlink-net:' + secret).digest('hex').slice(0, 12)
 
+/** @returns {import('./types.js').Config} */
 export function loadConfig() {
+  /** @type {import('./types.js').ConfigFile} */
   let file = {}
   try { file = JSON.parse(fs.readFileSync(configPath(), 'utf8')) } catch (e) {
-    if (e.code !== 'ENOENT') throw new Error(`bad config ${configPath()}: ${e.message}`)
+    if (/** @type {NodeJS.ErrnoException} */ (e).code !== 'ENOENT') throw new Error(`bad config ${configPath()}: ${errMsg(e)}`)
   }
   const secret = process.env.AGENTLINK_SECRET || file.secret
   if (!secret) throw new Error(`agentlink is not set up (no ${configPath()}). Run: agentlink setup <secret>`)
@@ -101,7 +116,7 @@ export function loadConfig() {
     host,
     aliases: [...aliases],
     port: Number(process.env.AGENTLINK_PORT || file.port || 7777),
-    peers: (file.peers || []).map(parsePeer).filter(Boolean),  // extra peers beyond LAN discovery (Tailscale names, IPs)
+    peers: (file.peers || []).map(parsePeer).filter(p => p !== null),  // extra peers beyond LAN discovery (Tailscale names, IPs)
     routes: file.routes || {},                        // host -> "ip:port" overrides
     discoveryPort: Number(process.env.AGENTLINK_DISCOVERY_PORT || file.discoveryPort || 0) || undefined,
     discovery: process.env.AGENTLINK_DISCOVERY ? process.env.AGENTLINK_DISCOVERY !== '0' : file.discovery !== false,
@@ -110,6 +125,7 @@ export function loadConfig() {
   }
 }
 
+/** Merge `obj` into config.json. @param {import('./types.js').ConfigFile} obj */
 export function writeConfig(obj) {
   fs.mkdirSync(homeDir(), { recursive: true, mode: 0o700 })
   let cur = {}
@@ -120,3 +136,6 @@ export function writeConfig(obj) {
 }
 
 export const newSecret = () => crypto.randomBytes(24).toString('base64url')
+
+/** The message of a caught value (which may not be an Error). @param {unknown} e */
+export const errMsg = e => e instanceof Error ? e.message : String(e)

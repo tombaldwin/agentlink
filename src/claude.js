@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { errMsg } from './config.js'
 
 export const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'agentlink.js')
 const HOME = os.homedir()
@@ -16,20 +17,21 @@ const SUBCOMMANDS = new Set(['mcp', 'config', 'doctor', 'update', 'upgrade', 'in
 
 /** A node path that survives upgrades (e.g. /opt/homebrew/bin/node rather than .../Cellar/node/23.6.0/bin/node). */
 export function nodePath() {
-  const real = p => { try { return fs.realpathSync(p) } catch { return null } }
+  const real = (/** @type {string} */ p) => { try { return fs.realpathSync(p) } catch { return null } }
   const me = real(process.execPath)
-  for (const cand of [which('node'), '/opt/homebrew/bin/node', '/usr/local/bin/node'].filter(Boolean)) {
+  for (const cand of [which('node'), '/opt/homebrew/bin/node', '/usr/local/bin/node'].filter(c => c !== null)) {
     if (real(cand) === me) return cand
   }
   return process.execPath
 }
 export const adapterCmd = () => [nodePath(), '--no-warnings', BIN, 'mcp']
 /** Double-quote for sh, escaping the characters that stay special inside double quotes. */
-const dq = v => `"${String(v).replace(/[\\"$`]/g, '\\$&')}"`
+const dq = (/** @type {unknown} */ v) => `"${String(v).replace(/[\\"$`]/g, '\\$&')}"`
 /** Single-quote for sh. */
-const sq = v => `'${String(v).replace(/'/g, `'\\''`)}'`
+const sq = (/** @type {unknown} */ v) => `'${String(v).replace(/'/g, `'\\''`)}'`
 const launcher = () => `${dq(nodePath())} --no-warnings ${dq(BIN)} claude`
 
+/** Full path of `cmd` on PATH, or null. @param {string} cmd */
 export function which(cmd) {
   const r = spawnSync('which', [cmd], { encoding: 'utf8' })
   return r.status === 0 ? r.stdout.trim().split('\n')[0] : null
@@ -43,9 +45,9 @@ export function primaryRc() {
   return path.join(HOME, shell === 'bash' ? (process.platform === 'darwin' ? '.bash_profile' : '.bashrc') : '.zshrc')
 }
 
-const expand = p => p.replace(/^~(?=\/|$)/, HOME).replace(/\$\{?HOME\}?/g, HOME)
-const stripBlock = s => s.replace(new RegExp(`\\n?${escRe(BEGIN)}[\\s\\S]*?${escRe(END)}\\n?`, 'g'), '\n')
-const escRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const expand = (/** @type {string} */ p) => p.replace(/^~(?=\/|$)/, HOME).replace(/\$\{?HOME\}?/g, HOME)
+const stripBlock = (/** @type {string} */ s) => s.replace(new RegExp(`\\n?${escRe(BEGIN)}[\\s\\S]*?${escRe(END)}\\n?`, 'g'), '\n')
+const escRe = (/** @type {string} */ s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 /** Shell aliases that run claude with a CLAUDE_CONFIG_DIR, e.g. alias claude2='CLAUDE_CONFIG_DIR="$HOME/.claude2" claude' */
 function accountAliases() {
@@ -68,6 +70,7 @@ function accountAliases() {
  * Returns [{ dir: ''|absPath, alias: 'claude'|'claude2'|..., aliasValue? }]
  */
 export function claudeAccounts() {
+  /** @type {Map<string, import('./types.js').ClaudeAccount>} */
   const byDir = new Map([['', { dir: '', alias: 'claude' }]])
   for (const e of fs.readdirSync(HOME)) {
     if (!e.startsWith('.claude') || e === '.claude') continue
@@ -78,8 +81,10 @@ export function claudeAccounts() {
   return [...byDir.values()]
 }
 
+/** Claude's per-account config file ('' = default account). @param {string} dir */
 const configFile = dir => dir ? path.join(dir, '.claude.json') : path.join(HOME, '.claude.json')
 
+/** @param {string} dir */
 export function isRegistered(dir) {
   try {
     const s = JSON.parse(fs.readFileSync(configFile(dir), 'utf8')).mcpServers?.agentlink
@@ -87,6 +92,7 @@ export function isRegistered(dir) {
   } catch { return false }
 }
 
+/** @param {string} dir */
 const envFor = dir => {
   const env = { ...process.env }
   if (dir) env.CLAUDE_CONFIG_DIR = dir
@@ -94,7 +100,7 @@ const envFor = dir => {
   return env
 }
 
-/** Register the agentlink MCP server (user scope) in one account. */
+/** Register the agentlink MCP server (user scope) in one account. @param {string} dir */
 export function register(dir) {
   const claude = which('claude')
   if (!claude) throw new Error('claude not found on PATH')
@@ -104,6 +110,7 @@ export function register(dir) {
   if (r.status !== 0) throw new Error((r.stderr || r.stdout || `exit ${r.status}`).trim())
 }
 
+/** @param {string} dir */
 export function unregister(dir) {
   const claude = which('claude')
   if (claude) spawnSync(claude, ['mcp', 'remove', '-s', 'user', 'agentlink'], { stdio: 'ignore', env: envFor(dir) })
@@ -120,7 +127,10 @@ export function peerAliases(accounts = claudeAccounts()) {
   })
 }
 
-/** Rewrite the managed block in the shell rc (aliases + optional PATH entry). */
+/**
+ * Rewrite the managed block in the shell rc (aliases + optional PATH entry).
+ * @param {{ pathDir?: string }} [opts]
+ */
 export function writeShellBlock({ pathDir } = {}) {
   const rc = primaryRc()
   let cur = ''
@@ -134,6 +144,12 @@ export function writeShellBlock({ pathDir } = {}) {
   return writeBlock(rc, cur, pathDir, false)
 }
 
+/**
+ * @param {string} rc
+ * @param {string} cur
+ * @param {string | undefined} pathDir
+ * @param {boolean} force
+ */
 function writeBlock(rc, cur, pathDir, force) {
   const aliases = peerAliases()
   const lines = [BEGIN]
@@ -154,6 +170,10 @@ export function removeShellBlock() {
 }
 
 /** `agentlink claude [args]`: run claude for the current account with agentlink enabled. */
+/**
+ * @param {string[]} args
+ * @param {() => Promise<unknown>} ensureNode
+ */
 export async function launchClaude(args, ensureNode) {
   const claude = which('claude')
   if (!claude) { console.error('agentlink: claude not found on PATH'); process.exit(127) }
@@ -162,9 +182,9 @@ export async function launchClaude(args, ensureNode) {
   if (!passthrough) {
     if (!isRegistered(dir)) {
       try { register(dir); console.error(`agentlink: enabled for this Claude account (${dir || 'default'})`) }
-      catch (e) { console.error(`agentlink: could not register with this account: ${e.message}`) }
+      catch (e) { console.error(`agentlink: could not register with this account: ${errMsg(e)}`) }
     }
-    await ensureNode().catch(e => console.error(`agentlink: ${e.message}`))
+    await ensureNode().catch(e => console.error(`agentlink: ${errMsg(e)}`))
   }
   // AGENTLINK_CHANNEL tells the adapter that this session really has the channel enabled; without
   // it (a plain `claude`), pushed messages would be ignored, so the adapter keeps them for `inbox`

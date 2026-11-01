@@ -24,14 +24,17 @@ function broadcastAddrs() {
  * onPeer({host, addr}) is called for each valid beacon from another node on our network.
  * Beacons can be replayed by anyone on the LAN, so callers must treat addr as a hint and
  * verify it (authenticated hello) before routing traffic to it.
+ * @param {import('./types.js').Config} cfg
+ * @param {(peer: { host: string, addr: string }) => void} onPeer
+ * @param {(...a: any[]) => void} log
  */
 export function startDiscovery(cfg, onPeer, log) {
   const port = cfg.discoveryPort || cfg.port
   const sock = dgram.createSocket({ type: 'udp4', reuseAddr: true })
+  /** @param {boolean} reply */
   const beacon = reply => {
-    const b = { host: cfg.host, net: cfg.net, port: cfg.port, ts: Date.now(), reply: !!reply }
-    b.sig = signBeacon(cfg.secret, b)
-    return Buffer.from(JSON.stringify(b))
+    const b = { host: cfg.host, net: cfg.net, port: cfg.port, ts: Date.now(), reply }
+    return Buffer.from(JSON.stringify({ ...b, sig: signBeacon(cfg.secret, b) }))
   }
   const announce = () => {
     const msg = beacon(false)

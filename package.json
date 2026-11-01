@@ -14,10 +14,15 @@
   "scripts": {
     "test": "npm run test:unit && npm run test:e2e",
     "test:unit": "node --no-warnings --test test/unit/*.test.js",
-    "test:e2e": "node --no-warnings test/e2e.js"
+    "test:e2e": "node --no-warnings test/e2e.js",
+    "typecheck": "tsc -p ."
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^7.0.2"
   },
   "license": "MIT"
 }

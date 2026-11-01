@@ -4,23 +4,29 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { writeConfig, loadConfig, newSecret, homeDir, tailscaleName } from './config.js'
+import { writeConfig, loadConfig, newSecret, homeDir, tailscaleName, errMsg } from './config.js'
 import { Local } from './local.js'
 import { claudeAccounts, register, unregister, writeShellBlock, removeShellBlock, which, nodePath } from './claude.js'
 
 const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'agentlink.js')
 const LABEL = 'com.agentlink.node'
-const sleep = ms => new Promise(r => setTimeout(r, ms))
-const ok = m => console.log(`  ✓ ${m}`)
-const warn = m => console.log(`  ! ${m}`)
+const uid = () => process.getuid?.() ?? 0   // launchd domain (macOS only, where getuid exists)
+const sleep = (/** @type {number} */ ms) => new Promise(r => setTimeout(r, ms))
+const ok = (/** @type {string} */ m) => console.log(`  ✓ ${m}`)
+const warn = (/** @type {string} */ m) => console.log(`  ! ${m}`)
 
+/**
+ * @param {{ secret?: string, host?: string, peers?: string[], noService?: boolean, noClaude?: boolean, noAlias?: boolean, newNetwork?: boolean }} opts
+ */
 export async function setup({ secret, host, peers = [], noService, noClaude, noAlias, newNetwork }) {
   noService ||= process.env.AGENTLINK_NO_SERVICE === '1'
   if (secret && String(secret).length < 24) throw new Error('network secret must be at least 24 characters (omit it to generate one)')
   console.log(`agentlink setup`)
+  /** @type {import('./types.js').ConfigFile} */
   let existing = {}
   try { existing = JSON.parse(fs.readFileSync(path.join(homeDir(), 'config.json'), 'utf8')) } catch {}
   // the running node (if any) only accepts requests signed with the secret it was started with
+  /** @type {import('./types.js').Config | null} */
   let prev = null
   try { prev = loadConfig() } catch {}
   // re-running setup without a secret refreshes this machine; it never silently leaves the network
@@ -39,16 +45,17 @@ export async function setup({ secret, host, peers = [], noService, noClaude, noA
   // stop any node already running (e.g. an older version or one started by a session), so the
   // new config takes effect; sign the request with whichever secret that node may be using
   const local = new Local(cfg)
-  await stopRunningNode([prev, cfg].filter(Boolean))
+  await stopRunningNode(prev ? [prev, cfg] : [cfg])
 
   if (!noService) {
     try { installService(); ok('background node installed (starts at login, restarts if it dies)') }
-    catch (e) { warn(`could not install background service (${e.message}); sessions will start the node on demand`) }
+    catch (e) { warn(`could not install background service (${errMsg(e)}); sessions will start the node on demand`) }
   }
   try { const h = await local.ensureNode(); ok(`node running on port ${cfg.port} (pid ${h.pid})`) }
-  catch (e) { warn(e.message) }
+  catch (e) { warn(errMsg(e)) }
 
   if (!noClaude) registerClaude()
+  /** @type {string[]} */
   let aliases = []
   if (!noAlias) {
     const r = writeShellBlock({ pathDir: process.env.AGENTLINK_BIN_DIR })
@@ -66,12 +73,13 @@ Name a session with AGENTLINK_NAME=<name> (default: the project folder name).`)
 }
 
 /** Stop the node on this machine, trying each candidate config's port and secret. */
+/** @param {import('./types.js').Config[]} cfgs */
 async function stopRunningNode(cfgs) {
   for (const c of cfgs) {
     const l = new Local(c)
     const h = await l.health()
     if (!h || h.net !== c.net) continue
-    try { await l.req('POST', '/local/shutdown') } catch (e) { warn(`could not stop the running node: ${e.message}`); continue }
+    try { await l.req('POST', '/local/shutdown') } catch (e) { warn(`could not stop the running node: ${errMsg(e)}`); continue }
     for (let i = 0; i < 30 && await l.health(); i++) await sleep(100)
     return
   }
@@ -82,12 +90,14 @@ async function stopRunningNode(cfgs) {
 }
 
 /** Percent-encode so the result is safe both in a URL query and inside a double-quoted shell word. */
-const urlSafe = s => encodeURIComponent(s).replace(/[!'()*~]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase())
+const urlSafe = (/** @type {string} */ s) => encodeURIComponent(s).replace(/[!'()*~]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase())
 
 /** The one line to paste on another machine: fetches the installer from this machine's node. */
+/** @type {(cfg: { secret: string, port: number, host: string }, host?: string) => string} */
 export const installLine = (cfg, host = cfg.host) => `curl -fsSL "http://${host}:${cfg.port}/install?k=${urlSafe(cfg.secret)}" | sh`
 
 /** Ready-to-paste instructions (for a person, or for Claude) to add another machine. */
+/** @param {import('./types.js').Config} cfg */
 export function invitePrompt(cfg) {
   const ts = tailscaleName()
   let prompt = `Join my agentlink network: run  ${installLine(cfg)}`
@@ -107,7 +117,7 @@ function registerClaude() {
   for (const acct of claudeAccounts()) {
     const label = acct.dir ? `${acct.alias} (${acct.dir})` : 'default account'
     try { register(acct.dir); ok(`enabled for Claude account: ${label}`) }
-    catch (e) { warn(`could not enable for ${label}: ${e.message}`) }
+    catch (e) { warn(`could not enable for ${label}: ${errMsg(e)}`) }
   }
 }
 
@@ -134,7 +144,7 @@ export function installService() {
   <key>StandardErrorPath</key><string>${esc(logFile)}</string>
 </dict></plist>
 `)
-    const dom = `gui/${process.getuid()}`
+    const dom = `gui/${uid()}`
     spawnSync('launchctl', ['bootout', `${dom}/${LABEL}`], { stdio: 'ignore' })
     execFileSync('launchctl', ['bootstrap', dom, plist], { stdio: 'pipe' })
     return
@@ -170,7 +180,7 @@ export async function uninstall() {
     if (await local.health()) await local.req('POST', '/local/shutdown')
   } catch {}
   if (process.platform === 'darwin') {
-    spawnSync('launchctl', ['bootout', `gui/${process.getuid()}/${LABEL}`], { stdio: 'ignore' })
+    spawnSync('launchctl', ['bootout', `gui/${uid()}/${LABEL}`], { stdio: 'ignore' })
     fs.rmSync(path.join(os.homedir(), 'Library', 'LaunchAgents', `${LABEL}.plist`), { force: true })
   } else if (process.platform === 'linux') {
     spawnSync('systemctl', ['--user', 'disable', '--now', 'agentlink'], { stdio: 'ignore' })
@@ -182,5 +192,5 @@ export async function uninstall() {
 }
 
 /** systemd unit quoting: double quotes, escaped \\ and ", and % doubled (specifier escape). */
-const sdQuote = v => `"${String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%')}"`
-const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+const sdQuote = (/** @type {unknown} */ v) => `"${String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%')}"`
+const esc = (/** @type {unknown} */ s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')

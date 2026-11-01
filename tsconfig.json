@@ -1,0 +1,15 @@
+{
+  // Type-check the plain-JS sources without a build step: nothing is emitted, the code still runs as-is.
+  "compilerOptions": {
+    "target": "es2023",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["bin/**/*.js", "src/**/*.js"]
+}

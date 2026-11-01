@@ -6,14 +6,22 @@ import { fileURLToPath } from 'node:url'
 import { authHeader } from './crypto.js'
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'agentlink.js')
-const sleep = ms => new Promise(r => setTimeout(r, ms))
+const sleep = (/** @type {number} */ ms) => new Promise(r => setTimeout(r, ms))
 
 export class Local {
+  /** @param {import('./types.js').Config} cfg */
   constructor(cfg) {
     this.cfg = cfg
     this.base = `http://127.0.0.1:${cfg.port}`
   }
 
+  /**
+   * Signed request to the local node's API; throws with the node's error message on failure.
+   * @param {'GET'|'POST'} method
+   * @param {string} p
+   * @param {object} [obj]
+   * @returns {Promise<any>}
+   */
   async req(method, p, obj, query = '') {
     const body = obj === undefined ? '' : JSON.stringify(obj)
     const res = await fetch(this.base + p + query, {
@@ -27,6 +35,7 @@ export class Local {
     return data
   }
 
+  /** @returns {Promise<import('./types.js').Health | null>} */
   async health() {
     try {
       const r = await fetch(this.base + '/health', { signal: AbortSignal.timeout(1000) })
@@ -55,13 +64,19 @@ export class Local {
   }
 
   /** Long-lived SSE stream of messages for session `name`; `token` lets a reconnect reclaim the same name. Resolves when the stream ends. */
+  /**
+   * @param {string} name
+   * @param {string} token
+   * @param {(event: string, data: any) => Promise<void> | void} onEvent
+   * @param {AbortSignal} [signal]
+   */
   async stream(name, token, onEvent, signal) {
     const p = '/local/stream'
     const res = await fetch(`${this.base}${p}?name=${encodeURIComponent(name)}&token=${encodeURIComponent(token)}`, {
       headers: { 'x-agentlink-auth': authHeader(this.cfg.secret, 'GET', p, '') },
       signal,
     })
-    if (!res.ok) throw new Error(`stream HTTP ${res.status}`)
+    if (!res.ok || !res.body) throw new Error(`stream HTTP ${res.status}`)
     const dec = new TextDecoder()
     let buf = ''
     for await (const chunk of res.body) {

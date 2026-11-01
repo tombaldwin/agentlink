@@ -8,10 +8,10 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { Local } from './local.js'
-import { sanitizeName, VERSION } from './config.js'
+import { sanitizeName, errMsg, VERSION } from './config.js'
 
-const log = (...a) => console.error('[agentlink]', ...a)
-const sleep = ms => new Promise(r => setTimeout(r, ms))
+const log = (/** @type {unknown[]} */ ...a) => console.error('[agentlink]', ...a)
+const sleep = (/** @type {number} */ ms) => new Promise(r => setTimeout(r, ms))
 
 /**
  * Was the Claude Code session that started us launched with the agentlink channel enabled?
@@ -26,6 +26,10 @@ export function channelEnabled() {
   } catch { return process.env.AGENTLINK_CHANNEL === '1' }
 }
 
+/**
+ * @param {import('./types.js').Config} cfg
+ * @param {{ name?: string, poll?: boolean, channel?: boolean }} [opts] channel: force channel mode (default: detect)
+ */
 export async function runAdapter(cfg, { name, poll = false, channel } = {}) {
   // not a channel session (a plain `claude`, or --poll): keep messages queued for the inbox tool
   if (!poll && !(channel ?? channelEnabled())) {
@@ -36,15 +40,21 @@ export async function runAdapter(cfg, { name, poll = false, channel } = {}) {
   let myName = sanitizeName(name || process.env.AGENTLINK_NAME || path.basename(process.cwd()))
   let address = `${myName}@${cfg.host}`
   let ready = false
-  const early = []          // messages that arrived before the client finished initialising
-  const seen = new Set()    // ids already pushed (dedupe across reconnects)
-  const inbox = []          // poll mode buffer
+  /** @typedef {import('./types.js').InboundMessage} InboundMessage */
+  /** @type {InboundMessage[]} messages that arrived before the client finished initialising */
+  const early = []
+  /** @type {Set<string>} ids already pushed (dedupe across reconnects) */
+  const seen = new Set()
+  /** @type {InboundMessage[]} poll mode buffer */
+  const inbox = []
 
   const token = crypto.randomUUID()   // identifies this session to the node across reconnects
-  const failures = new Map()          // msg id -> failed push attempts
-  const ack = ids => local.req('POST', '/local/ack', { name: myName, ids }).catch(e => log('ack failed:', e.message))
-  const nack = ids => local.req('POST', '/local/nack', { name: myName, ids }).catch(() => {})
+  /** @type {Map<string, number>} msg id -> failed push attempts */
+  const failures = new Map()
+  const ack = (/** @type {string[]} */ ids) => local.req('POST', '/local/ack', { name: myName, ids }).catch(e => log('ack failed:', errMsg(e)))
+  const nack = (/** @type {string[]} */ ids) => local.req('POST', '/local/nack', { name: myName, ids }).catch(() => {})
 
+  /** @param {InboundMessage} m */
   async function onMessage(m) {
     if (!ready) { early.push(m); return }
     if (seen.has(m.id)) return ack([m.id])
@@ -61,7 +71,7 @@ export async function runAdapter(cfg, { name, poll = false, channel } = {}) {
         },
       })
     } catch (e) {
-      log('could not push message to session:', e.message)
+      log('could not push message to session:', errMsg(e))
       const n = (failures.get(m.id) || 0) + 1
       failures.set(m.id, n)
       if (n <= 3) return nack([m.id])    // the node offers it again; after that it waits for a reconnect
@@ -72,7 +82,8 @@ export async function runAdapter(cfg, { name, poll = false, channel } = {}) {
   }
 
   // ---- connect to the local node (auto-start it), keep reconnecting forever ----
-  let firstHello
+  /** @type {(hello: unknown) => void} */
+  let firstHello = () => {}
   const helloP = new Promise(r => { firstHello = r })
   ;(async () => {
     let delay = 500
@@ -84,10 +95,10 @@ export async function runAdapter(cfg, { name, poll = false, channel } = {}) {
             myName = d.name; address = d.address; delay = 500
             firstHello(d)
           } else if (ev === 'message') {
-            await onMessage(d).catch(e => log('deliver failed:', e.message))
+            await onMessage(d).catch(e => log('deliver failed:', errMsg(e)))
           }
         })
-      } catch (e) { log('node connection:', e.message) }
+      } catch (e) { log('node connection:', errMsg(e)) }
       await sleep(delay)
       delay = Math.min(delay * 2, 10_000)
     }
@@ -135,12 +146,12 @@ export async function runAdapter(cfg, { name, poll = false, channel } = {}) {
         }
       }
       return text(`unknown tool ${req.params.name}`, true)
-    } catch (e) { return text(`agentlink error: ${e.message}`, true) }
+    } catch (e) { return text(`agentlink error: ${errMsg(e)}`, true) }
   })
 
   mcp.oninitialized = () => {
     ready = true
-    for (const m of early.splice(0)) onMessage(m).catch(e => log('deliver failed:', e.message))
+    for (const m of early.splice(0)) onMessage(m).catch(e => log('deliver failed:', errMsg(e)))
   }
   await mcp.connect(new StdioServerTransport())
   // when Claude Code goes away, go with it (otherwise the session would look "live" to peers)
@@ -177,9 +188,12 @@ const TOOLS = [
   },
 ]
 
+/** @param {string} t */
 function text(t, isError = false) { return { content: [{ type: 'text', text: t }], ...(isError ? { isError: true } : {}) } }
+/** @param {{ id: string, from: string, body: string, sent_at: number }} m */
 function fmtMsg(m) { return `[${new Date(m.sent_at).toISOString()}] from ${m.from} (id ${m.id}):\n${m.body}` }
 
+/** @param {import('./types.js').PeersReply} p @param {string} me */
 function formatPeers(p, me) {
   const lines = [`You are ${me}`, '', `${p.self} (this machine): ${p.local.join(', ') || '(none)'}`]
   for (const r of p.remote) lines.push(`${r.host}: ${r.online ? (r.sessions.join(', ') || '(no agents connected)') : 'offline — messages will be held until it returns'}`)

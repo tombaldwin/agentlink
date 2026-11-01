@@ -2,11 +2,15 @@
 import { loadConfig, VERSION } from '../src/config.js'
 
 const [cmd, ...rest] = process.argv.slice(2)
-const flags = {}, pos = []
+/** @type {Record<string, any>} */
+const flags = {}
+/** @type {string[]} */
+const pos = []
 for (let i = 0; i < rest.length; i++) {
   const a = rest[i]
   if (a.startsWith('--')) {
     const [k, v] = a.slice(2).split('=')
+    /** @type {string | true} */
     let val = v
     if (val === undefined) val = rest[i + 1] && !rest[i + 1].startsWith('--') && ['name', 'from', 'host', 'peer'].includes(k) ? rest[++i] : true
     if (k === 'peer') (flags.peer ||= []).push(val)
@@ -48,7 +52,7 @@ async function main() {
         if (fs.existsSync(path.join(homeDir(), 'disabled'))) { console.error('agentlink is uninstalled on this machine; not starting the node'); return }
         const cfg = loadConfig()
         try { await runNode(cfg); return } catch (e) {
-          if (e.code !== 'EADDRINUSE') throw e
+          if (/** @type {NodeJS.ErrnoException} */ (e).code !== 'EADDRINUSE') throw e
           const h = await new Local(cfg).health()
           if (!h || h.net !== cfg.net) { console.error(`port ${cfg.port} is in use by something else`); process.exit(1) }
           if (!waited) { console.error(`another agentlink node (pid ${h.pid}) is running; standing by`); waited = true }
@@ -99,4 +103,4 @@ async function client() {
   return local
 }
 
-main().catch(e => { console.error(`agentlink: ${e.message}`); process.exit(1) })
+main().catch(e => { console.error(`agentlink: ${e instanceof Error ? e.message : e}`); process.exit(1) })

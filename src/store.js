@@ -10,6 +10,7 @@ import { DatabaseSync } from 'node:sqlite'
  *   queued  (inbox: waiting for session)      -> delivered
  *   expired | failed
  */
+/** @param {string} file */
 export function openStore(file) {
   const db = new DatabaseSync(file)
   db.exec(`
