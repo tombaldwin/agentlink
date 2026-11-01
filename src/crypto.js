@@ -1,10 +1,5 @@
 import crypto from 'node:crypto'
 
-/** @type {(secret: string, ...parts: string[]) => string} */
-const hmac = (secret, ...parts) => crypto.createHmac('sha256', secret).update(parts.join('\n')).digest('base64url')
-/** @param {string} s */
-const sha = s => crypto.createHash('sha256').update(s).digest('base64url')
-
 /** Constant-time string comparison; false unless both are strings. @param {unknown} a @param {unknown} b */
 export function safeEq(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false
@@ -12,76 +7,63 @@ export function safeEq(a, b) {
   return x.length === y.length && crypto.timingSafeEqual(x, y)
 }
 
-/** Envelope signature: end-to-end, so a message relayed via other nodes can't be altered by outsiders. */
-/** @type {(secret: string, m: Omit<import('./types.js').Envelope, 'sig'>) => string} */
-export const signEnvelope = (secret, m) =>
-  hmac(secret, 'env', m.id, m.from, m.to, String(m.sent_at), String(m.expires_at), m.body)
-/** @type {(secret: string, m: import('./types.js').Envelope) => boolean} */
-export const verifyEnvelope = (secret, m) => safeEq(m.sig, signEnvelope(secret, m))
+/** @param {string} s */
+export const sha256 = s => crypto.createHash('sha256').update(s).digest('base64url')
 
-export const MAX_SKEW_MS = 5 * 60_000
-
-/**
- * Per-request auth header: "<ts>.<nonce>.<hmac(ts, nonce, method, path, sha(body), nodeHeader)>".
- * The nonce makes each request single-use (see NonceCache); nodeHeader binds the sender's identity.
- */
-/**
- * @param {string} secret
- * @param {string} method
- * @param {string} path
- */
-export function authHeader(secret, method, path, body = '', nodeHeader = '') {
-  const ts = String(Date.now())
-  const nonce = crypto.randomBytes(12).toString('base64url')
-  return `${ts}.${nonce}.${hmac(secret, 'req', ts, nonce, method, path, sha(body), nodeHeader)}`
+/** @param {crypto.KeyLike} key @param {string} payload */
+const sign = (key, payload) => crypto.sign('sha256', Buffer.from(payload), key).toString('base64url')
+/** @param {crypto.KeyLike} pub @param {string} payload @param {unknown} sig */
+function verify(pub, payload, sig) {
+  if (typeof sig !== 'string' || sig.length > 200) return false
+  try { return crypto.verify('sha256', Buffer.from(payload), pub, Buffer.from(sig, 'base64url')) } catch { return false }
 }
 
+/** @param {Omit<import('./types.js').Envelope, 'sig'>} m */
+const envPayload = m => JSON.stringify(['agentlink-env-1', m.id, m.from, m.to, m.sent_at, m.expires_at, m.body])
 /**
- * Returns true if valid (and, when a NonceCache is given, not seen before).
- * @param {string} secret
- * @param {unknown} header
- * @param {string} method
- * @param {string} path
- * @param {NonceCache | null} [nonces]
+ * Envelope signature by the sending machine's key: end to end, so nobody relaying a message
+ * (holders, other members) can alter it, and a member can't send as another machine.
+ * @param {string} key PEM private key @param {Omit<import('./types.js').Envelope, 'sig'>} m
  */
-export function checkAuth(secret, header, method, path, body = '', nodeHeader = '', nonces = null) {
-  if (typeof header !== 'string') return false
-  const parts = header.split('.')
-  if (parts.length !== 3) return false
-  const [ts, nonce, mac] = parts
-  if (!/^\d{1,16}$/.test(ts) || Math.abs(Date.now() - Number(ts)) > MAX_SKEW_MS) return false
-  if (!/^[\w-]{8,64}$/.test(nonce)) return false
-  if (!safeEq(mac, hmac(secret, 'req', ts, nonce, method, path, sha(body), nodeHeader))) return false
-  if (nonces && !nonces.add(nonce)) return false
-  return true
+export const signEnvelope = (key, m) => sign(key, envPayload(m))
+/** @param {crypto.KeyLike} pub @param {import('./types.js').Envelope} m */
+export const verifyEnvelope = (pub, m) => verify(pub, envPayload(m), m.sig)
+
+/** @param {Omit<import('./types.js').RosterRecord, 'sig'>} r */
+const recPayload = r => JSON.stringify(['agentlink-roster-1', r.type, r.host ?? '', r.fp, r.cert ?? '', r.at, r.by, r.dk ?? ''])
+/** @param {string} key @param {Omit<import('./types.js').RosterRecord, 'sig'>} r */
+export const signRecord = (key, r) => sign(key, recPayload(r))
+/** @param {crypto.KeyLike} pub @param {import('./types.js').RosterRecord} r */
+export const verifyRecord = (pub, r) => verify(pub, recPayload(r), r.sig)
+
+/** A fresh discovery key (shared by members, only ever sent over member TLS connections). */
+export const newDiscoveryKey = () => crypto.randomBytes(32).toString('base64')
+
+/**
+ * LAN discovery beacons are encrypted under the discovery key, so people on the same network
+ * (a café) see opaque packets: no machine name, nothing stable to recognise a laptop by.
+ * @param {string} dk base64 key @param {object} obj
+ */
+export function sealBeacon(dk, obj) {
+  const iv = crypto.randomBytes(12)
+  const c = crypto.createCipheriv('aes-256-gcm', Buffer.from(dk, 'base64'), iv)
+  const body = Buffer.concat([c.update(JSON.stringify(obj)), c.final()])
+  return Buffer.concat([iv, body, c.getAuthTag()])
 }
-
-/** Response signature, bound to the request it answers, so a fake node can't forge "delivered". */
-/** @type {(secret: string, reqAuth: string, nodeHeader: string, body: string) => string} */
-export const signResponse = (secret, reqAuth, nodeHeader, body) => hmac(secret, 'resp', reqAuth, nodeHeader || '', sha(body))
-/** @type {(secret: string, reqAuth: string, nodeHeader: string, body: string, sig: string | null) => boolean} */
-export const verifyResponse = (secret, reqAuth, nodeHeader, body, sig) => safeEq(sig, signResponse(secret, reqAuth, nodeHeader, body))
-
-/** Remembers nonces for the auth window; add() returns false for a replay. */
-export class NonceCache {
-  constructor(ttl = MAX_SKEW_MS * 2, max = 200_000) {
-    this.ttl = ttl
-    this.max = max
-    /** @type {Map<string, number>} nonce -> first seen */
-    this.map = new Map()
+/** @param {string[]} dks keys to try @param {Buffer} buf @returns {any} the beacon, or null */
+export function openBeacon(dks, buf) {
+  if (buf.length < 29 || buf.length > 2048) return null
+  for (const dk of dks) {
+    try {
+      const d = crypto.createDecipheriv('aes-256-gcm', Buffer.from(dk, 'base64'), buf.subarray(0, 12))
+      d.setAuthTag(buf.subarray(buf.length - 16))
+      return JSON.parse(Buffer.concat([d.update(buf.subarray(12, buf.length - 16)), d.final()]).toString('utf8'))
+    } catch {}
   }
-  /** @param {string} nonce */
-  add(nonce) {
-    const t = Date.now()
-    if (this.map.has(nonce)) return false
-    this.map.set(nonce, t)
-    if (this.map.size > this.max || this.map.size % 1000 === 0) {
-      for (const [k, at] of this.map) { if (t - at > this.ttl || this.map.size > this.max) this.map.delete(k); else break }
-    }
-    return true
-  }
+  return null
 }
 
-/** Beacon signature (LAN discovery). */
-/** @type {(secret: string, b: { host: string, net: string, port: number, ts: number }) => string} */
-export const signBeacon = (secret, b) => hmac(secret, 'beacon', b.host, b.net, String(b.port), String(b.ts))
+/** A random URL- and shell-safe token. */
+export const randomToken = (bytes = 18) => {
+  for (;;) { const s = crypto.randomBytes(bytes).toString('base64url'); if (!s.startsWith('-')) return s }
+}

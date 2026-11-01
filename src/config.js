@@ -10,9 +10,13 @@ export function homeDir() {
   return process.env.AGENTLINK_HOME || path.join(os.homedir(), '.agentlink')
 }
 export const configPath = () => path.join(homeDir(), 'config.json')
+/** This machine's key, certificate and the network's membership records. */
+export const keyPath = (dir = homeDir()) => path.join(dir, 'node.key')
+export const certPath = (dir = homeDir()) => path.join(dir, 'node.crt')
+export const rosterPath = (dir = homeDir()) => path.join(dir, 'roster.json')
 
 /** Create the agentlink home directory, private to this user even if something (an older installer,
- * a umask-created parent) made it before us: it holds the secret, messages and logs. */
+ * a umask-created parent) made it before us: it holds this machine's private key, messages and logs. */
 export function ensureHomeDir(dir = homeDir()) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
   try { if ((fs.statSync(dir).mode & 0o077) !== 0) fs.chmodSync(dir, 0o700) } catch {}
@@ -110,15 +114,41 @@ export function detectHost() {
 }
 const isLocalhost = (/** @type {string} */ h) => h === 'localhost' || h.startsWith('localhost.')
 
-/** Short public fingerprint of the secret: lets nodes recognise their own network on the LAN. */
-export const networkId = (/** @type {string} */ secret) => crypto.createHash('sha256').update('agentlink-net:' + secret).digest('hex').slice(0, 12)
+/**
+ * This machine's identity, or null if setup hasn't created one.
+ * @returns {import('./types.js').Identity | null}
+ */
+export function readIdentity(dir = homeDir()) {
+  let key, cert
+  try { key = fs.readFileSync(keyPath(dir), 'utf8'); cert = fs.readFileSync(certPath(dir), 'utf8') } catch (e) {
+    if (/** @type {NodeJS.ErrnoException} */ (e).code === 'ENOENT') return null
+    throw e
+  }
+  const pub = crypto.createPublicKey(key)
+  const x = new crypto.X509Certificate(cert)
+  if (!x.publicKey.equals(pub)) throw new Error(`${certPath(dir)} does not match ${keyPath(dir)} — run agentlink setup --new-network to start over`)
+  return { key, cert, fp: crypto.createHash('sha256').update(pub.export({ type: 'spki', format: 'der' })).digest('base64') }
+}
+
+/** @param {import('./types.js').Identity} id */
+export function writeIdentity(id, dir = homeDir()) {
+  ensureHomeDir(dir)
+  fs.writeFileSync(keyPath(dir), id.key, { mode: 0o600 })
+  fs.writeFileSync(certPath(dir), id.cert, { mode: 0o644 })
+}
+
+/** The network this machine belongs to (the founding machine's fingerprint), or null. */
+export function readNet(dir = homeDir()) {
+  try { return String(JSON.parse(fs.readFileSync(rosterPath(dir), 'utf8')).net) } catch { return null }
+}
 
 /** @returns {import('./types.js').Config} */
 export function loadConfig() {
   /** @type {import('./types.js').ConfigFile} */
   const file = readConfigFile() || {}
-  const secret = process.env.AGENTLINK_SECRET || file.secret
-  if (!secret) throw new Error(`agentlink is not set up (no ${configPath()}). Run: agentlink setup <secret>`)
+  const identity = readIdentity()
+  const net = readNet()
+  if (!identity || !net) throw new Error(`agentlink is not set up on this machine. Run: agentlink setup`)
   const explicit = process.env.AGENTLINK_HOST || file.host
   const host = normHost(explicit || detectHost())
   if (isLocalhost(host)) throw new Error(`"${host}" can't identify this machine on the network; run: agentlink setup --host <name>`)
@@ -133,8 +163,8 @@ export function loadConfig() {
   aliases.delete(host)
   return {
     dir: homeDir(),
-    secret,
-    net: networkId(secret),
+    identity,
+    net,
     host,
     aliases: [...aliases],
     port: Number(process.env.AGENTLINK_PORT || file.port || 7777),
@@ -156,7 +186,7 @@ export function writeConfig(obj) {
 }
 
 /** config.json's contents, or null if there is none; a file that exists but can't be read or parsed
- * throws (never treated as empty, which would silently replace the network secret). */
+ * throws (never treated as empty, which would silently change this machine's settings). */
 /** @returns {import('./types.js').ConfigFile | null} */
 export function readConfigFile() {
   let text
@@ -169,11 +199,6 @@ export function readConfigFile() {
     if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('not a JSON object')
     return v
   } catch (e) { throw new Error(`bad config ${configPath()}: ${errMsg(e)} — fix the file (or delete it to start over)`) }
-}
-
-/** A random network secret (base64url, never starting with "-" so it can't be read as a CLI flag). */
-export function newSecret() {
-  for (;;) { const s = crypto.randomBytes(24).toString('base64url'); if (!s.startsWith('-')) return s }
 }
 
 /** The message of a caught value (which may not be an Error), with a network cause code if any. @param {unknown} e */

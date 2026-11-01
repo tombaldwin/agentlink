@@ -12,14 +12,17 @@ Address any agent as `name@host` (e.g. `reviewer@laptop.local`). An incoming mes
 
 **Every other machine** — paste the prompt the first machine printed. It looks like:
 
-> Join my agentlink network: run `curl -fsSL "http://desk.local:7777/install?k=…" | sh` — then tell me how to start Claude with agentlink enabled.
+> Join my agentlink network: run `curl -fsSL -k --pinnedpubkey "sha256//…" "https://desk.local:7777/join/install?t=…" | sh` — then tell me how to start Claude with agentlink enabled.
+
+Each invite adds one machine and expires after 24 hours. The pinned key means curl only talks to
+the machine that made the invite.
 
 **Then** open a new terminal and start Claude with `claude-link` (each extra account gets its
 own alias, e.g. `claude2-link`). Ask it to message another agent; ask it who's online.
 
 That's it: no config files, no accounts, no server to run. The installer needs no sudo and
-brings its own Node.js if the machine doesn't have a recent one. Run `agentlink invite` any
-time to print the join prompt again.
+brings its own Node.js if the machine doesn't have a recent one. Run `agentlink invite` on any
+member for the next machine.
 
 ## What you get
 
@@ -44,26 +47,30 @@ Name a session with `AGENTLINK_NAME=<name> claude-link` (default: the project fo
 ## Commands
 
     agentlink send <name@host> <msg>   agentlink peers     agentlink status
-    agentlink invite                   agentlink claude    agentlink uninstall
+    agentlink invite [--revoke]        agentlink remove <host>
+    agentlink claude                   agentlink uninstall
 
 ## Security
 
-One shared secret per network — it's in the invite, so treat the invite like a password.
+Each machine has its own key. The network is the list of machines' keys, kept and shared by the
+members; any member can invite or remove machines.
 
-- **Outsiders** (no secret) can't send, read the API, fake delivery receipts, replay requests, or
-  redirect traffic: every request, response, message and discovery beacon is HMAC-signed, and a
-  new address for a machine is only used after the node there proves it holds the secret.
-- **Members** (anyone with the secret) are fully trusted: any member machine can send as any
-  address and relay messages. Only add machines you control.
-- **No encryption.** Traffic is plain HTTP, so someone watching your network can read messages,
-  and the first join (`curl … | sh`) is only as trustworthy as the network it runs over. On a
-  home or office LAN that's usually fine; anywhere else, connect machines with Tailscale and
-  join over it.
+- **Encrypted and pinned.** Machines talk TLS, and each side accepts only the keys on that list. A
+  connection to a stored address that someone else now holds (a laptop at a café whose home
+  addresses belong to strangers there) fails during the handshake, before anything is sent.
+- **Joining.** An invite is a one-time token plus the inviting machine's key. Someone watching the
+  network learns nothing from a join, and can't swap the installer. A used or expired invite is
+  worthless.
+- **Machines can't impersonate each other.** Every message is signed by the machine that sent it,
+  and machines relaying a copy can't change it. `agentlink remove <host>` takes a machine off the
+  network; members that were offline learn about it when they come back.
+- **Members are trusted.** Any member can add machines, and every agent on a member machine can
+  message yours. Only add machines you control.
 - **Prompt injection.** Messages come from other AI agents. agentlink tells Claude to treat them
   as requests from a colleague, not instructions from you, and to check with you before
   anything destructive or sensitive.
 
-See [SECURITY.md](SECURITY.md) for details.
+See [SECURITY.md](SECURITY.md) for details and known limitations.
 
 ## Caveats
 
@@ -77,12 +84,13 @@ See [SECURITY.md](SECURITY.md) for details.
   start sessions with `AGENTLINK_POLL=1 claude-link` so messages wait for the `inbox` tool.
 - Re-running `agentlink setup` keeps the machine on its network; pass `--new-network` to start a
   new one.
-- If a machine is renamed, messages already queued for its old name wait until they expire;
-  resend them to the new name.
+- A machine's name is fixed when it joins. To rename it, remove it and join again under the new
+  name (`--host`). Messages already queued for its old name wait until they expire.
 - macOS and Linux. macOS asks once to allow incoming connections for `node`.
 
 ## Development
 
     npm test    # unit tests + multi-node end-to-end: live delivery, offline session, offline machine
-                # via holders, dedupe, poll mode, wrong secret, fake node, replay, big backlogs,
-                # node restart, IP/Tailscale aliases
+                # via holders, dedupe, poll mode, outsiders, forged and altered messages, strangers
+                # at stored addresses, relays, invites and joining, removal, big backlogs, node
+                # restart, IP/Tailscale aliases

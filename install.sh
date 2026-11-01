@@ -2,7 +2,7 @@
 # agentlink installer — wake-on-message networking for AI agents (Claude Code and others)
 #
 #   New network:   curl -fsSL https://raw.githubusercontent.com/tombaldwin/agentlink/main/install.sh | sh
-#   Join network:  paste the line printed by `agentlink invite` on a machine that's already set up
+#   Join network:  paste the one-time line printed by `agentlink invite` on a machine that's already set up
 #
 # Installs (no sudo): a private Node.js runtime if a recent one isn't present, the agentlink
 # package, a background service, and agentlink for every Claude Code account on this machine.
@@ -13,7 +13,7 @@ AGENTLINK_ORIG_PATH="$PATH"; export AGENTLINK_ORIG_PATH
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-# agentlink's home holds the network secret, messages and logs: private to this user from the start
+# agentlink's home holds this machine's private key, messages and logs: private to this user from the start
 AL="$HOME/.agentlink"
 mkdir -p "$AL"
 chmod 700 "$AL"
@@ -49,8 +49,16 @@ if [ "$USE_PRIV" = 0 ] && ! node_ok; then
   export PATH="$PRIV/bin:$PATH"; USE_PRIV=1
 fi
 
+# joining via an invite: the package comes from the inviting machine, pinned to its key
+# (-k only skips CA checks; curl still refuses any key but the pinned one)
 case "$PKG" in
-  http://*|https://*) curl -fsSL "$PKG" -o "$TMP/agentlink.tgz"; PKG="$TMP/agentlink.tgz" ;;
+  https://*)
+    if [ -n "${AGENTLINK_PIN:-}" ]; then
+      curl -fsSL -k --pinnedpubkey "sha256//$AGENTLINK_PIN" "$PKG" -o "$TMP/agentlink.tgz"
+    else
+      curl -fsSL "$PKG" -o "$TMP/agentlink.tgz"
+    fi
+    PKG="$TMP/agentlink.tgz" ;;
 esac
 
 # npm install into a prefix, showing npm's own error output if it fails

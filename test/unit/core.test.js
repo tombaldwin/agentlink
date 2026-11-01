@@ -1,8 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { normHost, sanitizeName, parseAddr, parsePeer, networkId, newSecret } from '../../src/config.js'
-import { signEnvelope, verifyEnvelope, authHeader, checkAuth, MAX_SKEW_MS, NonceCache, signResponse, verifyResponse } from '../../src/crypto.js'
-import { validAddr } from '../../src/config.js'
+import crypto from 'node:crypto'
+import { normHost, sanitizeName, parseAddr, parsePeer, validAddr } from '../../src/config.js'
+import { signEnvelope, verifyEnvelope, sealBeacon, openBeacon, newDiscoveryKey, randomToken } from '../../src/crypto.js'
+import { newIdentity, fingerprint, certDer } from '../../src/cert.js'
+import { Roster } from '../../src/roster.js'
 
 test('normHost adds .local to bare names and normalises case', () => {
   assert.equal(normHost('Anya'), 'anya.local')
@@ -34,63 +36,105 @@ test('parsePeer handles host, host:port and IPs', () => {
   assert.equal(parsePeer(''), null)
 })
 
-test('networkId is stable, short and secret-dependent', () => {
-  assert.equal(networkId('x'), networkId('x'))
-  assert.notEqual(networkId('x'), networkId('y'))
-  assert.match(networkId('x'), /^[0-9a-f]{12}$/)
-  assert.ok(newSecret().length >= 32)
+test('machine certificates parse, self-verify, and match the key fingerprint', () => {
+  const id = newIdentity()
+  const x = new crypto.X509Certificate(id.cert)
+  assert.ok(x.verify(x.publicKey))
+  assert.equal(fingerprint(x), id.fp)
+  assert.equal(fingerprint(id.key), id.fp)
+  assert.doesNotMatch(x.subject, /\.local|\.test/, 'the certificate does not name the machine')
+  assert.notEqual(newIdentity().fp, id.fp)
 })
 
 const env = () => ({ id: 'id1', from: 'a@x.local', to: 'b@y.local', body: 'hi', sent_at: 1, expires_at: 2 })
 
-test('envelopes verify only with the right secret and unmodified fields', () => {
+test('envelopes verify only with the sender\'s key and unmodified fields', () => {
+  const a = newIdentity(), b = newIdentity()
   const e = env()
-  e.sig = signEnvelope('s1', e)
-  assert.ok(verifyEnvelope('s1', e))
-  assert.ok(!verifyEnvelope('s2', e))
+  e.sig = signEnvelope(a.key, e)
+  const pubA = crypto.createPublicKey(a.key), pubB = crypto.createPublicKey(b.key)
+  assert.ok(verifyEnvelope(pubA, e))
+  assert.ok(!verifyEnvelope(pubB, e), 'another machine\'s key does not verify it')
   for (const [k, v] of [['body', 'HI'], ['to', 'c@y.local'], ['from', 'z@x.local'], ['expires_at', 3]]) {
-    assert.ok(!verifyEnvelope('s1', { ...e, [k]: v }), `tampered ${k} must fail`)
+    assert.ok(!verifyEnvelope(pubA, { ...e, [k]: v }), `tampered ${k} must fail`)
   }
-  assert.ok(!verifyEnvelope('s1', { ...e, sig: undefined }))
+  assert.ok(!verifyEnvelope(pubA, { ...e, sig: undefined }))
+  assert.ok(!verifyEnvelope(pubA, { ...e, sig: 'garbage' }))
 })
 
-test('request auth binds method, path and body, and rejects stale timestamps', () => {
-  const h = authHeader('s', 'POST', '/v1/deliver', '{"a":1}')
-  assert.ok(checkAuth('s', h, 'POST', '/v1/deliver', '{"a":1}'))
-  assert.ok(!checkAuth('s', h, 'POST', '/v1/deliver', '{"a":2}'))
-  assert.ok(!checkAuth('s', h, 'GET', '/v1/deliver', '{"a":1}'))
-  assert.ok(!checkAuth('s', h, 'POST', '/v1/hello', '{"a":1}'))
-  assert.ok(!checkAuth('other', h, 'POST', '/v1/deliver', '{"a":1}'))
-  assert.ok(!checkAuth('s', undefined, 'POST', '/v1/deliver', ''))
-  assert.ok(!checkAuth('s', 'garbage', 'POST', '/v1/deliver', ''))
-  // a correctly signed header from just outside the window (signed with a clock set back)
-  const realNow = Date.now
-  Date.now = () => realNow() - MAX_SKEW_MS - 1000
-  const stale = authHeader('s', 'POST', '/v1/deliver', '{"a":1}')
-  Date.now = () => realNow() - MAX_SKEW_MS + 5000
-  const old = authHeader('s', 'POST', '/v1/deliver', '{"a":1}')
-  Date.now = realNow
-  assert.ok(!checkAuth('s', stale, 'POST', '/v1/deliver', '{"a":1}'), 'outside the window')
-  assert.ok(checkAuth('s', old, 'POST', '/v1/deliver', '{"a":1}'), 'inside the window')
+test('beacons open only with a network discovery key, and reveal nothing in the clear', () => {
+  const dk = newDiscoveryKey(), other = newDiscoveryKey()
+  const b = { host: 'laptop.local', fp: 'abc', port: 7777, ts: 1, reply: false }
+  const sealed = sealBeacon(dk, b)
+  assert.ok(!sealed.includes('laptop'))
+  assert.deepEqual(openBeacon([other, dk], sealed), b)
+  assert.equal(openBeacon([other], sealed), null)
+  const tampered = Buffer.from(sealed); tampered[20] ^= 1
+  assert.equal(openBeacon([dk], tampered), null)
+  assert.equal(openBeacon([dk], Buffer.from('{"host":"x"}')), null)
 })
 
-test('request auth binds the node identity header and rejects replays', () => {
-  const h = authHeader('s', 'POST', '/v1/hello', '{}', 'a.local;net=x;port=1')
-  assert.ok(checkAuth('s', h, 'POST', '/v1/hello', '{}', 'a.local;net=x;port=1'))
-  assert.ok(!checkAuth('s', h, 'POST', '/v1/hello', '{}', 'evil.local;net=x;port=1'), 'identity header is signed')
-  const nonces = new NonceCache()
-  assert.ok(checkAuth('s', h, 'POST', '/v1/hello', '{}', 'a.local;net=x;port=1', nonces))
-  assert.ok(!checkAuth('s', h, 'POST', '/v1/hello', '{}', 'a.local;net=x;port=1', nonces), 'replay rejected')
+test('roster: founder, adds, removals and the discovery key', () => {
+  const a = newIdentity(), b = newIdentity(), c = newIdentity()
+  const r = Roster.genesis(a, 'a.local')
+  assert.deepEqual([...r.byHost.keys()], ['a.local'])
+  const dk0 = r.dk
+  r.add(a, 'b.local', b.cert)
+  r.add(b, 'c.local', c.cert)               // any member can add
+  assert.deepEqual([...r.byHost.keys()].sort(), ['a.local', 'b.local', 'c.local'])
+  r.remove(a, c.fp)
+  assert.ok(!r.members.has(c.fp) && r.removed.has(c.fp))
+  assert.notEqual(r.dk, dk0, 'removal rotates the discovery key')
+  // a removed key is gone for good: re-adding it does nothing; its own later records are ignored
+  r.add(a, 'c.local', c.cert)
+  assert.ok(!r.members.has(c.fp))
+  const d = newIdentity()
+  const fromRemoved = new Roster({ net: r.net, records: [] })
+  fromRemoved.merge(r.records)
+  const before = fromRemoved.records.length
+  const rc = new Roster({ net: r.net, records: r.records })
+  // forge: c (removed) signs an add for d, stamped after its removal
+  const { signRecord } = { signRecord: (key, rec) => crypto.sign('sha256', Buffer.from(JSON.stringify(['agentlink-roster-1', rec.type, rec.host ?? '', rec.fp, rec.cert ?? '', rec.at, rec.by, rec.dk ?? ''])), key).toString('base64url') }
+  const rec = { type: 'add', host: 'd.local', fp: d.fp, cert: certDer(d.cert), at: rc.nextAt(), by: c.fp }
+  assert.ok(!rc.merge([{ ...rec, sig: signRecord(c.key, rec) }]), 'a record signed by a removed machine is not kept')
+  assert.ok(!rc.members.has(d.fp))
+  assert.equal(fromRemoved.records.length, before)
 })
 
-test('responses are bound to the request and the responder', () => {
-  const sig = signResponse('s', 'req-auth', 'b.local;net=x', '{"ok":1}')
-  assert.ok(verifyResponse('s', 'req-auth', 'b.local;net=x', '{"ok":1}', sig))
-  assert.ok(!verifyResponse('s', 'other-req', 'b.local;net=x', '{"ok":1}', sig))
-  assert.ok(!verifyResponse('s', 'req-auth', 'b.local;net=x', '{"ok":2}', sig))
-  assert.ok(!verifyResponse('s', 'req-auth', 'c.local;net=x', '{"ok":1}', sig))
-  assert.ok(!verifyResponse('other', 'req-auth', 'b.local;net=x', '{"ok":1}', sig))
-  assert.ok(!verifyResponse('s', 'req-auth', 'b.local;net=x', '{"ok":1}', null))
+test('roster: same records in any order give the same membership; junk is not kept', () => {
+  const a = newIdentity(), b = newIdentity(), c = newIdentity(), x = newIdentity()
+  const r = Roster.genesis(a, 'a.local')
+  r.add(a, 'b.local', b.cert)
+  r.add(b, 'c.local', c.cert)
+  r.remove(b, c.fp)
+  const shuffled = [...r.records].reverse()
+  const r2 = new Roster({ net: r.net, records: [] })
+  r2.merge(shuffled)
+  assert.deepEqual([...r2.byHost.keys()].sort(), [...r.byHost.keys()].sort())
+  assert.equal(r2.dk, r.dk)
+  // an outsider's self-made records, a host-name grab and a future-dated record are all dropped
+  const junk = Roster.genesis(x, 'b.local').records                 // x "founds" a network claiming b.local
+  const grab = new Roster({ net: x.fp, records: junk }).add(x, 'a.local', x.cert)
+  assert.ok(!r2.merge([...junk, grab]), 'nothing an outsider signs is kept')
+  const late = new Roster({ net: r.net, records: r.records })
+  const fut = { type: 'add', host: 'z.local', fp: x.fp, cert: certDer(x.cert), at: Date.now() + 2 * 3600_000, by: a.fp }
+  fut.sig = crypto.sign('sha256', Buffer.from(JSON.stringify(['agentlink-roster-1', 'add', 'z.local', fut.fp, fut.cert, fut.at, fut.by, ''])), a.key).toString('base64url')
+  assert.ok(!late.merge([fut]), 'a record from far in the future is refused')
+  // two members adding different keys under one name: the same one wins everywhere
+  const y = newIdentity(), z = newIdentity()
+  const p = new Roster({ net: r.net, records: r.records }), q = new Roster({ net: r.net, records: r.records })
+  const ry = p.add(a, 'n.local', y.cert), rz = q.add(b, 'n.local', z.cert)
+  p.merge([rz]); q.merge([ry])
+  assert.equal(p.byHost.get('n.local')?.fp, q.byHost.get('n.local')?.fp)
+})
+
+test('invite line pins the key and carries a URL- and shell-safe token', async () => {
+  const { installLine } = await import('../../src/setup.js')
+  const fp = newIdentity().fp
+  const line = installLine({ token: randomToken(), fp, port: 7777 }, 'h.local')
+  assert.match(line, /^curl -fsSL -k --pinnedpubkey "sha256\/\/[A-Za-z0-9+/=]+" "https:\/\/h\.local:7777\/join\/install\?t=[A-Za-z0-9_-]+" \| sh$/)
+  assert.ok(line.includes(fp))
+  for (let i = 0; i < 2000; i++) assert.ok(!randomToken().startsWith('-'))
 })
 
 test('only plain host:port addresses are dialable', () => {
@@ -102,24 +146,11 @@ test('only plain host:port addresses are dialable', () => {
   }
 })
 
-test('invite line encodes secrets with URL- and shell-special characters', async () => {
-  const { installLine } = await import('../../src/setup.js')
-  const secret = `a+b&c#d e"f$g!h'i%j(k)~0123456789abcdef`
-  const line = installLine({ secret, port: 7777, host: 'h.local' })
-  const url = line.match(/curl -fsSL "([^"]+)"/)[1]
-  assert.match(url, /^[A-Za-z0-9:\/._?=%-]+$/)
-  assert.equal(new URL(url).searchParams.get('k'), secret)
-})
-
 test('peers given with a port are dialed by the name as written (MagicDNS short names)', () => {
   assert.deepEqual(parsePeer('desk:7777'), { host: 'desk.local', addr: 'desk:7777' })
   assert.deepEqual(parsePeer('desk'), { host: 'desk.local', addr: null })
   assert.deepEqual(parsePeer('desk.tail1.ts.net:7777'), { host: 'desk.tail1.ts.net', addr: 'desk.tail1.ts.net:7777' })
   assert.deepEqual(parsePeer('10.0.0.5:7777'), { host: '10.0.0.5', addr: '10.0.0.5:7777' })
-})
-
-test('generated secrets never look like a command-line flag', () => {
-  for (let i = 0; i < 20000; i++) assert.ok(!newSecret().startsWith('-'))
 })
 
 test('the channel is only considered enabled for interactive sessions that load it', async () => {
@@ -166,15 +197,19 @@ test('config: bad files throw, ttl is capped, and "localhost" is never an identi
   const load = `import { loadConfig } from 'SRC/config.js'
     let r; try { const c = loadConfig(); r = { ttlDays: c.ttlMs / 86400000, host: c.host, aliases: c.aliases } } catch (e) { r = { error: e.message } }
     console.log(JSON.stringify(r))`
-  const secret = 'x'.repeat(32)
-  let { out } = await inSandbox({ '.agentlink/config.json': '{"secret": "s",}' }, load)
+  const id = newIdentity()
+  const ident = { '.agentlink/node.key': id.key, '.agentlink/node.crt': id.cert, '.agentlink/roster.json': JSON.stringify({ net: id.fp, records: Roster.genesis(id, 'box.local').records }) }
+  let { out } = await inSandbox({ ...ident, '.agentlink/config.json': '{"host": "s",}' }, load)
   assert.match(out.error, /bad config/)
-  ;({ out } = await inSandbox({ '.agentlink/config.json': JSON.stringify({ secret, host: 'box', ttlDays: 1e9 }) }, load))
+  ;({ out } = await inSandbox({ '.agentlink/config.json': JSON.stringify({ host: 'box', ttlDays: 1e9 }), ...ident }, load))
   assert.equal(out.ttlDays, 30)
-  ;({ out } = await inSandbox({ '.agentlink/config.json': JSON.stringify({ secret, host: 'localhost' }) }, load))
+  ;({ out } = await inSandbox({ '.agentlink/config.json': JSON.stringify({ host: 'localhost' }), ...ident }, load))
   assert.match(out.error, /can't identify this machine/)
   // a machine given its own name doesn't answer for the OS hostname
-  ;({ out } = await inSandbox({ '.agentlink/config.json': JSON.stringify({ secret, host: 'renamed-clone' }) }, load))
+  ;({ out } = await inSandbox({ '.agentlink/config.json': JSON.stringify({ host: 'renamed-clone' }), ...ident }, load))
   const os = await import('node:os')
   assert.ok(!out.aliases.includes(normHost(os.hostname())), 'OS hostname is not an alias')
+  // no key or roster: not set up
+  ;({ out } = await inSandbox({ '.agentlink/config.json': JSON.stringify({ host: 'box' }) }, load))
+  assert.match(out.error, /not set up/)
 })

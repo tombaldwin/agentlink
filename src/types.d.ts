@@ -6,8 +6,9 @@ export interface PeerSpec { host: string; addr: string | null }
 /** The loaded configuration (config.json merged with AGENTLINK_* environment overrides). */
 export interface Config {
   dir: string
-  secret: string
-  /** Public fingerprint of the secret: identifies the network. */
+  /** This machine's key and certificate (PEM) and its fingerprint. */
+  identity: Identity
+  /** The network: the founding machine's fingerprint. */
   net: string
   /** This machine's name, e.g. "laptop.local". */
   host: string
@@ -67,22 +68,51 @@ export interface PeerRow {
   configured: number
   /** Set when `host` is another name (IP, Tailscale name) for the node called alias_of. */
   alias_of: string | null
-  /** 1 once a node has proved, with the secret, that it is `host`. */
+  /** Unused (kept for older databases). */
   verified: number
+}
+
+/** A machine's key pair (PEM) and fingerprint (sha256 of the public key, base64). */
+export interface Identity { key: string; cert: string; fp: string }
+
+/** A signed membership record (see roster.js). */
+export interface RosterRecord {
+  type: 'add' | 'remove'
+  /** add: the machine's name */
+  host?: string
+  /** the machine added or removed */
+  fp: string
+  /** add: the machine's certificate, base64 DER */
+  cert?: string
+  at: number
+  /** fingerprint of the member that signed this record */
+  by: string
+  /** genesis add / remove: the (next) discovery key */
+  dk?: string
+  sig: string
+}
+
+/** A current member, as computed from the roster. */
+export interface Member {
+  host: string
+  fp: string
+  pem: string
+  publicKey: import('node:crypto').KeyObject
+  at: number
+  by: string
 }
 
 /** What accept() did with an incoming envelope; null means rejected as invalid. */
 export type AcceptResult = 'live' | 'queued' | 'held' | 'expired' | null
 
 /** Health reply from a node's /health endpoint. */
-export interface Health { ok: boolean; host: string; net: string; version: string; pid: number }
+export interface Health { ok: boolean; host: string; net: string; fp: string; version: string; pid: number }
 
 /** A Claude account on this machine ('' dir = the default account). */
 export interface ClaudeAccount { dir: string; alias: string; aliasValue?: string }
 
 /** config.json as written by setup / edited by hand (all optional). */
 export interface ConfigFile {
-  secret?: string
   host?: string
   aliases?: string[]
   autoAliases?: boolean

@@ -4,7 +4,11 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { execFileSync, spawnSync } from 'node:child_process'
 import crypto from 'node:crypto'
-import { writeConfig, readConfigFile, loadConfig, newSecret, homeDir, ensureHomeDir, normHost, tailscaleName, errMsg } from './config.js'
+import net from 'node:net'
+import { writeConfig, readConfigFile, loadConfig, homeDir, ensureHomeDir, normHost, detectHost, validAddr, readIdentity, writeIdentity, rosterPath, errMsg } from './config.js'
+import { newIdentity, certDer, shortFp } from './cert.js'
+import { Roster } from './roster.js'
+import { peerCertificate, pinnedRequest } from './tls.js'
 import { Local } from './local.js'
 import { claudeAccounts, register, unregister, writeShellBlock, removeShellBlock, claudeBin, nodePath, BIN } from './claude.js'
 
@@ -25,37 +29,83 @@ const ok = (/** @type {string} */ m) => console.log(`  ✓ ${m}`)
 const warn = (/** @type {string} */ m) => console.log(`  ! ${m}`)
 
 /**
- * @param {{ secret?: string, host?: string, peers?: string[], noService?: boolean, noClaude?: boolean, noAlias?: boolean, newNetwork?: boolean }} opts
+ * @param {{ host?: string, peers?: string[], noService?: boolean, noClaude?: boolean, noAlias?: boolean, newNetwork?: boolean,
+ *           join?: string, pin?: string, token?: string }} opts
  */
-export async function setup({ secret, host, peers = [], noService, noClaude, noAlias, newNetwork }) {
+export async function setup({ host, peers = [], noService, noClaude, noAlias, newNetwork, join, pin, token }) {
   noService ||= process.env.AGENTLINK_NO_SERVICE === '1'
-  if (secret && String(secret).length < 24) throw new Error('network secret must be at least 24 characters (omit it to generate one)')
   if (host) host = normHost(host)   // throws before anything is written
+  if (join && (!pin || !token)) throw new Error('--join needs --pin and --token (use the line printed by `agentlink invite`)')
+  if (join && !validAddr(join)) throw new Error(`--join: "${join}" is not a host:port address`)
   console.log(`agentlink setup`)
-  // an unreadable config.json stops setup: treating it as empty would replace the network secret
+  // an unreadable config.json stops setup: treating it as empty would change this machine's settings
   const existing = readConfigFile() || {}
-  // the running node (if any) only accepts requests signed with the secret it was started with
+  // the running node (if any) only accepts this machine's current key: stop it with that one
   /** @type {import('./types.js').Config | null} */
   let prev = null
   try { prev = loadConfig() } catch {}
-  // re-running setup without a secret refreshes this machine; it never silently leaves the network
-  if (!secret && existing.secret && !newNetwork) {
-    secret = existing.secret
+  let identity = readIdentity()
+  /** @type {Roster | null} */
+  let roster = null
+  try { roster = Roster.load(rosterPath()) } catch {}
+  const member = !!(identity && roster?.members.has(identity.fp))
+  // the name this machine has on its network is fixed by the roster; a new network can pick a new one
+  const myHost = host || normHost(process.env.AGENTLINK_HOST || (member && identity ? roster?.members.get(identity.fp)?.host : null) || existing.host || detectHost())
+  /** @type {string[]} */
+  let allPeers = []
+  let banner = ''
+
+  if (join) {
+    // 1. the machine at the invite's address must hold the key the invite names
+    let inviter
+    try { inviter = await peerCertificate(join) } catch (e) { throw new Error(`cannot reach ${join}: ${errMsg(e)}`) }
+    if (inviter.fp !== pin) throw new Error(`the machine at ${join} is not the one that made this invite (its key doesn't match). Not joining.`)
+    // 2. keep this machine's key only if it is already a member of that same network
+    const same = member && roster?.members.has(pin) && identity
+    const id = same && identity ? identity : newIdentity()
+    // 3. join: the inviter checks the token and adds our key under our name
+    let r
+    try {
+      r = await pinnedRequest({ addr: join, method: 'POST', path: '/join', body: JSON.stringify({ token, host: myHost, cert: certDer(id.cert) }), identity: id, trust: [{ pem: inviter.pem, fp: pin }], timeout: 20_000 })
+    } catch (e) { throw new Error(`could not join via ${join}: ${errMsg(e)}`) }
+    /** @type {any} */
+    let data = {}
+    try { data = JSON.parse(r.text) } catch {}
+    if (r.status !== 200) throw new Error(`could not join via ${join}: ${data.error || `HTTP ${r.status}`}`)
+    const joined = new Roster({ net: String(data.net), records: data.records }, rosterPath())
+    if (joined.members.get(id.fp)?.host !== myHost || !joined.members.has(pin)) throw new Error(`could not join via ${join}: it did not add this machine`)
+    await stopRunningNode(prev ? [prev] : [])
+    writeIdentity(id)
+    joined.save()
+    if (myHost !== joined.members.get(id.fp)?.host) throw new Error('internal: name mismatch')
+    allPeers = [...new Set([...(same ? existing.peers || [] : []), join, ...peers])]
+    banner = same ? `Already a member of this network (via ${data.host}).` : `Joined the network via ${data.host}.`
+  } else if (!member || newNetwork) {
+    if (identity && roster && !member && !newNetwork) {
+      throw new Error(roster.removed.has(identity.fp)
+        ? 'this machine was removed from its network. Join again with a new invite (`agentlink invite` on a member), or start a new network with --new-network'
+        : 'this machine is not a member of its network. Join with an invite (`agentlink invite` on a member), or start a new network with --new-network')
+    }
+    const id = newIdentity()
+    await stopRunningNode(prev ? [prev] : [])
+    writeIdentity(id)
+    Roster.genesis(id, myHost, rosterPath()).save()
+    allPeers = [...peers]
+    banner = 'New network created.'
+  } else {
+    if (host && host !== roster?.members.get(identity?.fp || '')?.host) {
+      throw new Error(`this machine is on its network as ${roster?.members.get(identity?.fp || '')?.host}; to change its name, join again under the new name (an invite plus --host), or start a new network with --new-network`)
+    }
     ok('keeping this machine\'s existing network (use --new-network to create a new one)')
+    await stopRunningNode(prev ? [prev] : [])
+    allPeers = [...new Set([...(existing.peers || []), ...peers])]
   }
-  const fresh = !secret
-  secret ||= newSecret()
-  const allPeers = [...new Set([...(existing.secret === secret ? existing.peers || [] : []), ...peers])]
-  writeConfig({ secret, peers: allPeers, ...(host ? { host } : {}) })
+  writeConfig({ host: myHost, peers: allPeers })
   fs.rmSync(path.join(homeDir(), 'disabled'), { force: true })
   const cfg = loadConfig()
-  ok(`config written to ${path.join(homeDir(), 'config.json')} — this machine is ${cfg.host}`)
+  ok(`config written to ${path.join(homeDir(), 'config.json')} — this machine is ${cfg.host} (key ${shortFp(cfg.identity.fp)})`)
 
-  // stop any node already running (e.g. an older version or one started by a session), so the
-  // new config takes effect; sign the request with whichever secret that node may be using
   const local = new Local(cfg)
-  await stopRunningNode(prev ? [prev, cfg] : [cfg])
-
   if (!noService) {
     try {
       installService()
@@ -63,7 +113,8 @@ export async function setup({ secret, host, peers = [], noService, noClaude, noA
       for (let i = 0; i < 50 && !await local.health(); i++) await sleep(100)   // let the service win the port
     } catch (e) { warn(`could not install background service (${errMsg(e)}); sessions will start the node on demand`) }
   }
-  try { const h = await local.ensureNode(); ok(`node running on port ${cfg.port} (pid ${h.pid})`) }
+  let running = false
+  try { const h = await local.ensureNode(); ok(`node running on port ${cfg.port} (pid ${'pid' in h ? h.pid : '?'})`); running = true }
   catch (e) { warn(errMsg(e)) }
 
   if (!noClaude) registerClaude()
@@ -81,45 +132,55 @@ Done. Open a new terminal, then start Claude with agentlink enabled using:
 (or, for any account: CLAUDE_CONFIG_DIR=<dir> agentlink claude — new accounts are enabled automatically)
 Agents address each other as name@host, e.g. "send the test results to reviewer@laptop.local".
 Name a session with AGENTLINK_NAME=<name> (default: the project folder name).`)
-  console.log(`\n${fresh ? 'New network created. ' : ''}${invitePrompt(cfg)}`)
+  if (banner) console.log(`\n${banner}`)
+  if (running) {
+    try { console.log(`\n${invitePrompt(await local.req('POST', '/local/invite'))}`) }
+    catch (e) { warn(`could not create an invite (${errMsg(e)}); run \`agentlink invite\` later`) }
+  } else console.log('\nRun `agentlink invite` once the node is running to add other machines.')
 }
 
-/** Stop the node on this machine, trying each candidate config's port and secret. */
+/** Stop the node on this machine (it only accepts the key it was started with). */
 /** @param {import('./types.js').Config[]} cfgs */
 async function stopRunningNode(cfgs) {
   for (const c of cfgs) {
     const l = new Local(c)
     const h = await l.health()
-    if (!h || h.net !== c.net) continue
+    if (!h || 'foreign' in h) continue
     try { await l.req('POST', '/local/shutdown') } catch (e) { warn(`could not stop the running node: ${errMsg(e)}`); continue }
     for (let i = 0; i < 30 && await l.health(); i++) await sleep(100)
     return
   }
-  for (const c of new Map(cfgs.map(c => [c.port, c])).values()) {
-    const h = await new Local(c).health()
-    if (h) warn(`a node on another network is using port ${c.port} (pid ${h.pid}); stop it so the new config can take effect`)
-  }
+  const port = cfgs[0]?.port || Number(process.env.AGENTLINK_PORT || readConfigFile()?.port || 7777)
+  if (await portInUse(port)) warn(`something else is using port ${port} (another network's node, or another program); stop it so this machine's node can start`)
+}
+/** @param {number} port */
+function portInUse(port) {
+  return new Promise(resolve => {
+    const s = net.connect(port, '127.0.0.1', () => { s.destroy(); resolve(true) })
+    s.on('error', () => resolve(false))
+    s.setTimeout(1000, () => { s.destroy(); resolve(false) })
+  })
 }
 
-/** Percent-encode so the result is safe both in a URL query and inside a double-quoted shell word. */
-const urlSafe = (/** @type {string} */ s) => encodeURIComponent(s).replace(/[!'()*~]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase())
-
-/** The one line to paste on another machine: fetches the installer from this machine's node. */
-/** @type {(cfg: { secret: string, port: number, host: string }, host?: string) => string} */
-export const installLine = (cfg, host = cfg.host) => `curl -fsSL "http://${host}:${cfg.port}/install?k=${urlSafe(cfg.secret)}" | sh`
+/**
+ * The one line to paste on another machine: fetches the installer from this machine's node over
+ * TLS pinned to this machine's key (curl's -k only skips CA checks; --pinnedpubkey still applies).
+ * @param {{ token: string, fp: string, port: number }} inv @param {string} host
+ */
+export const installLine = (inv, host) =>
+  `curl -fsSL -k --pinnedpubkey "sha256//${inv.fp}" "https://${host}:${inv.port}/join/install?t=${inv.token}" | sh`
 
 /** Ready-to-paste instructions (for a person, or for Claude) to add another machine. */
-/** @param {import('./types.js').Config} cfg */
-export function invitePrompt(cfg) {
-  const ts = tailscaleName()
-  let prompt = `Join my agentlink network: run  ${installLine(cfg)}`
-  if (ts) prompt += `  — if ${cfg.host} can't be reached, run  ${installLine(cfg, ts)}  instead`
-  prompt += ` — then tell me how to start Claude with agentlink enabled.`
+/** @param {{ token: string, fp: string, host: string, port: number, tailscale?: string | null }} inv */
+export function invitePrompt(inv) {
+  let prompt = `Join my agentlink network: run  ${installLine(inv, inv.host)}`
+  if (inv.tailscale) prompt += `  — if ${inv.host} can't be reached, run  ${installLine(inv, inv.tailscale)}  instead`
+  prompt += ` — then tell me how to start Claude with agentlink enabled. (The -k is safe here: --pinnedpubkey makes curl accept only my machine's key.)`
   return `To add another machine, paste this into Claude Code on it (or just run the command):
 
   ${prompt}
 
-Keep it private: it contains this network's secret.${ts ? '' : `
+It lets one machine join and expires in 24 hours (\`agentlink invite --revoke\` cancels unused invites).${inv.tailscale ? '' : `
 (For machines off this LAN: install Tailscale on both, then run \`agentlink invite\` again.)`}
 `
 }
