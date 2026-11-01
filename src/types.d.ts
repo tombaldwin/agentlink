@@ -89,6 +89,9 @@ export interface RosterRecord {
   by: string
   /** genesis add / remove: the (next) discovery key */
   dk?: string
+  /** remove: ids (recId) of the records signed by the removed machine that the remover had; any
+   * other record it signed is void, whatever its timestamp */
+  seen?: string[]
   sig: string
 }
 
@@ -100,10 +103,13 @@ export interface Member {
   publicKey: import('node:crypto').KeyObject
   at: number
   by: string
+  /** seniority: 0 for the founding machine, then in the order machines joined. A machine can
+   * remove only machines that joined after it. */
+  rank: number
 }
 
 /** What accept() did with an incoming envelope; null means rejected as invalid. */
-export type AcceptResult = 'live' | 'queued' | 'held' | 'expired' | null
+export type AcceptResult = 'live' | 'queued' | 'held' | 'expired' | 'unknown-sender' | null
 
 /** Health reply from a node's /health endpoint. */
 export interface Health { ok: boolean; host: string; net: string; fp: string; version: string; pid: number }

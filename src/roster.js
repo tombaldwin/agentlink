@@ -1,20 +1,34 @@
 // Network membership: a set of signed records that members exchange and merge.
 //
 //   add    {host, fp, cert}  signed by a current member ("by"); the founding machine signs its own
-//   remove {fp}              signed by a current member; carries the next discovery key
+//   remove {fp, seen}        signed by a member that joined before the one removed; carries the
+//                            next discovery key, and lists the removed machine's records the
+//                            remover had (`seen`)
 //
 // Every member computes the same membership from the same set of records by replaying them in
-// (at, sig) order: a record counts only if its signer is a member at that point. A removed key is
-// gone for good (re-adding a machine means a new key). The set only grows, so merging converges in
-// any order and offline machines catch up on their next hello.
+// (at, sig) order: a record counts only if its signer is a member at that point.
+//
+// Seniority: machines are ranked in the order they joined (the founder first), and a machine can
+// remove only machines ranked after it. So two machines can never remove each other.
+//
+// A removal is final. Timestamps are chosen by the signer, so a removed machine could sign records
+// dated before its removal; instead, a removed machine's records count only if its remover listed
+// them in `seen`. Anything else it signs is void, whatever its date. A removed key is gone for good
+// (re-adding a machine means a new key). The set of records only grows, so merging converges in any
+// order and offline machines catch up on their next hello.
 import fs from 'node:fs'
 import crypto from 'node:crypto'
-import { signRecord, verifyRecord, newDiscoveryKey } from './crypto.js'
+import { signRecord, verifyRecord, newDiscoveryKey, recId } from './crypto.js'
 import { fingerprint, certDer } from './cert.js'
 import { normHost } from './config.js'
 
 const MAX_RECORDS = 5000
 const MAX_FUTURE_MS = 3600_000     // a record stamped further ahead than this is refused (bad clock)
+const MAX_SEEN = 2000
+const MAX_DROPPED = 50                 // adds that didn't count, kept per removed machine (so their keys stay known as dropped)
+// a replaced discovery key still opens other members' gates for this long, so a machine that was
+// offline during a removal can catch up; after that it needs a new invite
+export const DK_GRACE_MS = 30 * 86400_000
 
 /** @typedef {import('./types.js').RosterRecord} RosterRecord */
 /** @typedef {import('./types.js').Member} Member */
@@ -26,6 +40,7 @@ function wellFormed(r) {
   if (typeof r.fp !== 'string' || r.fp.length > 64 || typeof r.by !== 'string' || r.by.length > 64) return false
   if (typeof r.sig !== 'string' || r.sig.length > 200 || !Number.isSafeInteger(r.at) || r.at < 0) return false
   if (r.dk !== undefined && (typeof r.dk !== 'string' || r.dk.length > 64)) return false
+  if (r.seen !== undefined && (r.type !== 'remove' || !Array.isArray(r.seen) || r.seen.length > MAX_SEEN || !r.seen.every((/** @type {unknown} */ x) => typeof x === 'string' && x.length <= 32))) return false
   if (r.type === 'add' && (typeof r.host !== 'string' || r.host.length > 253 || typeof r.cert !== 'string' || r.cert.length > 4096)) return false
   return true
 }
@@ -52,6 +67,12 @@ export class Roster {
     this.removed = new Map()
     /** @type {string[]} discovery keys, oldest first */
     this.dks = []
+    /** @type {number[]} when each discovery key was introduced */
+    this.dkAt = []
+    /** @type {Set<string>} keys added by a machine that was removed before the add was seen: never members */
+    this.dropped = new Set()
+    /** @type {Map<string, { host: string, pem: string, publicKey: crypto.KeyObject } | null>} parsed add records, by signature */
+    this.parsed = new Map()
     this.merge(data.records, { trustClock: true })
   }
 
@@ -72,6 +93,17 @@ export class Roster {
   /** The current discovery key. */
   get dk() { return this.dks[this.dks.length - 1] }
 
+  /** Discovery keys that open this node's gate: the current one, and ones replaced recently. */
+  gateDks(now = Date.now()) {
+    return this.dks.filter((_, i) => i === this.dks.length - 1 || this.dkAt[i + 1] > now - DK_GRACE_MS)
+  }
+
+  /** May member `by` remove member `fp`? (only machines that joined after it) @param {string} by @param {string} fp */
+  canRemove(by, fp) {
+    const a = this.members.get(by), b = this.members.get(fp)
+    return !!a && !!b && a.rank < b.rank
+  }
+
   /**
    * Add records we were sent (or made). Returns true if the set of records changed.
    * @param {unknown} list @param {{ trustClock?: boolean }} [opts]
@@ -83,7 +115,7 @@ export class Roster {
       if (!wellFormed(r) || this.sigs.has(r.sig) || this.records.length >= MAX_RECORDS) continue
       if (!trustClock && r.at > Date.now() + MAX_FUTURE_MS) continue
       const o = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (r))
-      const clean = /** @type {RosterRecord} */ (/** @type {unknown} */ (Object.fromEntries(['type', 'host', 'fp', 'cert', 'at', 'by', 'dk', 'sig'].filter(k => o[k] !== undefined).map(k => [k, o[k]]))))
+      const clean = /** @type {RosterRecord} */ (/** @type {unknown} */ (Object.fromEntries(['type', 'host', 'fp', 'cert', 'at', 'by', 'dk', 'seen', 'sig'].filter(k => o[k] !== undefined).map(k => [k, o[k]]))))
       this.records.push(clean)
       this.sigs = new Set(this.sigs).add(clean.sig)
       added = true
@@ -93,18 +125,27 @@ export class Roster {
     return this.sigs.size !== before.size || [...this.sigs].some(s => !before.has(s))
   }
 
-  /** Recompute membership. Only records that take effect are kept, so nobody can fill the roster
-   * with records that don't count (from outsiders, or naming non-members). */
+  /**
+   * Recompute membership: a pure function of the set of records, so every node that holds the same
+   * records agrees, whatever order they arrived in.
+   *
+   * Machines are settled in joining order. Whether a machine is removed depends only on records
+   * signed by machines that joined before it (only they can remove it), and those are settled
+   * first. So nothing is ever decided twice, and a single pass suffices.
+   *
+   * - A removal by an earlier machine always stands, even if its signer is removed too: a removal
+   *   can't be undone by removing the remover (concurrent removals all stand).
+   * - Any other record signed by a removed machine (an add) counts only if every removal of that
+   *   machine lists it in `seen`. So a removed machine can't add machines, backdated or not.
+   * - The discovery key is the newest one introduced by a machine that is still a member, so a
+   *   key made by a removed machine is never current.
+   *
+   * Records are kept if they could ever count: everything signed by current members, and what
+   * counts of what removed machines signed. Anything else can never count, whatever arrives later
+   * (removals only accumulate), so every node reaches the same result.
+   */
   replay() {
     this.records.sort((a, b) => a.at - b.at || (a.sig < b.sig ? -1 : a.sig > b.sig ? 1 : 0))
-    /** @type {Map<string, Member>} */
-    const members = new Map()
-    /** @type {Map<string, Member>} */
-    const byHost = new Map()
-    /** @type {Map<string, { at: number, by: string }>} */
-    const removed = new Map()
-    /** @type {string[]} */
-    const dks = []
     /** @param {crypto.KeyObject} pub @param {RosterRecord} r */
     const ok = (pub, r) => {
       if (this.verified.has(r.sig)) return true
@@ -112,35 +153,131 @@ export class Roster {
       this.verified.add(r.sig)
       return true
     }
-    /** @type {RosterRecord[]} */
-    const applied = []
-    for (const r of this.records) {
-      if (r.type === 'add') {
-        if (!r.host || !r.cert || members.has(r.fp) || removed.has(r.fp)) continue
-        let x509, host
-        try { x509 = new crypto.X509Certificate(Buffer.from(r.cert, 'base64')); host = normHost(r.host) } catch { continue }
-        if (host !== r.host || fingerprint(x509) !== r.fp || byHost.has(host)) continue
-        const genesis = r.by === r.fp
-        if (genesis && (r.fp !== this.net || members.size || removed.size)) continue
-        const signer = genesis ? x509.publicKey : members.get(r.by)?.publicKey
-        if (!signer || !ok(signer, r)) continue
-        const m = { host, fp: r.fp, pem: x509.toString(), publicKey: x509.publicKey, at: r.at, by: r.by }
-        members.set(r.fp, m)
-        byHost.set(host, m)
-        if (genesis && r.dk) dks.push(r.dk)
-        applied.push(r)
-      } else {
-        const signer = members.get(r.by)
-        const target = members.get(r.fp)
-        if (!signer || !target || !ok(signer.publicKey, r)) continue
-        members.delete(r.fp)
-        byHost.delete(target.host)
-        removed.set(r.fp, { at: r.at, by: r.by })
-        if (r.dk) dks.push(r.dk)
-        applied.push(r)
+    /** @param {RosterRecord} r */
+    const parse = r => {
+      let c = this.parsed.get(r.sig)
+      if (c === undefined) {
+        c = null
+        try {
+          const x509 = new crypto.X509Certificate(Buffer.from(String(r.cert), 'base64'))
+          const host = normHost(String(r.host))
+          if (host === r.host && fingerprint(x509) === r.fp) c = { host, pem: x509.toString(), publicKey: x509.publicKey }
+        } catch {}
+        this.parsed.set(r.sig, c)
       }
+      return c
     }
-    Object.assign(this, { members, byHost, removed, dks, records: applied, sigs: new Set(applied.map(r => r.sig)) })
+
+    /** @type {Map<string, RosterRecord[]>} target fp -> remove records naming it */
+    const removesOf = new Map()
+    for (const r of this.records) if (r.type === 'remove') { if (!removesOf.has(r.fp)) removesOf.set(r.fp, []); removesOf.get(r.fp)?.push(r) }
+
+    /** @type {Map<string, Member>} every machine that joined (ranked), removed or not */
+    const ranked = new Map()
+    /** @type {Map<string, { removed: false } | { removed: true, at: number, by: string, seen: Set<string>[] }>} */
+    const statusMemo = new Map()
+    /** The removals that stand against `fp` (by machines ranked before it). @param {string} fp */
+    const status = fp => {
+      const known = statusMemo.get(fp)
+      if (known) return known
+      const m = ranked.get(fp)
+      /** @type {RosterRecord[]} */
+      const stand = []
+      /** @type {Set<string>} */
+      const signers = new Set()
+      // one removal per signer counts: its earliest (so signing more can't change the outcome)
+      if (m) for (const r of removesOf.get(fp) || []) {
+        const s = ranked.get(r.by)
+        if (s && s.rank < m.rank && !signers.has(r.by) && ok(s.publicKey, r)) { stand.push(r); signers.add(r.by) }
+      }
+      const st = stand.length
+        ? { removed: /** @type {const} */ (true), at: stand[0].at, by: stand[0].by, seen: stand.map(r => new Set(r.seen ?? [])) }
+        : { removed: /** @type {const} */ (false) }
+      statusMemo.set(fp, st)
+      return st
+    }
+    /** Does `r`, signed by ranked machine `by`, count? @param {string} by @param {RosterRecord} r */
+    const counts = (by, r) => {
+      const st = status(by)
+      return !st.removed || st.seen.every(seen => seen.has(recId(r.sig)))
+    }
+
+    /** @type {Map<string, Member>} host -> the machine holding that name */
+    const nameHolder = new Map()
+    /** @type {Set<string>} keys whose add didn't count because their adder was removed first */
+    const dropped = new Set()
+    let rank = 0
+    for (const r of this.records) {
+      if (r.type !== 'add') continue
+      const c = parse(r)
+      if (!c) continue
+      const genesis = r.by === r.fp
+      if (genesis) {
+        if (r.fp !== this.net || ranked.size || !ok(c.publicKey, r)) continue
+      } else {
+        const s = ranked.get(r.by)
+        if (!s || !ok(s.publicKey, r)) continue
+      }
+      if (ranked.has(r.fp)) continue
+      if (!genesis && !counts(r.by, r)) { dropped.add(r.fp); continue }
+      const holder = nameHolder.get(c.host)
+      if (holder && !status(holder.fp).removed) continue            // the name is taken
+      const m = { host: c.host, fp: r.fp, pem: c.pem, publicKey: c.publicKey, at: r.at, by: r.by, rank: rank++ }
+      ranked.set(r.fp, m)
+      nameHolder.set(c.host, m)
+    }
+
+    /** @type {Map<string, Member>} */
+    const members = new Map()
+    /** @type {Map<string, Member>} */
+    const byHost = new Map()
+    /** @type {Map<string, { at: number, by: string }>} */
+    const removed = new Map()
+    for (const m of ranked.values()) {
+      const st = status(m.fp)
+      if (st.removed) removed.set(m.fp, { at: st.at, by: st.by })
+      else { members.set(m.fp, m); byHost.set(m.host, m) }
+    }
+    for (const fp of ranked.keys()) dropped.delete(fp)
+
+    /** @type {string[]} */
+    const dks = []
+    /** @type {number[]} */
+    const dkAt = []
+    for (const r of this.records) {
+      if (!r.dk || !members.has(r.by)) continue                    // never a key made by a removed machine
+      const standing = r.type === 'add' ? r.by === r.fp && ranked.has(r.fp)
+        : status(r.fp).removed && ranked.has(r.fp) && /** @type {Member} */ (ranked.get(r.by)).rank < /** @type {Member} */ (ranked.get(r.fp)).rank && this.verified.has(r.sig)
+      if (standing) { dks.push(r.dk); dkAt.push(r.at) }
+    }
+
+    // Keep every record signed by a current member (members are trusted), and of what removed
+    // machines signed only what counts: adds every remover had seen, and the first standing removal
+    // per target. Nothing else from a removed or dropped key can ever count, whatever arrives later,
+    // so dropping it keeps every node's result the same, and a removed machine can't fill the roster.
+    // Adds that didn't count are kept too (at most MAX_DROPPED per removed machine), so their keys
+    // stay known as dropped: messages from them are refused instead of retried.
+    /** @type {Set<string>} */
+    const firstRemove = new Set()
+    /** @type {Map<string, number>} */
+    const droppedKept = new Map()
+    const kept = this.records.filter(r => {
+      if (members.has(r.by)) return true
+      if (!ranked.has(r.by)) return r.by === r.fp && r.fp === this.net          // (the founder's genesis)
+      if (r.type === 'add') {
+        if (ranked.get(r.fp)?.by === r.by && counts(r.by, r)) return true
+        if (!dropped.has(r.fp) || ranked.has(r.fp)) return false
+        const n = (droppedKept.get(r.by) || 0) + 1
+        droppedKept.set(r.by, n)
+        return n <= MAX_DROPPED
+      }
+      // the removal that counts for this signer and target (the only one status() looks at)
+      const t = ranked.get(r.fp), s = /** @type {Member} */ (ranked.get(r.by))
+      if (!t || s.rank >= t.rank || !this.verified.has(r.sig) || firstRemove.has(`${r.by} ${r.fp}`)) return false
+      firstRemove.add(`${r.by} ${r.fp}`)
+      return true
+    })
+    Object.assign(this, { members, byHost, removed, dropped, dks, dkAt, records: kept, sigs: new Set(kept.map(r => r.sig)) })
   }
 
   /** A timestamp later than every record we hold, so our records sort after what we've seen
@@ -161,10 +298,15 @@ export class Roster {
     return rec
   }
 
-  /** Sign and merge a record removing `fp`; rotates the discovery key. @param {import('./types.js').Identity} me @param {string} fp */
+  /**
+   * Sign and merge a record removing `fp` (which must have joined after us); rotates the discovery
+   * key, and lists the removed machine's records we have: nothing else it signs will count.
+   * @param {import('./types.js').Identity} me @param {string} fp
+   */
   remove(me, fp) {
+    if (!this.canRemove(me.fp, fp)) throw new Error('only a machine that joined earlier can remove this one')
     /** @type {Omit<RosterRecord, 'sig'>} */
-    const r = { type: 'remove', fp, at: this.nextAt(), by: me.fp, dk: newDiscoveryKey() }
+    const r = { type: 'remove', fp, at: this.nextAt(), by: me.fp, dk: newDiscoveryKey(), seen: this.records.filter(x => x.by === fp).map(x => recId(x.sig)) }
     const rec = { ...r, sig: signRecord(me.key, r) }
     this.merge([rec])
     return rec

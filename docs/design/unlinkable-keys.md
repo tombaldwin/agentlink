@@ -45,10 +45,12 @@ Properties:
 - **No replay or relaying.** Both proofs sign this TLS session's exporter. A relay in the middle
   runs two sessions with two exporters, so it can't pass proofs from one side to the other, even if
   it holds a discovery key. Role labels stop a server proof being reflected back as a client proof.
-- **Old discovery keys still open the gate.** A machine that was offline during a removal (and
-  missed the key rotation) can still get in. This is safe: passing the gate only tells a client
-  which member it is talking to, and anyone who ever held a discovery key already has the member
-  list. Membership is checked in step 3 as before, so a removed machine still gets 403.
+- **Recently replaced discovery keys still open the gate, for 30 days** (`Roster.gateDks`). A
+  machine that was offline during a removal, and missed the key rotation, can still get in. Passing
+  the gate only tells a client which member it is talking to, and anyone who held the key already
+  has the member list. Membership is checked in step 3 as before, so a removed machine still gets
+  403. Before step 3 succeeds, a client can submit only the add records for its own key (and whoever
+  added it, up to 4), and request bodies are read only after the gate (joins: 16 KB).
 - **Cost:** one extra round trip per connection. No SNI is sent, so a passive observer doesn't see
   the name being dialled either.
 

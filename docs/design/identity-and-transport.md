@@ -178,12 +178,54 @@ keys and a pre-built roster.
 
 ## Decisions
 
-1. **Any member may add and remove machines** (matches today's "any machine can invite"). Removal
-   does not cascade. Known weakness, documented in SECURITY.md: a compromised machine could
-   pre-sign `add` records for hidden keys before it's removed; those must be removed too (status
-   shows who added each machine), or the network re-created with `setup --new-network`.
+1. **Any member may add machines; a machine may remove only machines that joined after it**
+   (revised after review: see "Removal" below). Removal does not cascade. Known weakness,
+   documented in SECURITY.md: a compromised machine could add hidden keys before it's removed;
+   those must be removed too (status shows who added each machine), or the network re-created with
+   `setup --new-network`.
 2. **Invite tokens are single-use and expire after 24h.** No `--uses N`.
 3. **ECDSA P-256 keys** (final: see spike results).
+
+## Removal (revised after review)
+
+The first version let any member remove any other, with records replayed in timestamp order. A
+review found that a removed machine could sign a removal of its remover, dated just before its own
+removal: replay applied it first, so the removed machine was back in and the remover was out.
+Signer-chosen timestamps can't settle this. With no central authority, a removed machine can
+always claim it acted at the same moment as its remover, and if each could remove the other, every
+way of settling that claim is bad.
+
+So:
+
+- **Seniority.** Members are ranked in the order their adds take effect (the founder first). A
+  remove counts only if its signer ranks before its target, so two machines can never remove each
+  other.
+- **Single pass, in rank order.** Whether a machine is removed depends only on removes signed by
+  higher-ranked machines, so each machine is settled exactly once, after everything that can
+  affect it. Membership is a pure function of the record set: every node holding the same records
+  agrees, whatever order they arrived in. Nothing is voided and then reconsidered. (A first version
+  iterated "void, then replay" to a fixpoint. A second review showed that removing a remover could
+  bring its target back, and that results depended on arrival order.)
+- **Removals always stand** once their signer outranks the target, even if the signer is removed
+  too. Concurrent removals therefore all take effect, and removing a remover never undoes its
+  removals. The cost: a removed machine can still remove machines ranked after it, if it gets the
+  record to a member before that member hears of its removal. It can never remove a higher-ranked
+  machine or add one, and its new discovery keys are never used (the current key is the newest one
+  introduced by a machine that is still a member).
+- **Adds by a removed machine count only if every removal of it lists them in `seen`** (`recId`
+  ids of the target's records the remover had). Backdated or concurrent adds don't count, and
+  their keys are marked `dropped`: messages from them are rejected rather than retried.
+- **Records are kept only if they could ever count.** That means everything signed by current
+  members (who are trusted), and of what removed machines signed, only what counts: adds every
+  remover had seen, and the first standing removal per target. Nothing else from a removed or
+  dropped key can ever count, whatever arrives later (removals only accumulate), so discarding it
+  doesn't make nodes disagree, and a removed machine can't fill the roster. Up to 50 adds per
+  removed machine that didn't count are also kept, so those keys stay known as dropped.
+- **Before authentication,** a client can submit only a chain of adds that ends at a current
+  member and passes through no removed or dropped key.
+- **Trade-offs.** The founding machine can't be removed, so if it's lost, start a new network. A
+  compromised machine could backdate the adds it makes while still a member, giving those machines
+  an earlier rank, but only up to its own: every machine ranked before it can still remove them.
 
 ## Spike results (2026-11-01, macOS, Node 23.6, stock curl 8.7.1)
 

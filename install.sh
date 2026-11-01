@@ -49,14 +49,16 @@ if [ "$USE_PRIV" = 0 ] && ! node_ok; then
   export PATH="$PRIV/bin:$PATH"; USE_PRIV=1
 fi
 
-# joining via an invite: the package comes from the inviting machine, pinned to its key
-# (-k only skips CA checks; curl still refuses any key but the pinned one)
+# joining via an invite: the package comes from the inviting machine, pinned to its invite key
+# (-k only skips CA checks; curl still refuses any key but the pinned one). The URL holds the invite
+# token, so it goes to curl in a private file, not on the command line (where `ps` would show it).
 case "$PKG" in
   https://*)
+    printf 'url = "%s"\n' "$PKG" > "$TMP/curl.cfg"
     if [ -n "${AGENTLINK_PIN:-}" ]; then
-      curl -fsSL -k --pinnedpubkey "sha256//$AGENTLINK_PIN" "$PKG" -o "$TMP/agentlink.tgz"
+      curl -fsSL -k --pinnedpubkey "sha256//$AGENTLINK_PIN" -K "$TMP/curl.cfg" -o "$TMP/agentlink.tgz"
     else
-      curl -fsSL "$PKG" -o "$TMP/agentlink.tgz"
+      curl -fsSL -K "$TMP/curl.cfg" -o "$TMP/agentlink.tgz"
     fi
     PKG="$TMP/agentlink.tgz" ;;
 esac
