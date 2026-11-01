@@ -117,8 +117,8 @@ test('roster: founder, adds, removals and the discovery key', () => {
   // forge: c (removed) signs an add for d, stamped after its removal
   const { signRecord } = { signRecord: (key, rec) => crypto.sign('sha256', Buffer.from(JSON.stringify(['agentlink-roster-1', rec.type, rec.host ?? '', rec.fp, rec.cert ?? '', rec.at, rec.by, rec.dk ?? ''])), key).toString('base64url') }
   const rec = { type: 'add', host: 'd.local', fp: d.fp, cert: certDer(d.cert), at: rc.nextAt(), by: c.fp }
-  assert.ok(!rc.merge([{ ...rec, sig: signRecord(c.key, rec) }]), 'a record signed by a removed machine is not kept')
-  assert.ok(!rc.members.has(d.fp))
+  rc.merge([{ ...rec, sig: signRecord(c.key, rec) }])
+  assert.ok(!rc.members.has(d.fp), 'a record signed by a removed machine after its removal does not count')
   assert.equal(fromRemoved.records.length, before)
 })
 
@@ -131,21 +131,19 @@ test('roster: only earlier machines can remove, and a removed machine cannot fig
   assert.throws(() => r.remove(b, a.fp), /joined earlier/, 'nobody can remove the founder')
   const rm = r.remove(b, c.fp)
   assert.ok(r.removed.has(c.fp) && r.members.has(d.fp))
-  // c fights back with records dated just before its removal: removing b (earlier than c), removing
-  // d (later than c, which c could once do), and adding a key it controls
+  // c fights back with records dated just before its removal: removing b (earlier than c) and
+  // adding a key it controls. Neither counts, in any order.
   const sign = rec => ({ ...rec, sig: signRecord(c.key, rec) })
   const attack = [
     sign({ type: 'remove', fp: b.fp, at: rm.at - 1, by: c.fp, dk: newDiscoveryKey(), seen: [] }),
-    sign({ type: 'remove', fp: d.fp, at: rm.at - 1, by: c.fp, dk: newDiscoveryKey(), seen: [] }),
     sign({ type: 'add', host: 'e.local', fp: e.fp, cert: certDer(e.cert), at: rm.at - 1, by: c.fp }),
   ]
   for (const list of [attack, [...attack].reverse()]) {
     const x = new Roster({ net: r.net, records: [] })
     x.merge([...list, ...[...r.records].reverse()])
     assert.deepEqual([...x.byHost.keys()].sort(), ['a.local', 'b.local', 'd.local'], 'membership unchanged')
-    assert.ok(x.removed.has(c.fp) && !x.members.has(e.fp))
-    assert.equal(x.dk, r.dk)
-    assert.ok(!x.records.some(y => y.by === c.fp), 'none of the attack records are kept')
+    assert.ok(x.removed.has(c.fp) && !x.members.has(e.fp) && x.dropped.has(e.fp))
+    assert.equal(x.dk, r.dk, 'the discovery key is still the remover\'s')
   }
   // what the remover had seen of c (its records from before) still counts: no cascade
   const r2 = Roster.genesis(a, 'a.local')
@@ -155,6 +153,47 @@ test('roster: only earlier machines can remove, and a removed machine cannot fig
   // a replaced discovery key opens gates only for a while
   assert.deepEqual(r2.gateDks(), r2.dks)
   assert.deepEqual(r2.gateDks(Date.now() + 31 * 86400_000), [r2.dk])
+})
+
+test('roster: concurrent removals all stand, and the result never depends on arrival order', () => {
+  const ids = Array.from({ length: 5 }, () => newIdentity())
+  const [m0, m1, m2, m3, y] = ids
+  const base = Roster.genesis(m0, 'm0.local')
+  for (const [i, m] of [m1, m2, m3].entries()) base.add(m0, `m${i + 1}.local`, m.cert)
+  const fork = () => new Roster({ net: base.net, records: base.records })
+  // each removal made without seeing the one before it: m2 removes m3, m1 removes m2, m0 removes m1
+  const c = fork().remove(m2, m3.fp), b = fork().remove(m1, m2.fp), a = fork().remove(m0, m1.fp)
+  // and m1 adds y, which m0 hadn't seen when it removed m1
+  const addY = fork().add(m1, 'y.local', y.cert)
+  const extra = [a, b, c, addY]
+  const all = [...base.records, ...extra]
+  /** @param {unknown[]} list */
+  const view = list => { const x = new Roster({ net: base.net, records: [] }); x.merge(list); return x }
+  const ref = view(all)
+  assert.deepEqual([...ref.byHost.keys()], ['m0.local'], 'every removal stands: removing a remover undoes nothing')
+  assert.ok(ref.dropped.has(y.fp), 'an add the remover never saw does not count, and is known as dropped')
+  assert.equal(ref.dk, a.dk, 'the current discovery key comes from a machine that is still a member')
+  for (let i = 0; i < 20; i++) {
+    const shuffled = [...all].sort(() => Math.random() - 0.5)
+    const x = view(shuffled)
+    assert.deepEqual([...x.byHost.keys()], [...ref.byHost.keys()])
+    assert.equal(x.dk, ref.dk)
+    // and in two parts (a node catching up). Nodes only ever send records whose signers are in
+    // the network, so each part includes the adds of everyone who signed in it.
+    const ex = [...extra].sort(() => Math.random() - 0.5)
+    const h = view([...base.records, ...ex.slice(0, 2)]); h.merge(ex.slice(2))
+    assert.deepEqual([...h.byHost.keys()], [...ref.byHost.keys()])
+    assert.deepEqual(h.records.map(r => r.sig).sort(), ref.records.map(r => r.sig).sort(), 'the same records are kept')
+  }
+})
+
+test('roster: a member can sign any number of records (only non-members are capped)', () => {
+  const a = newIdentity(), r = Roster.genesis(a, 'a.local')
+  const ids = Array.from({ length: 520 }, () => newIdentity())
+  ids.forEach((x, i) => r.add(a, `h${i}.local`, x.cert))
+  assert.equal(r.members.size, 521)
+  r.remove(a, ids[519].fp)
+  assert.ok(r.removed.has(ids[519].fp))
 })
 
 test('roster: same records in any order give the same membership; junk is not kept', () => {

@@ -417,10 +417,10 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     if (!sender) return removedHost(host) ? 'bad' : 'unknown-sender'
     return verifyEnvelope(sender.publicKey, e) ? 'ok' : 'bad'
   }
-  /** Was `host` a member that has been removed (and not re-added)? @param {string} host */
+  /** Is `host` a machine that was removed, or whose add never counted (it never will)? @param {string} host */
   const removedHost = host => {
     const fp = [...roster.records].reverse().find(r => r.type === 'add' && r.host === host)?.fp
-    return !!fp && roster.removed.has(fp)
+    return !!fp && (roster.removed.has(fp) || roster.dropped.has(fp))
   }
   /**
    * Store a row unless one with that id exists. An existing id is only fine for the same message:
@@ -510,13 +510,14 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
         const res = await call(host, 'POST', '/v1/deliver', { messages: batch.map(envOf) })
         const results = res.results || {}
         const unknown = new Set(Array.isArray(res.unknown) ? res.unknown : [])
+        let tell = false
         for (const r of batch) {
           if (results[r.id]) q.forwarded.run(now(), r.id)
-          // it hasn't heard of the sending machine yet: tell it what we know, then try again soon
-          else if (unknown.has(r.id)) q.retry.run(now() + 2000, `${host} doesn't know the sender yet`, now(), r.id)
+          // it hasn't heard of the sending machine yet: tell it what we know, then try again later
+          else if (unknown.has(r.id)) { q.retry.run(now() + backoff(r.attempts), `${host} doesn't know the sender yet`, now(), r.id); tell ||= r.attempts < 3 }
           else q.failed.run(`rejected by ${host} (invalid or malformed message)`, now(), r.id)
         }
-        if (unknown.size) setImmediate(() => hello(host))
+        if (tell) setImmediate(() => hello(host))
       } catch (err) {
         const rest = rows.slice(rows.indexOf(batch[0]))
         for (const r of rest) q.retry.run(now() + backoff(r.attempts), errMsg(err), now(), r.id)

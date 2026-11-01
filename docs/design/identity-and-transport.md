@@ -197,19 +197,30 @@ way of settling that claim is bad.
 
 So:
 
-- **Seniority.** Members are ranked in the order they were added in replay (the founder first). A
+- **Seniority.** Members are ranked in the order their adds take effect (the founder first). A
   remove counts only if its signer ranks before its target, so two machines can never remove each
   other.
-- **Removal is final.** A remove record lists `seen`: the ids (`recId`, a truncated hash of the
-  signature) of the target's records the remover had. After replay, any record signed by a removed
-  machine that its remover didn't list is voided, and replay runs again (voiding only grows, so it
-  terminates). Backdated or concurrent records by the removed machine (removes, adds) don't count.
-  What the remover had seen does, so machines the removed one added stay.
+- **Single pass, in rank order.** Whether a machine is removed depends only on removes signed by
+  higher-ranked machines, so each machine is settled exactly once, after everything that can
+  affect it. Membership is a pure function of the record set: every node holding the same records
+  agrees, whatever order they arrived in. Nothing is voided and then reconsidered. (A first version
+  iterated "void, then replay" to a fixpoint. A second review showed that removing a remover could
+  bring its target back, and that results depended on arrival order.)
+- **Removals always stand** once their signer outranks the target, even if the signer is removed
+  too. Concurrent removals therefore all take effect, and removing a remover never undoes its
+  removals. The cost: a removed machine can still remove machines ranked after it, if it gets the
+  record to a member before that member hears of its removal. It can never remove a higher-ranked
+  machine or add one, and its new discovery keys are never used (the current key is the newest one
+  introduced by a machine that is still a member).
+- **Adds by a removed machine count only if every removal of it lists them in `seen`** (`recId`
+  ids of the target's records the remover had). Backdated or concurrent adds don't count, and
+  their keys are marked `dropped`: messages from them are rejected rather than retried.
+- **Records are kept even when they don't count.** That way a node that receives them later
+  computes the same thing. Records are dropped only when their signer has no chain of adds from the
+  founder, and keys that aren't members keep at most 500 records each.
 - **Trade-offs.** The founding machine can't be removed, so if it's lost, start a new network. A
-  record the removed machine made legitimately but the remover hadn't seen yet (a concurrent add) is
-  also voided, which errs on the safe side. A compromised machine could backdate the adds it makes
-  while still a member, giving those machines an earlier rank, but only up to its own: every machine
-  ranked before it can still remove them.
+  compromised machine could backdate the adds it makes while still a member, giving those machines
+  an earlier rank, but only up to its own: every machine ranked before it can still remove them.
 
 ## Spike results (2026-11-01, macOS, Node 23.6, stock curl 8.7.1)
 

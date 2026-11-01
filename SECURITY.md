@@ -26,11 +26,13 @@ the same membership from the same records.
   add it. Any member can add a machine by inviting it.
 - **Removal.** Machines are ranked in the order they joined, and a machine can remove only machines
   that joined after it. The founding machine can remove anyone, and two machines can never remove
-  each other. A removal lists the removed machine's records that the remover had. Anything else
-  that machine signs is ignored, whatever date it puts on it, so a removed machine can't undo its
-  removal, remove others or add machines. A removed key is gone for good: the machine re-joins with
-  a new key. Machines it added stay. Records are replayed in time order, and a member stamps its
-  records later than everything it has seen, so a machine whose clock is behind still converges.
+  each other. A removal can't be undone: removing the remover doesn't bring a machine back, and
+  removals made at the same time all stand. A removed key is gone for good (the machine re-joins
+  with a new key), and a key made by a removed machine never becomes the discovery key.
+- **A removed machine can't add machines.** A removal lists the removed machine's records the
+  remover had. Machines it added stay if every remover had seen the add. An add the remover hadn't
+  seen doesn't count, whatever date it carries, and that machine needs a new invite. Every member
+  computes the same membership from the same records, whatever order they arrived in.
 - **Messages.** Each message is signed end to end by the machine that sent it. A node accepts a
   message only if the signer is a current member and is the machine named in the sender address,
   so holders relaying copies can't alter messages and a member can't send as another machine.
@@ -66,6 +68,10 @@ the same membership from the same records.
 - **The founding machine can't be removed.** Nothing joined before it. If it's lost or
   compromised, start a new network. Likewise, a machine can only be removed from machines that
   joined before it.
+- **A removed machine's removals of later machines can still take effect.** If it signs one and
+  gets it to a member that hasn't heard of its removal yet, the removal stands, like any removal
+  made at the same moment. It can never remove a machine that joined before it, add one, or get
+  back in. The affected machines re-join with an invite.
 - **A removed machine can still tell which member it is talking to, for 30 days.** It can pass the
   gate with an old discovery key during the grace period, and learn which member is at an address
   (which it knew already). It still can't send, receive or change the member list.
