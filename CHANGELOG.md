@@ -10,7 +10,8 @@ First release.
   `inbox`. Poll mode (`agentlink mcp --poll`) for agents without channel support.
 - Per-machine keys and a signed, shared member list: TLS between machines, with each machine
   proving its key inside the connection (nothing is sent to an address unless the machine there
-  proves who it is), messages signed by the sending machine, `agentlink remove <host>`.
+  proves who it is), messages signed by the sending machine, `agentlink remove <host>` (a machine can remove the ones
+  that joined after it; a removal is final).
 - Unlinkable keys: nodes present a throwaway certificate on each connection, so a machine's key
   can't be used to recognise it on different networks. While invites are open, the node presents
   an invite key instead. No SNI is sent.

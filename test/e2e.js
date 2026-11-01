@@ -266,6 +266,18 @@ try {
     assert.deepEqual(r.data.results, {})
     await sleep(300)
     assert.ok(!bob.got.some(g => g.content === 'forged' || g.content === 'altered'))
+    // a message reusing the id of one already delivered is refused, not reported as delivered
+    const first = envelope('bob@b.test', 'first with this id')
+    assert.ok((await memberPost('b', '/v1/deliver', { messages: [first] })).data.results[first.id])
+    const reuse = envelope('bob@b.test', 'second with the same id', { id: first.id })
+    assert.deepEqual((await memberPost('b', '/v1/deliver', { messages: [reuse] })).data.results, {})
+    assert.ok((await memberPost('b', '/v1/deliver', { messages: [first] })).data.results[first.id], 'the same message again is fine (a duplicate)')
+    // a sender the node hasn't heard of yet (it joined while this node was offline): retry, not reject
+    const newcomer = newIdentity()
+    const fromNew = envelope('bob@b.test', 'from a newcomer', { from: 'x@new.test' }, newcomer.key)
+    const r2 = await memberPost('b', '/v1/deliver', { messages: [fromNew] })
+    assert.deepEqual(r2.data.results, {})
+    assert.deepEqual(r2.data.unknown, [fromNew.id])
   })
 
   await step('node restarts transparently under a connected session', async () => {
@@ -519,7 +531,8 @@ try {
     const good = spawnSync(curlBin, ['-fsSL', '-k', '--pinnedpubkey', `sha256//${inv.pin}`, url], { encoding: 'utf8' })
     assert.equal(good.status, 0, good.stderr)
     assert.match(good.stdout, /AGENTLINK_PIN=/)
-    assert.match(good.stdout, /--token/)
+    assert.match(good.stdout, /AGENTLINK_TOKEN=/)
+    assert.doesNotMatch(good.stdout, /--token/, 'the token is never put on a command line')
     const bad = spawnSync(curlBin, ['-fsSL', '-k', '--pinnedpubkey', `sha256//${newIdentity().fp}`, url], { encoding: 'utf8' })
     assert.notEqual(bad.status, 0, 'a different key (an impostor serving the installer) is refused')
     assert.equal(spawnSync(curlBin, ['-fsSL', '-k', `https://127.0.0.1:${NODES.i}/join/install?t=wrong-token`]).status, 22, 'a wrong token gets nothing')
@@ -571,7 +584,10 @@ try {
     scli('i', 'invite', '--revoke')
   })
 
-  await step('a removed machine can neither send nor receive', async () => {
+  await step('only an earlier machine can remove one; a removed machine can neither send nor receive', async () => {
+    const no = scli('k', 'remove', 'i.test')
+    assert.notEqual(no.status, 0)
+    assert.match(no.stderr, /i\.test joined the network before this machine, so only an earlier machine can remove it/)
     const r = scli('i', 'remove', 'k.test')
     assert.equal(r.status, 0, r.stderr)
     assert.match(r.stdout, /removed k\.test/)

@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
 import { normHost, sanitizeName, parseAddr, parsePeer, validAddr } from '../../src/config.js'
-import { signEnvelope, verifyEnvelope, sealBeacon, openBeacon, newDiscoveryKey, randomToken, gateTags, gateOk, proveAuth, checkAuth } from '../../src/crypto.js'
+import { signEnvelope, verifyEnvelope, sealBeacon, openBeacon, newDiscoveryKey, randomToken, gateTags, gateOk, proveAuth, checkAuth, signRecord } from '../../src/crypto.js'
 import { newIdentity, fingerprint, certDer } from '../../src/cert.js'
 import { Roster } from '../../src/roster.js'
 
@@ -120,6 +120,41 @@ test('roster: founder, adds, removals and the discovery key', () => {
   assert.ok(!rc.merge([{ ...rec, sig: signRecord(c.key, rec) }]), 'a record signed by a removed machine is not kept')
   assert.ok(!rc.members.has(d.fp))
   assert.equal(fromRemoved.records.length, before)
+})
+
+test('roster: only earlier machines can remove, and a removed machine cannot fight back', () => {
+  const [a, b, c, d, e] = Array.from({ length: 5 }, () => newIdentity())
+  const r = Roster.genesis(a, 'a.local')
+  r.add(a, 'b.local', b.cert); r.add(a, 'c.local', c.cert); r.add(a, 'd.local', d.cert)
+  assert.deepEqual([a, b, c, d].map(x => r.members.get(x.fp)?.rank), [0, 1, 2, 3], 'ranked in the order they joined')
+  assert.throws(() => r.remove(c, b.fp), /joined earlier/, 'a later machine cannot remove an earlier one')
+  assert.throws(() => r.remove(b, a.fp), /joined earlier/, 'nobody can remove the founder')
+  const rm = r.remove(b, c.fp)
+  assert.ok(r.removed.has(c.fp) && r.members.has(d.fp))
+  // c fights back with records dated just before its removal: removing b (earlier than c), removing
+  // d (later than c, which c could once do), and adding a key it controls
+  const sign = rec => ({ ...rec, sig: signRecord(c.key, rec) })
+  const attack = [
+    sign({ type: 'remove', fp: b.fp, at: rm.at - 1, by: c.fp, dk: newDiscoveryKey(), seen: [] }),
+    sign({ type: 'remove', fp: d.fp, at: rm.at - 1, by: c.fp, dk: newDiscoveryKey(), seen: [] }),
+    sign({ type: 'add', host: 'e.local', fp: e.fp, cert: certDer(e.cert), at: rm.at - 1, by: c.fp }),
+  ]
+  for (const list of [attack, [...attack].reverse()]) {
+    const x = new Roster({ net: r.net, records: [] })
+    x.merge([...list, ...[...r.records].reverse()])
+    assert.deepEqual([...x.byHost.keys()].sort(), ['a.local', 'b.local', 'd.local'], 'membership unchanged')
+    assert.ok(x.removed.has(c.fp) && !x.members.has(e.fp))
+    assert.equal(x.dk, r.dk)
+    assert.ok(!x.records.some(y => y.by === c.fp), 'none of the attack records are kept')
+  }
+  // what the remover had seen of c (its records from before) still counts: no cascade
+  const r2 = Roster.genesis(a, 'a.local')
+  r2.add(a, 'b.local', b.cert); r2.add(a, 'c.local', c.cert); r2.add(c, 'e.local', e.cert)
+  r2.remove(b, c.fp)
+  assert.ok(r2.members.has(e.fp), 'machines the removed one added stay')
+  // a replaced discovery key opens gates only for a while
+  assert.deepEqual(r2.gateDks(), r2.dks)
+  assert.deepEqual(r2.gateDks(Date.now() + 31 * 86400_000), [r2.dk])
 })
 
 test('roster: same records in any order give the same membership; junk is not kept', () => {

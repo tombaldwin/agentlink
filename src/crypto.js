@@ -30,7 +30,10 @@ export const signEnvelope = (key, m) => sign(key, envPayload(m))
 export const verifyEnvelope = (pub, m) => verify(pub, envPayload(m), m.sig)
 
 /** @param {Omit<import('./types.js').RosterRecord, 'sig'>} r */
-const recPayload = r => JSON.stringify(['agentlink-roster-1', r.type, r.host ?? '', r.fp, r.cert ?? '', r.at, r.by, r.dk ?? ''])
+const recPayload = r => JSON.stringify(['agentlink-roster-1', r.type, r.host ?? '', r.fp, r.cert ?? '', r.at, r.by, r.dk ?? '',
+  ...(r.type === 'remove' ? [(r.seen ?? []).join(',')] : [])])
+/** A short id for a roster record (what a remove record lists in `seen`). @param {string} sig */
+export const recId = sig => sha256(sig).slice(0, 22)
 /** @param {string} key @param {Omit<import('./types.js').RosterRecord, 'sig'>} r */
 export const signRecord = (key, r) => sign(key, recPayload(r))
 /** @param {crypto.KeyLike} pub @param {import('./types.js').RosterRecord} r */

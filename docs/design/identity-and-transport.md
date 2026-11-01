@@ -178,12 +178,38 @@ keys and a pre-built roster.
 
 ## Decisions
 
-1. **Any member may add and remove machines** (matches today's "any machine can invite"). Removal
-   does not cascade. Known weakness, documented in SECURITY.md: a compromised machine could
-   pre-sign `add` records for hidden keys before it's removed; those must be removed too (status
-   shows who added each machine), or the network re-created with `setup --new-network`.
+1. **Any member may add machines; a machine may remove only machines that joined after it**
+   (revised after review: see "Removal" below). Removal does not cascade. Known weakness,
+   documented in SECURITY.md: a compromised machine could add hidden keys before it's removed;
+   those must be removed too (status shows who added each machine), or the network re-created with
+   `setup --new-network`.
 2. **Invite tokens are single-use and expire after 24h.** No `--uses N`.
 3. **ECDSA P-256 keys** (final: see spike results).
+
+## Removal (revised after review)
+
+The first version let any member remove any other, with records replayed in timestamp order. A
+review found that a removed machine could sign a removal of its remover, dated just before its own
+removal: replay applied it first, so the removed machine was back in and the remover was out.
+Signer-chosen timestamps can't settle this. With no central authority, a removed machine can
+always claim it acted at the same moment as its remover, and if each could remove the other, every
+way of settling that claim is bad.
+
+So:
+
+- **Seniority.** Members are ranked in the order they were added in replay (the founder first). A
+  remove counts only if its signer ranks before its target, so two machines can never remove each
+  other.
+- **Removal is final.** A remove record lists `seen`: the ids (`recId`, a truncated hash of the
+  signature) of the target's records the remover had. After replay, any record signed by a removed
+  machine that its remover didn't list is voided, and replay runs again (voiding only grows, so it
+  terminates). Backdated or concurrent records by the removed machine (removes, adds) don't count.
+  What the remover had seen does, so machines the removed one added stay.
+- **Trade-offs.** The founding machine can't be removed, so if it's lost, start a new network. A
+  record the removed machine made legitimately but the remover hadn't seen yet (a concurrent add) is
+  also voided, which errs on the safe side. A compromised machine could backdate the adds it makes
+  while still a member, giving those machines an earlier rank, but only up to its own: every machine
+  ranked before it can still remove them.
 
 ## Spike results (2026-11-01, macOS, Node 23.6, stock curl 8.7.1)
 

@@ -23,6 +23,8 @@ import { authedRequest, exporterOf, PinError } from './tls.js'
 import { parseAddr, normHost, sanitizeName, validAddr, tailscaleName, errMsg, ensureHomeDir, rosterPath, MAX_TTL_MS, VERSION } from './config.js'
 
 const MAX_REQ = 2 << 20
+const MAX_JOIN_REQ = 16 << 10
+const MAX_JOIN_CHAIN = 4               // add records an unknown client may submit (it, whoever added it, ...)          // a join request (before any identity check) is small
 const MAX_BATCH = 256 << 10            // bytes of envelopes per request (well under MAX_REQ)
 const MIN_RATE = 25                    // bytes/ms (~200 kbit/s): request timeouts grow with the payload
 const MAX_MSG = 64 * 1024
@@ -397,22 +399,43 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
   /** @type {(r: MessageRow) => Envelope} */
   const envOf = r => ({ id: r.id, from: r.from_addr, to: r.to_addr, body: r.body, sent_at: r.sent_at, expires_at: r.expires_at, sig: r.sig })
 
-  /** A well-formed envelope signed by the machine it claims to come from. @param {any} e @returns {e is Envelope} */
-  function validEnv(e) {
+  /**
+   * Is this a well-formed envelope signed by the machine it claims to come from? 'unknown-sender'
+   * if it names a machine we haven't heard of (yet): it may have joined while we were offline.
+   * @param {any} e @returns {'ok' | 'unknown-sender' | 'bad'}
+   */
+  function checkEnv(e) {
     if (!(e && typeof e === 'object' &&
       ['id', 'from', 'to', 'body', 'sig'].every(k => typeof e[k] === 'string') &&
       e.id.length <= 64 && e.from.length <= 320 && e.to.length <= 320 &&
       // safe, bounded integers: anything else can't be stored and read back reliably
       Number.isSafeInteger(e.sent_at) && Number.isSafeInteger(e.expires_at) && e.sent_at >= 0 &&
       e.expires_at - now() <= MAX_TTL_MS && e.sent_at - now() <= MAX_TTL_MS &&
-      Buffer.byteLength(e.body) <= MAX_MSG)) return false
-    const sender = roster.byHost.get(parseAddr(e.from, '').host)
-    return !!sender && verifyEnvelope(sender.publicKey, e)
+      Buffer.byteLength(e.body) <= MAX_MSG)) return 'bad'
+    const host = parseAddr(e.from, '').host
+    const sender = roster.byHost.get(host)
+    if (!sender) return removedHost(host) ? 'bad' : 'unknown-sender'
+    return verifyEnvelope(sender.publicKey, e) ? 'ok' : 'bad'
+  }
+  /** Was `host` a member that has been removed (and not re-added)? @param {string} host */
+  const removedHost = host => {
+    const fp = [...roster.records].reverse().find(r => r.type === 'add' && r.host === host)?.fp
+    return !!fp && roster.removed.has(fp)
+  }
+  /**
+   * Store a row unless one with that id exists. An existing id is only fine for the same message:
+   * a different message reusing an id someone has seen is refused, not reported as delivered.
+   * @param {Envelope} e @param {string} toHost @param {string} toName @param {'inbox' | 'held'} role @param {'queued' | 'pending'} state
+   */
+  function store(e, toHost, toName, role, state) {
+    if (q.insert.run(e.id, e.from, e.to, toHost, toName, e.body, e.sent_at, e.expires_at, e.sig, role, state, 0, now()).changes) return true
+    return msgRow(e.id)?.sig === e.sig
   }
 
   /**
-   * Store an incoming envelope durably. Returns 'live' | 'queued' | 'held' | 'expired' | null(rejected).
-   * null means the envelope itself is bad (the sender must not retry it). Storage errors (disk full,
+   * Store an incoming envelope durably. Returns 'live' | 'queued' | 'held' | 'expired' |
+   * 'unknown-sender' (not stored: the sender should tell us its membership records, then retry) |
+   * null (rejected: the envelope itself is bad, and the sender must not retry it). Storage errors (disk full,
    * database busy) throw, so callers can report a temporary failure and the sender retries.
    */
   /**
@@ -422,21 +445,26 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
    */
   function accept(e, toPump) {
     let to
+    /** @type {Envelope} */
+    let env
     try {
-      if (!validEnv(e)) return null
-      to = parseAddr(e.to, cfg.host)
+      const v = checkEnv(e)
+      if (v === 'unknown-sender') return v
+      if (v !== 'ok') return null
+      env = /** @type {Envelope} */ (e)
+      to = parseAddr(env.to, cfg.host)
     } catch (err) {
       log('rejected envelope:', errMsg(err))
       return null
     }
-    if (e.expires_at <= now()) return 'expired'
+    if (env.expires_at <= now()) return 'expired'
     if (isSelf(to.host)) {
-      q.insert.run(e.id, e.from, e.to, cfg.host, to.name, e.body, e.sent_at, e.expires_at, e.sig, 'inbox', 'queued', 0, now())
+      if (!store(env, cfg.host, to.name, 'inbox', 'queued')) return null
       if (toPump) toPump.add(to.name)
       else pump(to.name)
       return sessions.get(to.name)?.live ? 'live' : 'queued'
     }
-    q.insert.run(e.id, e.from, e.to, to.host, to.name, e.body, e.sent_at, e.expires_at, e.sig, 'held', 'pending', 0, now())
+    if (!store(env, to.host, to.name, 'held', 'pending')) return null
     kick()
     return 'held'
   }
@@ -481,10 +509,14 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       try {
         const res = await call(host, 'POST', '/v1/deliver', { messages: batch.map(envOf) })
         const results = res.results || {}
+        const unknown = new Set(Array.isArray(res.unknown) ? res.unknown : [])
         for (const r of batch) {
           if (results[r.id]) q.forwarded.run(now(), r.id)
+          // it hasn't heard of the sending machine yet: tell it what we know, then try again soon
+          else if (unknown.has(r.id)) q.retry.run(now() + 2000, `${host} doesn't know the sender yet`, now(), r.id)
           else q.failed.run(`rejected by ${host} (invalid or malformed message)`, now(), r.id)
         }
+        if (unknown.size) setImmediate(() => hello(host))
       } catch (err) {
         const rest = rows.slice(rows.indexOf(batch[0]))
         for (const r of rest) q.retry.run(now() + backoff(r.attempts), errMsg(err), now(), r.id)
@@ -621,6 +653,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       const res = await call(to.host, 'POST', '/v1/deliver', { messages: [e] })
       remote = res.results?.[e.id]
       if (remote) q.forwarded.run(now(), e.id)
+      else if (Array.isArray(res.unknown) && res.unknown.includes(e.id)) throw new Error(`${to.host} doesn't know this machine yet`)
       else q.failed.run(`rejected by ${to.host} (invalid or malformed message)`, now(), e.id)
     } catch (err) {
       q.retry.run(now() + backoff(0), errMsg(err), now(), e.id)
@@ -657,7 +690,8 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
   const hostOfFp = (/** @type {string} */ fp) => roster.members.get(fp)?.host ||
     [...roster.records].reverse().find(r => r.type === 'add' && r.fp === fp)?.host || shortFp(fp)
   function members() {
-    return [...roster.members.values()].map(m => ({
+    // in joining order: each machine can remove the ones listed after it
+    return [...roster.members.values()].sort((a, b) => a.rank - b.rank).map(m => ({
       host: m.host, fp: shortFp(m.fp), added_by: m.by === m.fp ? '(founded the network)' : hostOfFp(m.by), added_at: m.at, self: m.fp === me.fp,
     }))
   }
@@ -693,6 +727,23 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     return { net: roster.net, records: roster.records, peers: shareablePeers(), host: cfg.host }
   }
 
+  /**
+   * The add records for `fp`, then for whoever signed that, and so on (at most a few): what an
+   * unknown client may submit before it has proved who it is.
+   * @param {unknown} records @param {string} fp
+   */
+  function joinChain(records, fp) {
+    const adds = Array.isArray(records) ? records.filter(r => r?.type === 'add').slice(0, MAX_JOIN_CHAIN * 50) : []
+    const out = []
+    for (let want = fp; out.length < MAX_JOIN_CHAIN && !roster.members.has(want);) {
+      const r = adds.find(x => x.fp === want)
+      if (!r || typeof r.by !== 'string' || r.by === want) break
+      out.push(r)
+      want = r.by
+    }
+    return out
+  }
+
   // ---------- HTTPS ----------
   /** @type {WeakSet<import('node:net').Socket>} connections whose client passed the gate */
   const gated = new WeakSet()
@@ -719,7 +770,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     // Anyone else gets the same 404 as for any unknown path.
     if (p === '/v1/auth') {
       const ekm = sock.getProtocol() === 'TLSv1.3' ? exporterOf(sock) : null
-      if (!ekm || !gateOk(roster.dks, ekm, req.headers['x-agentlink-gate'])) return reply(res, 404, { error: 'not found' })
+      if (!ekm || !gateOk(roster.gateDks(), ekm, req.headers['x-agentlink-gate'])) return reply(res, 404, { error: 'not found' })
       gated.add(sock)
       return reply(res, 200, { fp: me.fp, sig: proveAuth(me.key, 'server', ekm) })
     }
@@ -744,20 +795,23 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       })
       return
     }
-    const body = req.method === 'POST' ? await readBody(req) : ''
+    const joining = req.method === 'POST' && p === '/join'
+    // request bodies are read only for joins (small) and for clients past the gate
+    if (!joining && !gated.has(sock)) return reply(res, 404, { error: 'not found' })
+    const body = req.method === 'POST' ? await readBody(req, joining ? MAX_JOIN_REQ : MAX_REQ) : ''
     /** @type {Record<string, any>} request body (untrusted: every field is checked where it's used) */
     let d = {}
     if (body) { try { d = JSON.parse(body) } catch { return reply(res, 400, { error: 'bad JSON' }) } }
     if (!d || typeof d !== 'object') d = {}
-    if (req.method === 'POST' && p === '/join') return reply(res, 200, join(d))
+    if (joining) return reply(res, 200, join(d))
 
     // ---- identity, step 2: the client signs the same connection's exporter with its machine key ----
-    if (!gated.has(sock)) return reply(res, 404, { error: 'not found' })
     let clientFp = authed.get(sock) || ''
     if (!clientFp) {
       const [fp = '', sig] = String(req.headers['x-agentlink-auth'] || '').split('.')
-      // a hello carries membership records: a machine that has just joined proves it with them
-      if (p === '/v1/hello' && fp !== me.fp && !roster.members.has(fp)) mergeRoster(d.records)
+      // a machine that has just joined proves it with the records that add it (and those adding
+      // whoever added it, if they are new too). Nothing else is taken before the signature checks out.
+      if (p === '/v1/hello' && fp !== me.fp && !roster.members.has(fp)) mergeRoster(joinChain(d.records, fp))
       const pub = fp === me.fp ? myPub : roster.members.get(fp)?.publicKey
       if (pub && checkAuth(pub, 'client', exporterOf(sock), sig)) { clientFp = fp; authed.set(sock, fp) }
     }
@@ -782,6 +836,8 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       case 'POST /v1/deliver': {
         /** @type {Record<string, string>} */
         const results = {}
+        /** @type {string[]} */
+        const unknown = []
         /** @type {Set<string>} */
         const toPump = new Set()    // offer each local recipient its new messages once, not per envelope
         for (const e of Array.isArray(d.messages) ? d.messages.slice(0, 2000) : []) {
@@ -793,10 +849,11 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
             log('could not store delivered messages:', errMsg(err))
             throw httpErr(503, 'temporarily unable to store messages; retry later')
           }
-          if (st) results[e.id] = st
+          if (st === 'unknown-sender') unknown.push(e.id)
+          else if (st) results[e.id] = st
         }
         for (const n of toPump) pump(n)
-        return reply(res, 200, { results })
+        return reply(res, 200, { results, unknown })
       }
       case 'POST /v1/hello': {
         if (peer.fp !== me.fp) {
@@ -880,6 +937,10 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
         if (!m) throw httpErr(404, `${host} is not a member of this network`)
         if (m.fp === me.fp) throw httpErr(400, 'to take this machine off the network, run `agentlink uninstall` (or remove it from another member)')
         if (!roster.members.has(me.fp)) throw httpErr(409, 'this machine is not a member of its network')
+        if (!roster.canRemove(me.fp, m.fp)) {
+          const earlier = [...roster.members.values()].filter(x => x.rank < m.rank).map(x => x.host)
+          throw httpErr(403, `${m.host} joined the network before this machine, so only an earlier machine can remove it: ${earlier.join(', ')}`)
+        }
         roster.remove(me, m.fp)
         roster.save()
         log(`removed ${m.host} (key ${shortFp(m.fp)}) from the network`)
@@ -958,7 +1019,9 @@ function installScript(hostHeader, cfg, token, pin) {
   const preset = [
     `AGENTLINK_PKG=${sh(`https://${used}/join/pkg.tgz?t=${token}`)}`,
     `AGENTLINK_PIN=${sh(pin)}`,
-    `set -- --join ${sh(used)} --pin ${sh(pin)} --net ${sh(cfg.net)} --token ${sh(token)}${used !== `${cfg.host}:${cfg.port}` ? ` --peer ${sh(`${cfg.host}:${cfg.port}`)}` : ''}`,
+    // the token is passed in the environment: setup's command line is visible to other users (ps)
+    `AGENTLINK_TOKEN=${sh(token)}; export AGENTLINK_TOKEN`,
+    `set -- --join ${sh(used)} --pin ${sh(pin)} --net ${sh(cfg.net)}${used !== `${cfg.host}:${cfg.port}` ? ` --peer ${sh(`${cfg.host}:${cfg.port}`)}` : ''}`,
   ].join('\n')
   return fs.readFileSync(path.join(PKG_ROOT, 'install.sh'), 'utf8').replace('#@@PRESET@@', () => preset)   // no $-patterns
 }
@@ -970,14 +1033,14 @@ function httpErr(status, message) { return Object.assign(new Error(message), { s
 const isLoopback = (/** @type {string | undefined} */ a) => a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1'
 
 /** @param {http.IncomingMessage} req @returns {Promise<string>} */
-function readBody(req) {
+function readBody(req, max = MAX_REQ) {
   return new Promise((resolve, reject) => {
     let size = 0
     /** @type {Buffer[]} */
     const chunks = []
     req.on('data', (/** @type {Buffer} */ c) => {
       size += c.length
-      if (size > MAX_REQ) { reject(httpErr(413, 'request too large')); req.destroy() } else chunks.push(c)
+      if (size > max) { reject(httpErr(413, 'request too large')); req.destroy() } else chunks.push(c)
     })
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
     req.on('error', reject)

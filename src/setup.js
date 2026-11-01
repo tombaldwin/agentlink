@@ -36,6 +36,7 @@ const warn = (/** @type {string} */ m) => console.log(`  ! ${m}`)
 export async function setup({ host, peers = [], noService, noClaude, noAlias, newNetwork, join, pin, net: netFp, token }) {
   noService ||= process.env.AGENTLINK_NO_SERVICE === '1'
   if (host) host = normHost(host)   // throws before anything is written
+  delete process.env.AGENTLINK_TOKEN            // spent by the join: not for the processes setup starts
   if (join && (!pin || !token)) throw new Error('--join needs --pin and --token (use the line printed by `agentlink invite`)')
   if (join && !validAddr(join)) throw new Error(`--join: "${join}" is not a host:port address`)
   console.log(`agentlink setup`)
@@ -188,13 +189,13 @@ export const installLine = (inv, host) =>
 export function invitePrompt(inv) {
   let prompt = `Join my agentlink network: run  ${installLine(inv, inv.host)}`
   if (inv.tailscale) prompt += `  — if ${inv.host} can't be reached, run  ${installLine(inv, inv.tailscale)}  instead`
-  prompt += ` — then tell me how to start Claude with agentlink enabled. (The -k is safe here: --pinnedpubkey makes curl accept only the key this invite names. If curl says the public key does not match, this invite was already used, expired or was revoked: ask me for a new one.)`
+  prompt += ` — then tell me how to start Claude with agentlink enabled. (The -k is safe here: --pinnedpubkey makes curl accept only the key this invite names. If curl fails (a key mismatch or a 404), this invite was already used, expired or was revoked: ask me for a new one.)`
   return `To add another machine, paste this into Claude Code on it (or just run the command):
 
   ${prompt}
 
 It lets one machine join and expires in 24 hours (\`agentlink invite --revoke\` cancels unused invites).
-Once it's used, expired or revoked, curl rejects the line with "public key does not match": run \`agentlink invite\` for a new one.${inv.tailscale ? '' : `
+Once it's used, expired or revoked, curl rejects the line (a key mismatch or a 404): run \`agentlink invite\` for a new one.${inv.tailscale ? '' : `
 (For machines off this LAN: install Tailscale on both, then run \`agentlink invite\` again.)`}
 `
 }
@@ -276,9 +277,16 @@ export async function uninstall() {
   }
   for (const acct of claudeAccounts()) unregister(acct.dir)
   removeShellBlock()
-  console.log(`Removed service, Claude Code registrations and shell aliases. Config/messages remain in ${homeDir()} (delete it to wipe).`)
+  let host = ''
+  try { host = loadConfig().host } catch {}
+  console.log(`Stopped agentlink and removed its service, Claude Code registrations and shell aliases.
+Its key, messages and settings remain in ${homeDir()}: \`agentlink setup\` turns it back on as before.
+To remove it completely:
+  - take this machine off the network: on another member, run  agentlink remove ${host || '<this machine>'}
+  - delete ${homeDir()}
+  - uninstall the program: npm uninstall -g @tombaldwin/agentlink  (not needed if agentlink brought its own Node.js: that lives in ${homeDir()})`)
 }
 
 /** systemd unit quoting: double quotes, escaped \\ and ", and % doubled (specifier escape). */
-const sdQuote = (/** @type {unknown} */ v) => `"${String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%')}"`
+const sdQuote = (/** @type {unknown} */ v) => `"${String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%').replace(/\$/g, '$$$$')}"`
 const esc = (/** @type {unknown} */ s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')

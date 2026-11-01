@@ -45,7 +45,7 @@ async function main() {
     case 'setup': {
       const { setup } = await import('../src/setup.js')
       if (pos.length) throw new Error('agentlink no longer uses a shared network secret: to join a network, run the line printed by `agentlink invite` on a member')
-      return setup({ host: flags.host, peers: flags.peer || [], noService: flags['no-service'], noClaude: flags['no-claude'], noAlias: flags['no-alias'], newNetwork: flags['new-network'], join: flags.join, pin: flags.pin, net: flags.net, token: flags.token })
+      return setup({ host: flags.host, peers: flags.peer || [], noService: flags['no-service'], noClaude: flags['no-claude'], noAlias: flags['no-alias'], newNetwork: flags['new-network'], join: flags.join, pin: flags.pin, net: flags.net, token: flags.token || process.env.AGENTLINK_TOKEN })
     }
     case 'node': {
       const { runNode } = await import('../src/node.js')

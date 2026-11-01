@@ -16,8 +16,8 @@ Address any agent as `name@host` (e.g. `reviewer@laptop.local`). An incoming mes
 
 Each invite adds one machine and expires after 24 hours. The pinned key means curl only talks to
 the machine that made the invite. That key exists only while the invite is open, so a used invite
-line stops working entirely: curl reports "public key does not match". Run `agentlink invite` on
-any member for a new one.
+line stops working (curl reports a key mismatch or a 404). Run `agentlink invite` on any member
+for a new one.
 
 **Then** open a new terminal and start Claude with `claude-link` (each extra account gets its
 own alias, e.g. `claude2-link`). Ask it to message another agent; ask it who's online.
@@ -55,7 +55,8 @@ Name a session with `AGENTLINK_NAME=<name> claude-link` (default: the project fo
 ## Security
 
 Each machine has its own key. The network is the list of machines' keys, kept and shared by the
-members; any member can invite or remove machines.
+members. Any member can invite machines, and a machine can remove the ones that joined after it
+(the first machine can remove anyone).
 
 - **Encrypted, and nothing for strangers.** Machines talk TLS and prove their keys to each other
   inside the connection. A laptop at a café that tries a home address now held by a stranger
@@ -67,7 +68,7 @@ members; any member can invite or remove machines.
   worthless.
 - **Machines can't impersonate each other.** Every message is signed by the machine that sent it,
   and machines relaying a copy can't change it. `agentlink remove <host>` takes a machine off the
-  network; members that were offline learn about it when they come back.
+  network for good; members that were offline learn about it when they come back.
 - **Members are trusted.** Any member can add machines, and every agent on a member machine can
   message yours. Only add machines you control.
 - **Prompt injection.** Messages come from other AI agents. agentlink tells Claude to treat them
