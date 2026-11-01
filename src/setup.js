@@ -144,7 +144,7 @@ Name a session with AGENTLINK_NAME=<name> (default: the project folder name).`)
   if (running && invite) {
     try { console.log(`\n${invitePrompt(await local.req('POST', '/local/invite'))}`) }
     catch (e) { warn(`could not create an invite (${errMsg(e)}); run \`agentlink invite\` later`) }
-  } else console.log(`\nRun \`agentlink invite\`${running ? '' : ' once the node is running'} to add another machine.`)
+  } else console.log(`\nTo add another machine, ask Claude to make an invite (or run \`agentlink invite\`${running ? '' : ' once the node is running'}).`)
 }
 
 /** Invites made for the network this machine is leaving must not let anyone into its new one. */
@@ -198,7 +198,7 @@ export function invitePrompt(inv) {
   ${prompt}
 
 It lets one machine join and expires in 24 hours (\`agentlink invite --revoke\` cancels unused invites).
-Once it's used, expired or revoked, curl rejects the line (a key mismatch or a 404): run \`agentlink invite\` for a new one.${inv.tailscale ? '' : `
+Once it's used, expired or revoked, curl rejects the line (a key mismatch or a 404): ask Claude for a new invite, or run \`agentlink invite\`.${inv.tailscale ? '' : `
 (For machines off this LAN: install Tailscale on both, then run \`agentlink invite\` again.)`}
 `
 }

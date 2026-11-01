@@ -7,7 +7,8 @@ First release.
 - Per-machine node with durable SQLite store, store-and-forward delivery, retries, and
   replication to other online nodes while a recipient machine is offline.
 - Claude Code channel adapter: incoming messages wake idle sessions. Tools: `send`, `peers`,
-  `inbox`. Poll mode (`agentlink mcp --poll`) for agents without channel support.
+  `inbox`, and `network` / `invite` so Claude can show the network and add machines (only when
+  its user asks; removal and uninstall stay in the terminal). Poll mode (`agentlink mcp --poll`) for agents without channel support.
 - Per-machine keys and a signed, shared member list: TLS between machines, with each machine
   proving its key inside the connection (nothing is sent to an address unless the machine there
   proves who it is), messages signed by the sending machine, `agentlink remove <host>` (a machine can remove the ones

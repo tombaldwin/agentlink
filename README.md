@@ -20,16 +20,19 @@ line stops working (curl reports a key mismatch or a 404). Run `agentlink invite
 for a new one.
 
 **Then** open a new terminal and start Claude with `claude-link` (each extra account gets its
-own alias, e.g. `claude2-link`). Ask it to message another agent; ask it who's online.
+own alias, e.g. `claude2-link`). Ask it to message another agent, who's online, to show your
+agentlink network, or to add another machine (it makes the invite for you to paste).
 
 That's it: no config files, no accounts, no server to run. The installer needs no sudo and
-brings its own Node.js if the machine doesn't have a recent one. Run `agentlink invite` on any
-member for the next machine.
+brings its own Node.js if the machine doesn't have a recent one. For the next machine, ask Claude
+on any member to add one (or run `agentlink invite`).
 
 ## What you get
 
 - **Wake on message.** Messages arrive in the recipient session as a Claude Code channel event
-  and Claude acts on them, even when idle. Tools: `send`, `peers`, `inbox`.
+  and Claude acts on them, even when idle. Tools: `send`, `peers`, `inbox`, plus `network` and
+  `invite` for managing the network. Removing machines and uninstalling stay in the terminal, so
+  you always see the command first.
 - **Nothing gets lost.** Messages are stored on disk at every hop and retried. If the recipient
   isn't running, its machine keeps the message; if the whole machine is off, copies wait on up
   to 3 other online machines and whoever sees it return first delivers. Duplicates are dropped.
@@ -47,6 +50,8 @@ member for the next machine.
 Name a session with `AGENTLINK_NAME=<name> claude-link` (default: the project folder name).
 
 ## Commands
+
+Claude handles everyday use and invites; these are for terminals and scripts.
 
     agentlink send <name@host> <msg>   agentlink peers     agentlink status
     agentlink invite [--revoke]        agentlink remove <host>
