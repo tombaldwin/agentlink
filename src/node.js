@@ -1,9 +1,11 @@
 // The per-machine node: durable store, local session hub, peer-to-peer delivery, LAN discovery.
 //
-// Every connection, in and out, is TLS with both sides presenting their machine key. Outgoing
-// connections accept only the key the roster holds for the machine being dialled, so an address is
-// usable for a machine exactly when the handshake there presents that machine's key: nothing is
-// ever sent to a stranger who happens to hold a stored address.
+// Every connection, in and out, is TLS. The certificate this node presents is a throwaway (a fresh
+// key per connection; while invites are open, the invite key), so connecting to the port shows
+// nothing that identifies the machine. Who is who is proved inside the connection (see tls.js):
+// outgoing connections accept only the machine the roster says should be at the other end, so an
+// address is usable for a machine exactly when the machine there proves it holds that key, and a
+// stranger who happens to hold a stored address is never told who we are or sent a request.
 import https from 'node:https'
 import http from 'node:http'
 import fs from 'node:fs'
@@ -14,10 +16,10 @@ import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { openStore } from './store.js'
 import { startDiscovery } from './discovery.js'
-import { signEnvelope, verifyEnvelope, sha256, randomToken } from './crypto.js'
-import { fingerprint, shortFp } from './cert.js'
+import { signEnvelope, verifyEnvelope, sha256, randomToken, gateOk, proveAuth, checkAuth } from './crypto.js'
+import { fingerprint, shortFp, newIdentity, selfSignedCert } from './cert.js'
 import { Roster } from './roster.js'
-import { pinnedRequest, PinError } from './tls.js'
+import { authedRequest, exporterOf, PinError } from './tls.js'
 import { parseAddr, normHost, sanitizeName, validAddr, tailscaleName, errMsg, ensureHomeDir, rosterPath, MAX_TTL_MS, VERSION } from './config.js'
 
 const MAX_REQ = 2 << 20
@@ -55,9 +57,14 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
   /** @type {(req: http.IncomingMessage, res: Res) => void} */
   let onRequest = (req, res) => { res.writeHead(503, { 'content-type': 'application/json' }); res.end('{"error":"starting"}') }
   // TLS 1.2 is accepted for the installer download (macOS curl's SecureTransport has no TLS 1.3);
-  // node-to-node clients require TLS 1.3. Clients present their own key; routes decide what it allows.
-  const server = https.createServer({ key: me.key, cert: me.cert, requestCert: true, rejectUnauthorized: false, minVersion: 'TLSv1.2' }, (req, res) => onRequest(req, res))
+  // the identity exchange requires TLS 1.3.
+  /** @param {{ key: string, cert: string }} id */
+  const tlsOpts = id => ({ key: id.key, cert: id.cert, minVersion: /** @type {const} */ ('TLSv1.2') })
+  const server = https.createServer(tlsOpts(newIdentity()), (req, res) => onRequest(req, res))
   server.on('tlsClientError', () => {})
+  /** @type {() => void} */
+  let rotate = () => {}
+  server.on('connection', () => rotate())
   await new Promise(/** @param {(v?: void) => void} resolve */ (resolve, reject) => {
     server.once('error', reject)
     server.listen(cfg.port, () => { server.off('error', reject); resolve() })
@@ -70,6 +77,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     roster = Roster.load(rosterPath(cfg.dir))
     db = openStore(path.join(cfg.dir, 'agentlink.db'))
   } catch (e) { server.close(); throw e }
+  const myPub = crypto.createPublicKey(me.key)
   if (!roster.members.has(me.fp)) log(roster.removed.has(me.fp) ? 'this machine has been removed from the network' : 'this machine is not (yet) a member of its network')
   /** @type {Map<string, { res: Res, sent: Set<string>, token: string, live: boolean }>} name -> session stream (live: woken by channel pushes) */
   const sessions = new Map()
@@ -108,7 +116,57 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     useInvite: db.prepare(`UPDATE invites SET used_at=? WHERE hash=? AND used_at IS NULL`),
     revokeInvites: db.prepare(`DELETE FROM invites WHERE used_at IS NULL`),
     gcInvites: db.prepare(`DELETE FROM invites WHERE expires_at < ?`),
+    openInvite: db.prepare(`SELECT 1 FROM invites WHERE used_at IS NULL AND expires_at > ? LIMIT 1`),
   }
+
+  // ---------- the certificate we present ----------
+  // While an invite is open, the invite key (the one its curl line pins; shared by all open invites,
+  // kept across restarts, replaced once none are open). Otherwise a fresh key for each connection,
+  // or at most each second (key generation costs about a millisecond).
+  const inviteKeyPath = path.join(cfg.dir, 'invite.key')
+  /** @type {{ key: string, cert: string, fp: string } | null} */
+  let invite = null
+  /** The invite key if any invite is open (deleted once none is). */
+  function inviteIdentity() {
+    if (!q.openInvite.get(now())) {
+      if (invite || fs.existsSync(inviteKeyPath)) { fs.rmSync(inviteKeyPath, { force: true }); invite = null }
+      return null
+    }
+    if (!invite) {
+      try {
+        const key = fs.readFileSync(inviteKeyPath, 'utf8'), k = crypto.createPrivateKey(key)
+        invite = { key, cert: selfSignedCert(k), fp: fingerprint(k) }
+      } catch {}
+    }
+    return invite
+  }
+  let presenting = '', rotatedAt = 0
+  rotate = () => {
+    let inv = null
+    try { inv = inviteIdentity() } catch (e) { log('invite key:', errMsg(e)) }
+    if (inv) {
+      if (presenting !== inv.fp) { server.setSecureContext(tlsOpts(inv)); presenting = inv.fp }
+      return
+    }
+    if (presenting === 'throwaway' && now() - rotatedAt < 1000) return
+    server.setSecureContext(tlsOpts(newIdentity()))
+    presenting = 'throwaway'
+    rotatedAt = now()
+  }
+  /** A new invite token; makes the invite key if none is open. */
+  function newInvite() {
+    if (!inviteIdentity()) {
+      const id = newIdentity()
+      fs.writeFileSync(inviteKeyPath, id.key, { mode: 0o600 })
+      invite = id
+    }
+    const inv = /** @type {{ key: string, cert: string, fp: string }} */ (invite)
+    const token = randomToken()
+    q.addInvite.run(sha256(token), now(), now() + INVITE_TTL_MS)
+    rotate()
+    return { token, fp: inv.fp }
+  }
+  rotate()
 
   // typed views of the rows node:sqlite returns
   const peerRow = (/** @type {string} */ host) => /** @type {PeerRow | undefined} */ (q.peer.get(host))
@@ -170,8 +228,8 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
   const helloBody = () => ({ peers: shareablePeers(), records: roster.records })
 
   /**
-   * Request to another member. The connection is pinned to that member's key: if anyone else
-   * answers at the address, the handshake fails and nothing is sent.
+   * Request to another member. The machine at the address must prove it holds that member's key
+   * before we say who we are or send the request: anyone else gets nothing.
    * `addr` dials an explicit, not yet verified address instead of the stored route for `host`.
    * @param {string} host
    * @param {'GET'|'POST'} method
@@ -189,7 +247,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     if (!validAddr(target)) throw new Error(`invalid address for ${host}: ${target}`)
     let r
     try {
-      r = await pinnedRequest({ addr: target, method, path: p, body, headers: { 'x-agentlink-port': String(cfg.port) }, identity: me, trust: [{ pem: m.pem, fp: m.fp }], timeout }, MAX_REQ)
+      r = await authedRequest({ addr: target, method, path: p, body, headers: { 'x-agentlink-port': String(cfg.port) }, identity: me, accept: new Map([[m.fp, m.publicKey]]), dks: roster.dks, timeout }, MAX_REQ)
     } catch (e) {
       if (e instanceof PinError) throw new Error(`${host} at ${target}: answered by a different machine (not ${host}'s key)`)
       throw new Error(`${host} at ${target}: ${errMsg(e)}`)
@@ -214,16 +272,16 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
   }
 
   /**
-   * Which machine answers at `addr`? Any member's key is accepted (including ours); returns that
+   * Which machine answers at `addr`? Any member is accepted (including us); returns that
    * member, or throws. Used for names that aren't member names: IPs, Tailscale names, configured peers.
    * @param {string} addr
    */
   async function identify(addr, timeout = 2500) {
     if (!validAddr(addr)) throw new Error(`invalid address ${addr}`)
-    const trust = [...roster.members.values()].map(m => ({ pem: m.pem, fp: m.fp }))
+    const accept = new Map([...roster.members.values()].map(m => [m.fp, m.publicKey]))
     let r
     try {
-      r = await pinnedRequest({ addr, method: 'POST', path: '/v1/hello', body: JSON.stringify(helloBody()), headers: { 'x-agentlink-port': String(cfg.port) }, identity: me, trust, timeout }, MAX_REQ)
+      r = await authedRequest({ addr, method: 'POST', path: '/v1/hello', body: JSON.stringify(helloBody()), headers: { 'x-agentlink-port': String(cfg.port) }, identity: me, accept, dks: roster.dks, timeout }, MAX_REQ)
     } catch (e) { throw new Error(e instanceof PinError ? `${addr}: not a machine on this network` : `${addr}: ${errMsg(e)}`) }
     const m = roster.members.get(r.peerFp)
     if (!m) throw new Error(`${addr}: not a machine on this network`)
@@ -251,7 +309,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
   }
 
   /**
-   * Start routing member `host` to `addr`, but only once a TLS handshake there presents its key.
+   * Start routing member `host` to `addr`, but only once the machine there proves it holds its key.
    * @param {string} host @param {string} addr @param {{ refresh?: boolean }} [opts] refresh: a fresh sighting (beacon, request)
    */
   const probing = new Set()
@@ -630,11 +688,16 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       log(`${host} joined the network (key ${shortFp(fp)})`)
     }
     q.useInvite.run(now(), sha256(d.token))
+    setImmediate(rotate)          // after this reply: the last open invite's key goes once it's used
     setImmediate(helloAll)
     return { net: roster.net, records: roster.records, peers: shareablePeers(), host: cfg.host }
   }
 
   // ---------- HTTPS ----------
+  /** @type {WeakSet<import('node:net').Socket>} connections whose client passed the gate */
+  const gated = new WeakSet()
+  /** @type {WeakMap<import('node:net').Socket, string>} connection -> the client's proven key */
+  const authed = new WeakMap()
   /** @param {Res} res @param {number} status @param {unknown} obj */
   function reply(res, status, obj) {
     res.writeHead(status, { 'content-type': 'application/json' })
@@ -652,14 +715,13 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     const u = new URL(req.url || '/', 'https://x')
     const p = u.pathname
     const sock = /** @type {import('node:tls').TLSSocket} */ (req.socket)
-    const peerX = sock.getPeerX509Certificate?.()
-    const clientFp = peerX ? fingerprint(peerX) : ''
-    const loopback = isLoopback(sock.remoteAddress)
-    const local = loopback && clientFp === me.fp      // a process that holds this machine's key, on this machine
-
-    if (p === '/health') {
-      if (!local) return reply(res, 404, { error: 'not found' })
-      return reply(res, 200, { ok: true, host: cfg.host, net: cfg.net, fp: me.fp, version: VERSION, pid: process.pid })
+    // ---- identity, step 1 (the gate): a client that holds a discovery key learns who we are ----
+    // Anyone else gets the same 404 as for any unknown path.
+    if (p === '/v1/auth') {
+      const ekm = sock.getProtocol() === 'TLSv1.3' ? exporterOf(sock) : null
+      if (!ekm || !gateOk(roster.dks, ekm, req.headers['x-agentlink-gate'])) return reply(res, 404, { error: 'not found' })
+      gated.add(sock)
+      return reply(res, 200, { fp: me.fp, sig: proveAuth(me.key, 'server', ekm) })
     }
     // ---- joining (an invite token is the credential) ----
     if (req.method === 'GET' && (p === '/join/install' || p === '/join/pkg.tgz')) {
@@ -667,7 +729,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       if (!t || !inviteValid(t)) return reply(res, 404, { error: 'this invite is not valid (already used, expired or revoked): run `agentlink invite` on a member for a new one' })
       if (p === '/join/install') {
         res.writeHead(200, { 'content-type': 'text/x-shellscript' })
-        return res.end(installScript(req.headers.host, cfg, t))
+        return res.end(installScript(req.headers.host, cfg, t, invite?.fp || ''))
       }
       let tgz, size
       try { tgz = await packTarball(cfg.dir); size = (await fs.promises.stat(tgz)).size } catch (e) {
@@ -689,14 +751,29 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     if (!d || typeof d !== 'object') d = {}
     if (req.method === 'POST' && p === '/join') return reply(res, 200, join(d))
 
+    // ---- identity, step 2: the client signs the same connection's exporter with its machine key ----
+    if (!gated.has(sock)) return reply(res, 404, { error: 'not found' })
+    let clientFp = authed.get(sock) || ''
+    if (!clientFp) {
+      const [fp = '', sig] = String(req.headers['x-agentlink-auth'] || '').split('.')
+      // a hello carries membership records: a machine that has just joined proves it with them
+      if (p === '/v1/hello' && fp !== me.fp && !roster.members.has(fp)) mergeRoster(d.records)
+      const pub = fp === me.fp ? myPub : roster.members.get(fp)?.publicKey
+      if (pub && checkAuth(pub, 'client', exporterOf(sock), sig)) { clientFp = fp; authed.set(sock, fp) }
+    }
+    const local = isLoopback(sock.remoteAddress) && clientFp === me.fp   // a process holding this machine's key, on this machine
+
+    if (p === '/health') {
+      if (!local) return reply(res, 404, { error: 'not found' })
+      return reply(res, 200, { ok: true, host: cfg.host, net: cfg.net, fp: me.fp, version: VERSION, pid: process.pid })
+    }
+
     if (p.startsWith('/local/')) {
       if (!local) return reply(res, 403, { error: 'local only' })
       return handleLocal(req, res, u, p, d)
     }
     if (!p.startsWith('/v1/')) return reply(res, 404, { error: 'not found' })
     // ---- node <-> node: the client's key must be a current member's ----
-    // a hello carries membership records: a machine that has just joined proves it with them
-    if (p === '/v1/hello' && !roster.members.has(clientFp) && clientFp) mergeRoster(d.records)
     const peer = roster.members.get(clientFp)
     if (!peer) return reply(res, 403, { error: 'not a member of this network' })
     if (peer.fp !== me.fp) notePeer(peer.host, sock.remoteAddress, req.headers['x-agentlink-port'])
@@ -788,12 +865,14 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
         })
       case 'POST /local/invite': {
         if (!roster.members.has(me.fp)) throw httpErr(409, 'this machine is not a member of its network, so it cannot invite others')
-        const token = randomToken()
-        q.addInvite.run(sha256(token), now(), now() + INVITE_TTL_MS)
-        return reply(res, 200, { token, fp: me.fp, host: cfg.host, port: cfg.port, tailscale: ts, expires_at: now() + INVITE_TTL_MS })
+        const { token, fp } = newInvite()
+        return reply(res, 200, { token, fp, host: cfg.host, port: cfg.port, tailscale: ts, expires_at: now() + INVITE_TTL_MS })
       }
-      case 'POST /local/invite/revoke':
-        return reply(res, 200, { revoked: Number(q.revokeInvites.run().changes) })
+      case 'POST /local/invite/revoke': {
+        const revoked = Number(q.revokeInvites.run().changes)
+        rotate()
+        return reply(res, 200, { revoked })
+      }
       case 'POST /local/remove': {
         let host
         try { host = normHost(d.host) } catch { throw httpErr(400, `bad machine name "${d.host}"`) }
@@ -827,6 +906,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     setInterval(flush, 5000),
     setInterval(helloAll, HELLO_EVERY),
     setInterval(gc, 3600_000),
+    setInterval(rotate, 60_000),   // an expired invite's key stops being presented
   ]
   helloAll()
   kick()
@@ -865,11 +945,11 @@ function packTarball(dir) {
 }
 
 /**
- * install.sh preset to join this network through us: where to fetch the package, the key to pin,
- * and the invite token.
- * @param {string | undefined} hostHeader @param {Config} cfg @param {string} token
+ * install.sh preset to join this network through us: where to fetch the package, the key to pin
+ * (the invite key), the invite token, and the network (so a member re-joining keeps its key).
+ * @param {string | undefined} hostHeader @param {Config} cfg @param {string} token @param {string} pin
  */
-function installScript(hostHeader, cfg, token) {
+function installScript(hostHeader, cfg, token, pin) {
   const sh = (/** @type {unknown} */ v) => `'${String(v).replace(/'/g, `'\\''`)}'`
   // the name the joining machine used to reach us is, by definition, one that works for it
   const hh = String(hostHeader || '')
@@ -877,8 +957,8 @@ function installScript(hostHeader, cfg, token) {
   if (!/:\d+$/.test(used)) used += `:${cfg.port}`
   const preset = [
     `AGENTLINK_PKG=${sh(`https://${used}/join/pkg.tgz?t=${token}`)}`,
-    `AGENTLINK_PIN=${sh(cfg.identity.fp)}`,
-    `set -- --join ${sh(used)} --pin ${sh(cfg.identity.fp)} --token ${sh(token)}${used !== `${cfg.host}:${cfg.port}` ? ` --peer ${sh(`${cfg.host}:${cfg.port}`)}` : ''}`,
+    `AGENTLINK_PIN=${sh(pin)}`,
+    `set -- --join ${sh(used)} --pin ${sh(pin)} --net ${sh(cfg.net)} --token ${sh(token)}${used !== `${cfg.host}:${cfg.port}` ? ` --peer ${sh(`${cfg.host}:${cfg.port}`)}` : ''}`,
   ].join('\n')
   return fs.readFileSync(path.join(PKG_ROOT, 'install.sh'), 'utf8').replace('#@@PRESET@@', () => preset)   // no $-patterns
 }

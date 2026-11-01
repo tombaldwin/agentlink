@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
 import { normHost, sanitizeName, parseAddr, parsePeer, validAddr } from '../../src/config.js'
-import { signEnvelope, verifyEnvelope, sealBeacon, openBeacon, newDiscoveryKey, randomToken } from '../../src/crypto.js'
+import { signEnvelope, verifyEnvelope, sealBeacon, openBeacon, newDiscoveryKey, randomToken, gateTags, gateOk, proveAuth, checkAuth } from '../../src/crypto.js'
 import { newIdentity, fingerprint, certDer } from '../../src/cert.js'
 import { Roster } from '../../src/roster.js'
 
@@ -72,6 +72,27 @@ test('beacons open only with a network discovery key, and reveal nothing in the 
   const tampered = Buffer.from(sealed); tampered[20] ^= 1
   assert.equal(openBeacon([dk], tampered), null)
   assert.equal(openBeacon([dk], Buffer.from('{"host":"x"}')), null)
+})
+
+test('the gate opens for any of the network\'s discovery keys, on that connection only', () => {
+  const ekm = crypto.randomBytes(32), dks = [newDiscoveryKey(), newDiscoveryKey()]
+  assert.ok(gateOk(dks, ekm, gateTags(dks, ekm)))
+  assert.ok(gateOk(dks, ekm, gateTags(dks.slice(0, 1), ekm)), 'a client that missed a key rotation')
+  assert.ok(gateOk(dks.slice(0, 1), ekm, gateTags(dks, ekm)), 'a server that missed a key rotation')
+  assert.ok(!gateOk(dks, crypto.randomBytes(32), gateTags(dks, ekm)), 'bound to the connection')
+  assert.ok(!gateOk(dks, ekm, gateTags([newDiscoveryKey()], ekm)), 'another network')
+  assert.ok(!gateOk(dks, ekm, undefined) && !gateOk(dks, ekm, 'x'.repeat(1000)))
+  assert.ok(!gateTags(dks, ekm).includes(dks[0]) && gateTags(dks, ekm) !== gateTags(dks, crypto.randomBytes(32)), 'tags reveal nothing stable')
+})
+
+test('identity proofs are bound to the connection and to a role', () => {
+  const id = newIdentity(), pub = crypto.createPublicKey(id.key), ekm = crypto.randomBytes(32)
+  const sig = proveAuth(id.key, 'server', ekm)
+  assert.ok(checkAuth(pub, 'server', ekm, sig))
+  assert.ok(!checkAuth(pub, 'client', ekm, sig), 'a server proof is not a client proof (no reflection)')
+  assert.ok(!checkAuth(pub, 'server', crypto.randomBytes(32), sig), 'not valid on another connection')
+  assert.ok(!checkAuth(crypto.createPublicKey(newIdentity().key), 'server', ekm, sig), 'only for its own key')
+  assert.ok(!checkAuth(pub, 'server', ekm, 42))
 })
 
 test('roster: founder, adds, removals and the discovery key', () => {

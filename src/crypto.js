@@ -67,3 +67,41 @@ export function openBeacon(dks, buf) {
 export const randomToken = (bytes = 18) => {
   for (;;) { const s = crypto.randomBytes(bytes).toString('base64url'); if (!s.startsWith('-')) return s }
 }
+
+// ---- in-band identity (see docs/design/unlinkable-keys.md) ----
+// A node's TLS certificate is a throwaway, so the handshake itself proves nothing. Instead, on each
+// connection, the client first proves it holds a discovery key (the "gate": a stranger gets a 404
+// like any other path), the server then signs the connection's TLS exporter with its machine key,
+// and only then does the client sign it with its own and send its request. Both signatures are
+// bound to that one TLS session, so they can't be replayed or relayed onto another connection.
+
+/** @param {string} dk */
+const gateKey = dk => crypto.createHmac('sha256', Buffer.from(dk, 'base64')).update('agentlink-gate-1').digest()
+/** @param {string} dk @param {Buffer} ekm */
+const gateTag = (dk, ekm) => crypto.createHmac('sha256', gateKey(dk)).update(ekm).digest('base64url')
+const GATE_TAGS = 4
+
+/**
+ * Tags proving we hold the network's discovery key, for one connection (`ekm`: its TLS exporter).
+ * The newest few keys, so a node that missed a removal (and its key rotation) still recognises us.
+ * @param {string[]} dks oldest first @param {Buffer} ekm
+ */
+export const gateTags = (dks, ekm) => dks.slice(-GATE_TAGS).reverse().map(dk => gateTag(dk, ekm)).join(',')
+
+/**
+ * Does `header` hold a tag for one of `dks`? Old keys count too: they only let a client learn which
+ * member it is talking to, and anyone who ever held one already has the member list.
+ * @param {string[]} dks @param {Buffer} ekm @param {unknown} header
+ */
+export function gateOk(dks, ekm, header) {
+  if (typeof header !== 'string' || header.length > 64 * GATE_TAGS) return false
+  const tags = header.split(',').slice(0, GATE_TAGS)
+  return dks.some(dk => { const want = gateTag(dk, ekm); return tags.some(t => safeEq(t, want)) })
+}
+
+/** @param {'server' | 'client'} role @param {Buffer} ekm */
+const authPayload = (role, ekm) => JSON.stringify(['agentlink-auth-1', role, ekm.toString('base64')])
+/** Sign this connection's exporter as `role`. @param {string} key PEM @param {'server' | 'client'} role @param {Buffer} ekm */
+export const proveAuth = (key, role, ekm) => sign(key, authPayload(role, ekm))
+/** @param {crypto.KeyLike} pub @param {'server' | 'client'} role @param {Buffer} ekm @param {unknown} sig */
+export const checkAuth = (pub, role, ekm, sig) => verify(pub, authPayload(role, ekm), sig)
