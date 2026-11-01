@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [22, 24]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test:unit
+      - run: npm run test:e2e
+
+  install-smoke:
+    # Runs the real installer against the packed package, in a throwaway HOME.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Pack
+        run: echo "TGZ=$(pwd)/$(npm pack --silent)" >> "$GITHUB_ENV"
+      - name: Install with a fake claude and no service
+        run: |
+          export HOME="$RUNNER_TEMP/home" SHELL=/bin/bash
+          mkdir -p "$HOME" "$RUNNER_TEMP/bin"
+          printf '#!/bin/sh\necho "claude $*" >> "$HOME/claude-calls.log"\n' > "$RUNNER_TEMP/bin/claude"
+          chmod +x "$RUNNER_TEMP/bin/claude"
+          export PATH="$RUNNER_TEMP/bin:$PATH" NPM_CONFIG_PREFIX="$RUNNER_TEMP/npm"
+          AGENTLINK_PKG="$TGZ" AGENTLINK_NO_SERVICE=1 AGENTLINK_DISCOVERY=0 sh install.sh | tee out.txt
+          grep -q "Join my agentlink network" out.txt
+          grep -q "mcp add -s user agentlink" "$HOME/claude-calls.log"
+          "$RUNNER_TEMP/npm/bin/agentlink" status
+          "$RUNNER_TEMP/npm/bin/agentlink" send someone "smoke test"
+      - name: Install with the private Node runtime
+        # what machines without Node 22.13+ get: the runtime must stay off PATH and the home private
+        run: |
+          # its own port: the previous step's node (another network) is still running on 7777
+          export HOME="$RUNNER_TEMP/home2" SHELL=/bin/bash AGENTLINK_PORT=7778
+          mkdir -p "$HOME" "$RUNNER_TEMP/bin"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+          AGENTLINK_PRIVATE_NODE=1 AGENTLINK_PKG="$TGZ" AGENTLINK_NO_SERVICE=1 AGENTLINK_DISCOVERY=0 sh install.sh | tee out.txt
+          grep -q "Join my agentlink network" out.txt
+          test "$(ls -ld "$HOME/.agentlink" | cut -c1-10)" = drwx------
+          "$HOME/.agentlink/bin/agentlink" status
+          test ! -e "$HOME/.agentlink/bin/node"
+          # a new shell (rc written by setup) finds agentlink, but node is still the system one
+          bash -c '. ~/.bashrc 2>/dev/null || . ~/.bash_profile; test "$(command -v agentlink)" = "$HOME/.agentlink/bin/agentlink"; test "$(command -v node)" != "$HOME/.agentlink/node/bin/node"'
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck install.sh
