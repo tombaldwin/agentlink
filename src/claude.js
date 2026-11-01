@@ -166,7 +166,10 @@ export async function launchClaude(args, ensureNode) {
     }
     await ensureNode().catch(e => console.error(`agentlink: ${e.message}`))
   }
-  const child = spawn(claude, passthrough ? args : [...CHANNEL_FLAGS, ...args], { stdio: 'inherit' })
+  // AGENTLINK_CHANNEL tells the adapter that this session really has the channel enabled; without
+  // it (a plain `claude`), pushed messages would be ignored, so the adapter keeps them for `inbox`
+  const env = passthrough ? process.env : { ...process.env, AGENTLINK_CHANNEL: '1' }
+  const child = spawn(claude, passthrough ? args : [...CHANNEL_FLAGS, ...args], { stdio: 'inherit', env })
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => {})  // the child owns the terminal
   child.on('exit', (code, signal) => process.exit(code ?? (signal ? 128 + (os.constants.signals[signal] || 0) : 1)))
 }

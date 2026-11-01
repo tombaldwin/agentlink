@@ -94,3 +94,12 @@ test('only plain host:port addresses are dialable', () => {
     assert.ok(!validAddr(bad), `rejects ${bad}`)
   }
 })
+
+test('invite line encodes secrets with URL- and shell-special characters', async () => {
+  const { installLine } = await import('../../src/setup.js')
+  const secret = `a+b&c#d e"f$g!h'i%j(k)~0123456789abcdef`
+  const line = installLine({ secret, port: 7777, host: 'h.local' })
+  const url = line.match(/curl -fsSL "([^"]+)"/)[1]
+  assert.match(url, /^[A-Za-z0-9:\/._?=%-]+$/)
+  assert.equal(new URL(url).searchParams.get('k'), secret)
+})

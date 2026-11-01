@@ -69,7 +69,10 @@ See [SECURITY.md](SECURITY.md) for details.
 
 - Claude Code channels are a research preview, so `claude-link` passes
   `--dangerously-load-development-channels server:agentlink` and Claude Code shows a warning at
-  startup.
+  startup. A session started with plain `claude` isn't woken: its messages wait for the `inbox`
+  tool instead.
+- Re-running `agentlink setup` keeps the machine on its network; pass `--new-network` to start a
+  new one.
 - macOS and Linux. macOS asks once to allow incoming connections for `node`.
 
 ## Development

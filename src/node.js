@@ -27,7 +27,16 @@ const errText = err => String(err.cause?.code || err.message || err)
 
 export async function runNode(cfg, log = (...a) => console.error(new Date().toISOString(), ...a)) {
   fs.mkdirSync(cfg.dir, { recursive: true, mode: 0o700 })
-  const db = openStore(path.join(cfg.dir, 'agentlink.db'))
+  // Bind the port before touching the shared database: a node that loses the race for the port
+  // (a standby service, a second session-started node) must not reset retry state or leak handles.
+  let onRequest = (req, res) => { res.writeHead(503, { 'content-type': 'application/json' }); res.end('{"error":"starting"}') }
+  const server = http.createServer((req, res) => onRequest(req, res))
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(cfg.port, () => { server.off('error', reject); resolve() })
+  })
+  let db
+  try { db = openStore(path.join(cfg.dir, 'agentlink.db')) } catch (e) { server.close(); throw e }
   const nodeHeader = `${cfg.host};net=${cfg.net};port=${cfg.port}`
   const nonces = new NonceCache()
   const sessions = new Map()           // name -> { res, sent:Set<id>, token }
@@ -57,6 +66,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     peers: db.prepare(`SELECT * FROM peers ORDER BY host`),
     insertPeerIfNew: db.prepare(`INSERT OR IGNORE INTO peers(host,addr,last_seen,configured) VALUES(?,?,?,0)`),
     setAlias: db.prepare(`UPDATE peers SET alias_of=? WHERE host=?`),
+    clearAlias: db.prepare(`UPDATE peers SET alias_of=NULL WHERE host=? AND alias_of IS NOT NULL`),
     deletePeer: db.prepare(`DELETE FROM peers WHERE host=?`),
     forgetPeers: db.prepare(`DELETE FROM peers WHERE configured=0 AND last_seen < ?`),
     verified: db.prepare(`UPDATE peers SET verified=1 WHERE host=?`),
@@ -123,10 +133,30 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     if (!res.ok) throw new Error(`${host} HTTP ${res.status}: ${text.slice(0, 200)}`)
     const real = hostOf(peerHdr)
     if (real && isSelf(real)) {
+      // An explicit address is an unverified hint (a beacon's source IP, a request's remote IP), and
+      // both can be spoofed: it only tells us that this address is not `host`. It must never make us
+      // adopt `host` as our own name or forget `host`'s real address.
+      if (addr) throw new Error(`${addr} reaches this machine, not ${host}`)
       if (reachedSelfAs(host)) throw Object.assign(new Error(`${host} is this machine`), { self: true })
       throw new Error(`${host}: its address now reaches this machine`)
     }
-    if (real) { q.upsertPeer.run(real, null, now(), 0); q.verified.run(real) }   // a node proved it is `real`
+    if (real) {                                   // a node proved it is `real`
+      q.upsertPeer.run(real, null, now(), 0)
+      q.verified.run(real)
+      q.clearAlias.run(real)                      // a node answering as itself is nobody's alias
+    }
+    if (!addr && real && real !== host) {
+      const row = q.peer.get(host)
+      if (row?.verified && row.alias_of !== real) {
+        // `host` is a separate node (it has answered as itself before): the address we used now
+        // reaches a different member (DHCP reuse, a stale gossiped address, a laptop that moved).
+        // Forget the address rather than aliasing one machine's name to another's.
+        if (!cfg.routes[host]) q.clearAddr.run(host)
+        q.clearAlias.run(host)
+        log(`address ${target} for ${host} now reaches ${real}; forgetting it`)
+        throw new Error(`${host} at ${target}: answered by ${real} (stale address)`)
+      }
+    }
     if (!addr) {
       q.upsertPeer.run(host, null, now(), 0)
       if (real && real !== host) {
@@ -217,24 +247,29 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       Buffer.byteLength(e.body) <= MAX_MSG && verifyEnvelope(cfg.secret, e)
   }
 
-  /** Store an incoming envelope durably. Returns 'live' | 'queued' | 'held' | 'expired' | null(rejected). */
+  /**
+   * Store an incoming envelope durably. Returns 'live' | 'queued' | 'held' | 'expired' | null(rejected).
+   * null means the envelope itself is bad (the sender must not retry it). Storage errors (disk full,
+   * database busy) throw, so callers can report a temporary failure and the sender retries.
+   */
   function accept(e) {
+    let to
     try {
       if (!validEnv(e)) return null
-      if (e.expires_at <= now()) return 'expired'
-      const to = parseAddr(e.to, cfg.host)
-      if (isSelf(to.host)) {
-        q.insert.run(e.id, e.from, e.to, cfg.host, to.name, e.body, e.sent_at, e.expires_at, e.sig, 'inbox', 'queued', 0, now())
-        pump(to.name)
-        return sessions.has(to.name) ? 'live' : 'queued'
-      }
-      q.insert.run(e.id, e.from, e.to, to.host, to.name, e.body, e.sent_at, e.expires_at, e.sig, 'held', 'pending', 0, now())
-      kick()
-      return 'held'
+      to = parseAddr(e.to, cfg.host)
     } catch (err) {
       log('rejected envelope:', err.message)
       return null
     }
+    if (e.expires_at <= now()) return 'expired'
+    if (isSelf(to.host)) {
+      q.insert.run(e.id, e.from, e.to, cfg.host, to.name, e.body, e.sent_at, e.expires_at, e.sig, 'inbox', 'queued', 0, now())
+      pump(to.name)
+      return sessions.has(to.name) ? 'live' : 'queued'
+    }
+    q.insert.run(e.id, e.from, e.to, to.host, to.name, e.body, e.sent_at, e.expires_at, e.sig, 'held', 'pending', 0, now())
+    kick()
+    return 'held'
   }
 
   function pump(name) {
@@ -356,12 +391,14 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     }
     e.sig = signEnvelope(cfg.secret, e)
     if (to.host === cfg.host) {
-      const st = accept(e)
+      let st
+      try { st = accept(e) } catch (err) { throw httpErr(503, `could not queue message: ${err.message}`) }
+      if (!st) throw httpErr(500, 'could not queue message')
       return { id: e.id, to: e.to, status: st === 'live' ? 'delivered (live session on this machine)' : `queued on this machine until ${e.to} connects` }
     }
     // hidden from the flush loop while we try the direct hand-off, so it isn't sent twice
     q.insert.run(e.id, e.from, e.to, to.host, to.name, e.body, e.sent_at, e.expires_at, e.sig, 'outbox', 'pending', now() + IN_FLIGHT_MS, now())
-    let remote = null
+    let remote = null, replicating = false
     try {
       const res = await call(to.host, 'POST', '/v1/deliver', { messages: [e] })
       remote = res.results?.[e.id]
@@ -371,7 +408,9 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       if (!err.self) {
         q.retry.run(now() + backoff(0), errText(err), now(), e.id)
         const row = q.get.get(e.id)
-        if (row?.state === 'pending') await replicate(to.host, [row])
+        // the message is stored durably now: answer the client and hand out copies in the background
+        // (trying several offline candidates in turn could otherwise outlast the client's timeout)
+        if (row?.state === 'pending') { replicating = true; replicate(to.host, [row]) }
       }
     }
     const r = q.get.get(e.id)
@@ -379,7 +418,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     if (r.role === 'inbox') status = `${to.host} is this machine — ${sessions.has(to.name) ? 'delivered (live)' : `queued until ${to.name} connects`}`
     else if (r.state === 'forwarded') status = remote === 'live' ? `delivered to ${e.to} (live)` : `stored on ${to.host}; will be delivered when ${to.name} connects`
     else if (r.state === 'failed') status = `FAILED: ${r.last_error}`
-    else status = `${to.host} unreachable (${r.last_error}); queued` + (r.replicated ? ' and copied to other online nodes' : '') + ' — will deliver when it comes back'
+    else status = `${to.host} unreachable (${r.last_error}); queued — will deliver when it comes back` + (replicating ? ' (also handing copies to other online nodes)' : '')
     return { id: e.id, to: e.to, status }
   }
 
@@ -405,11 +444,11 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     res.end(body)
   }
 
-  const server = http.createServer((req, res) => handle(req, res).catch(err => {
+  onRequest = (req, res) => handle(req, res).catch(err => {
     if (!res.headersSent) reply(res, err.status || 500, { error: err.status ? err.message : 'internal error' })
     else res.destroy()
     if (!err.status) log('request error', req.method, req.url, err)
-  }))
+  })
 
   async function handle(req, res) {
     const u = new URL(req.url, 'http://x')
@@ -449,7 +488,13 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       case 'POST /v1/deliver': {
         const results = {}
         for (const e of Array.isArray(d.messages) ? d.messages.slice(0, 2000) : []) {
-          const st = accept(e)
+          let st
+          try { st = accept(e) } catch (err) {
+            // temporary storage failure: 503 makes the sender back off and retry the whole batch
+            // (already-stored ids are deduplicated), instead of marking messages permanently failed
+            log('could not store delivered messages:', err.message)
+            throw httpErr(503, 'temporarily unable to store messages; retry later')
+          }
           if (st) results[e.id] = st
         }
         return reply(res, 200, { results })
@@ -504,7 +549,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
         return reply(res, 200, {
           host: cfg.host, aliases: [...selfAliases], net: cfg.net, port: cfg.port, version: VERSION, pid: process.pid,
           sessions: [...sessions.keys()], counts: q.counts.all(), peers: q.peers.all(),
-          pending: db.prepare(`SELECT id,to_addr,role,attempts,last_error FROM messages WHERE state='pending' ORDER BY sent_at LIMIT 20`).all(),
+          pending: db.prepare(`SELECT id,to_addr,role,attempts,replicated,last_error FROM messages WHERE state='pending' ORDER BY sent_at LIMIT 20`).all(),
         })
       case 'POST /local/shutdown':
         reply(res, 200, { ok: true })
@@ -513,10 +558,6 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     return reply(res, 404, { error: 'not found' })
   }
 
-  await new Promise((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(cfg.port, () => { server.off('error', reject); resolve() })
-  })
   log(`agentlink node ${VERSION} up: ${cfg.host}:${cfg.port} (network ${cfg.net}, pid ${process.pid})`)
 
   // ---------- discovery ----------

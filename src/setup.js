@@ -14,23 +14,32 @@ const sleep = ms => new Promise(r => setTimeout(r, ms))
 const ok = m => console.log(`  ✓ ${m}`)
 const warn = m => console.log(`  ! ${m}`)
 
-export async function setup({ secret, host, peers = [], noService, noClaude, noAlias }) {
-  const fresh = !secret
+export async function setup({ secret, host, peers = [], noService, noClaude, noAlias, newNetwork }) {
   noService ||= process.env.AGENTLINK_NO_SERVICE === '1'
   if (secret && String(secret).length < 24) throw new Error('network secret must be at least 24 characters (omit it to generate one)')
-  secret ||= newSecret()
   console.log(`agentlink setup`)
   let existing = {}
   try { existing = JSON.parse(fs.readFileSync(path.join(homeDir(), 'config.json'), 'utf8')) } catch {}
+  // the running node (if any) only accepts requests signed with the secret it was started with
+  let prev = null
+  try { prev = loadConfig() } catch {}
+  // re-running setup without a secret refreshes this machine; it never silently leaves the network
+  if (!secret && existing.secret && !newNetwork) {
+    secret = existing.secret
+    ok('keeping this machine\'s existing network (use --new-network to create a new one)')
+  }
+  const fresh = !secret
+  secret ||= newSecret()
   const allPeers = [...new Set([...(existing.secret === secret ? existing.peers || [] : []), ...peers])]
   writeConfig({ secret, peers: allPeers, ...(host ? { host } : {}) })
   fs.rmSync(path.join(homeDir(), 'disabled'), { force: true })
   const cfg = loadConfig()
   ok(`config written to ${path.join(homeDir(), 'config.json')} — this machine is ${cfg.host}`)
 
-  // stop any node already running (e.g. an older version or one started by a session)
+  // stop any node already running (e.g. an older version or one started by a session), so the
+  // new config takes effect; sign the request with whichever secret that node may be using
   const local = new Local(cfg)
-  if (await local.health()) { await local.req('POST', '/local/shutdown').catch(() => {}); await sleep(800) }
+  await stopRunningNode([prev, cfg].filter(Boolean))
 
   if (!noService) {
     try { installService(); ok('background node installed (starts at login, restarts if it dies)') }
@@ -56,8 +65,27 @@ Name a session with AGENTLINK_NAME=<name> (default: the project folder name).`)
   console.log(`\n${fresh ? 'New network created. ' : ''}${invitePrompt(cfg)}`)
 }
 
+/** Stop the node on this machine, trying each candidate config's port and secret. */
+async function stopRunningNode(cfgs) {
+  for (const c of cfgs) {
+    const l = new Local(c)
+    const h = await l.health()
+    if (!h || h.net !== c.net) continue
+    try { await l.req('POST', '/local/shutdown') } catch (e) { warn(`could not stop the running node: ${e.message}`); continue }
+    for (let i = 0; i < 30 && await l.health(); i++) await sleep(100)
+    return
+  }
+  for (const c of new Map(cfgs.map(c => [c.port, c])).values()) {
+    const h = await new Local(c).health()
+    if (h) warn(`a node on another network is using port ${c.port} (pid ${h.pid}); stop it so the new config can take effect`)
+  }
+}
+
+/** Percent-encode so the result is safe both in a URL query and inside a double-quoted shell word. */
+const urlSafe = s => encodeURIComponent(s).replace(/[!'()*~]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase())
+
 /** The one line to paste on another machine: fetches the installer from this machine's node. */
-export const installLine = (cfg, host = cfg.host) => `curl -fsSL "http://${host}:${cfg.port}/install?k=${cfg.secret}" | sh`
+export const installLine = (cfg, host = cfg.host) => `curl -fsSL "http://${host}:${cfg.port}/install?k=${urlSafe(cfg.secret)}" | sh`
 
 /** Ready-to-paste instructions (for a person, or for Claude) to add another machine. */
 export function invitePrompt(cfg) {

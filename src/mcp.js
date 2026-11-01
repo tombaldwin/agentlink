@@ -3,6 +3,7 @@
 // plain MCP server (for agents without channels) and messages are read with `inbox`.
 import path from 'node:path'
 import crypto from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
@@ -12,7 +13,25 @@ import { sanitizeName, VERSION } from './config.js'
 const log = (...a) => console.error('[agentlink]', ...a)
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
-export async function runAdapter(cfg, { name, poll = false } = {}) {
+/**
+ * Was the Claude Code session that started us launched with the agentlink channel enabled?
+ * Without it Claude Code silently drops channel notifications, so pushing (and acking) a message
+ * would lose it. The adapter's parent is the claude process: check its command line, falling back
+ * to the AGENTLINK_CHANNEL hint set by `agentlink claude` when ps isn't available.
+ */
+export function channelEnabled() {
+  try {
+    const args = execFileSync('ps', ['-ww', '-o', 'args=', '-p', String(process.ppid)], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] })
+    return /(^|[\s,=])server:agentlink(?=$|[\s,])/.test(args)
+  } catch { return process.env.AGENTLINK_CHANNEL === '1' }
+}
+
+export async function runAdapter(cfg, { name, poll = false, channel } = {}) {
+  // not a channel session (a plain `claude`, or --poll): keep messages queued for the inbox tool
+  if (!poll && !(channel ?? channelEnabled())) {
+    poll = true
+    log('channel not enabled for this session (start it with agentlink claude or a *-link alias for live wake-ups); messages are read with the inbox tool')
+  }
   const local = new Local(cfg)
   let myName = sanitizeName(name || process.env.AGENTLINK_NAME || path.basename(process.cwd()))
   let address = `${myName}@${cfg.host}`
