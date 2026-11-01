@@ -188,12 +188,13 @@ export const installLine = (inv, host) =>
 export function invitePrompt(inv) {
   let prompt = `Join my agentlink network: run  ${installLine(inv, inv.host)}`
   if (inv.tailscale) prompt += `  — if ${inv.host} can't be reached, run  ${installLine(inv, inv.tailscale)}  instead`
-  prompt += ` — then tell me how to start Claude with agentlink enabled. (The -k is safe here: --pinnedpubkey makes curl accept only the key this invite names.)`
+  prompt += ` — then tell me how to start Claude with agentlink enabled. (The -k is safe here: --pinnedpubkey makes curl accept only the key this invite names. If curl says the public key does not match, this invite was already used, expired or was revoked: ask me for a new one.)`
   return `To add another machine, paste this into Claude Code on it (or just run the command):
 
   ${prompt}
 
-It lets one machine join and expires in 24 hours (\`agentlink invite --revoke\` cancels unused invites).${inv.tailscale ? '' : `
+It lets one machine join and expires in 24 hours (\`agentlink invite --revoke\` cancels unused invites).
+Once it's used, expired or revoked, curl rejects the line with "public key does not match": run \`agentlink invite\` for a new one.${inv.tailscale ? '' : `
 (For machines off this LAN: install Tailscale on both, then run \`agentlink invite\` again.)`}
 `
 }

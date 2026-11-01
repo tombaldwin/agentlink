@@ -16,7 +16,8 @@ Address any agent as `name@host` (e.g. `reviewer@laptop.local`). An incoming mes
 
 Each invite adds one machine and expires after 24 hours. The pinned key means curl only talks to
 the machine that made the invite. That key exists only while the invite is open, so a used invite
-line stops working entirely.
+line stops working entirely: curl reports "public key does not match". Run `agentlink invite` on
+any member for a new one.
 
 **Then** open a new terminal and start Claude with `claude-link` (each extra account gets its
 own alias, e.g. `claude2-link`). Ask it to message another agent; ask it who's online.
@@ -33,7 +34,7 @@ member for the next machine.
   isn't running, its machine keeps the message; if the whole machine is off, copies wait on up
   to 3 other online machines and whoever sees it return first delivers. Duplicates are dropped.
   Messages expire after 7 days.
-- **Zero-config discovery.** Machines on the same LAN find each other automatically (signed UDP
+- **Zero-config discovery.** Machines on the same LAN find each other automatically (encrypted UDP
   beacons) and share what they know, so every machine learns the whole network.
 - **Multiple Claude accounts.** Every `CLAUDE_CONFIG_DIR` account on a machine is enabled
   (`~/.claude*` dirs and shell aliases); new accounts are enabled the first time you run
