@@ -4,7 +4,7 @@ import { loadConfig, VERSION } from '../src/config.js'
 const [cmd, ...rest] = process.argv.slice(2)
 // Only these are flags; anything else (a message that happens to start with "--") is an argument,
 // and "--" ends the flags.
-const VALUE_FLAGS = ['name', 'from', 'host', 'peer', 'join', 'pin', 'token']
+const VALUE_FLAGS = ['name', 'from', 'host', 'peer', 'join', 'pin', 'net', 'token']
 const BOOL_FLAGS = ['no-service', 'no-claude', 'no-alias', 'new-network', 'poll', 'channel', 'on-demand', 'revoke']
 /** @type {Record<string, any>} */
 const flags = {}
@@ -45,7 +45,7 @@ async function main() {
     case 'setup': {
       const { setup } = await import('../src/setup.js')
       if (pos.length) throw new Error('agentlink no longer uses a shared network secret: to join a network, run the line printed by `agentlink invite` on a member')
-      return setup({ host: flags.host, peers: flags.peer || [], noService: flags['no-service'], noClaude: flags['no-claude'], noAlias: flags['no-alias'], newNetwork: flags['new-network'], join: flags.join, pin: flags.pin, token: flags.token })
+      return setup({ host: flags.host, peers: flags.peer || [], noService: flags['no-service'], noClaude: flags['no-claude'], noAlias: flags['no-alias'], newNetwork: flags['new-network'], join: flags.join, pin: flags.pin, net: flags.net, token: flags.token })
     }
     case 'node': {
       const { runNode } = await import('../src/node.js')

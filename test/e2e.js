@@ -14,7 +14,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { newIdentity } from '../src/cert.js'
 import { Roster } from '../src/roster.js'
 import { signEnvelope, sealBeacon } from '../src/crypto.js'
-import { pinnedRequest } from '../src/tls.js'
+import { authedRequest, peerCertificate } from '../src/tls.js'
 import { Local } from '../src/local.js'
 import { readIdentity } from '../src/config.js'
 
@@ -99,9 +99,12 @@ async function waitFor(fn, ms = 8000, what = 'condition') {
 
 const running = n => procs[n] && procs[n].exitCode === null && procs[n].signalCode === null
 async function ensureNode(n) { if (!running(n)) await startNode(n) }
-/** A request to node `n` as a member machine (`as`: an identity; the test is member t.test). */
-async function memberPost(n, p, obj, as = TESTER) {
-  const r = await pinnedRequest({ addr: `127.0.0.1:${NODES[n]}`, method: 'POST', path: p, body: JSON.stringify(obj), identity: as, trust: [{ pem: IDS[n].cert, fp: IDS[n].fp }], timeout: 10_000 })
+/**
+ * A request to node `n` as a member machine (`as`: an identity; the test is member t.test).
+ * `dks`: the discovery keys we hold; `addr`: where to connect (default: n's port).
+ */
+async function memberPost(n, p, obj, as = TESTER, dks = NET.dks, addr = `127.0.0.1:${NODES[n]}`) {
+  const r = await authedRequest({ addr, method: 'POST', path: p, body: JSON.stringify(obj), identity: as, accept: new Map([[IDS[n].fp, crypto.createPublicKey(IDS[n].key)]]), dks, timeout: 10_000 })
   return { status: r.status, data: JSON.parse(r.text) }
 }
 function envelope(to, body, extra = {}, key = TESTER.key) {
@@ -228,14 +231,31 @@ try {
 
   await step('a node from a different network, and outsiders, are refused', async () => {
     await startNode('d')
-    assert.equal(await outsiderGet(NODES.b, '/v1/sessions'), 403, 'no client key')
-    assert.equal(await outsiderGet(NODES.b, '/health'), 404, '/health tells outsiders nothing')
-    assert.equal(await outsiderGet(NODES.b, '/local/status'), 403)
-    assert.equal((await memberPost('b', '/v1/hello', { records: OTHER_NET.records }, IDS.d)).status, 403, 'another network\'s key, even with its own records')
+    for (const p of ['/v1/auth', '/v1/sessions', '/health', '/local/status']) assert.equal(await outsiderGet(NODES.b, p), 404, `${p} tells outsiders nothing`)
+    await assert.rejects(memberPost('b', '/v1/hello', { records: OTHER_NET.records }, IDS.d, OTHER_NET.dks), /not the expected machine/, 'another network: not let through the gate')
+    assert.equal((await memberPost('b', '/v1/hello', { records: OTHER_NET.records }, IDS.d)).status, 403, 'a non-member key, even holding the discovery key and its own records')
     const out = cli('d', 'send', 'bob@b.test', 'intruder')
     assert.match(out, /unreachable/)
     await sleep(500)
     assert.ok(!bob.got.some(g => g.content === 'intruder'))
+  })
+
+  await step('a node\'s key is not shown to anyone who connects, and identity proofs cannot be relayed', async () => {
+    const one = await peerCertificate(`127.0.0.1:${NODES.b}`)
+    await sleep(1100)
+    const two = await peerCertificate(`127.0.0.1:${NODES.b}`)
+    assert.notEqual(one.fp, two.fp, 'a different throwaway key each time')
+    assert.ok(![one.fp, two.fp].includes(IDS.b.fp), 'never the machine key')
+    // a relay in the middle (its own TLS session to each side) can't pass the proofs on, even
+    // knowing the discovery key: they are bound to the TLS session they were made on
+    const relay = tls.createServer({ key: TESTER.key, cert: TESTER.cert }, s => {
+      const up = tls.connect({ host: '127.0.0.1', port: NODES.b, rejectUnauthorized: false })
+      s.pipe(up).pipe(s)
+      for (const x of [s, up]) x.on('error', () => { s.destroy(); up.destroy() })
+    })
+    await new Promise(r => relay.listen(EXTRA_PORTS[0], '127.0.0.1', r))
+    await assert.rejects(memberPost('b', '/v1/sessions', {}, TESTER, NET.dks, `127.0.0.1:${EXTRA_PORTS[0]}`), /not the expected machine/)
+    relay.close()
   })
 
   await step('a member cannot send as another machine, and relayed envelopes cannot be altered', async () => {
@@ -257,14 +277,21 @@ try {
   })
 
   await step('laptop on a hostile network: strangers at stored addresses receive nothing', async () => {
-    // a has b's stored address. b goes away and strangers take over that address: first a TLS
-    // server with its own key, then a plain TCP server. Every byte they receive is recorded.
+    // a has b's stored address. b goes away and strangers take over that address: first an HTTPS
+    // server (as another network's node would answer), then a plain TCP server. Everything they
+    // receive is recorded: at most the gate step, which names nobody.
     await bob.close()
     await stopNode('b')
     const stranger = newIdentity()
-    let appBytes = 0, plain = Buffer.alloc(0)
+    let plain = Buffer.alloc(0)
+    const seen = []
     const SECRET_BODY = 'TOP-SECRET-CAFE-MESSAGE'
-    const tlsImp = tls.createServer({ key: stranger.key, cert: stranger.cert, requestCert: true, rejectUnauthorized: false }, s => { s.on('data', c => { appBytes += c.length }); s.on('error', () => {}) })
+    const https = await import('node:https')
+    const tlsImp = https.createServer({ key: stranger.key, cert: stranger.cert }, (req, res) => {
+      let body = ''
+      req.on('data', c => { body += c })
+      req.on('end', () => { seen.push(`${req.method} ${req.url} ${JSON.stringify(req.headers)} ${body}`); res.writeHead(404); res.end('{"error":"not found"}') })
+    })
     tlsImp.on('tlsClientError', () => {})
     await new Promise(r => tlsImp.listen(NODES.b, '127.0.0.1', r))
     let out = await cliAsync('a', 'send', 'bob@b.test', SECRET_BODY)
@@ -279,7 +306,11 @@ try {
     assert.match(out, /unreachable/)
     await sleep(3000)
     await new Promise(r => plainImp.close(r))
-    assert.equal(appBytes, 0, 'the TLS stranger received no request data')
+    assert.ok(seen.length > 0, 'a tried the address')
+    for (const r of seen) {
+      assert.match(r, /^GET \/v1\/auth /, 'only the gate step, never a request')
+      for (const x of [SECRET_BODY, 'a.test', 'b.test', 'x-agentlink-auth', IDS.a.fp, IDS.b.fp]) assert.ok(!r.includes(x), `no "${x}" sent to the stranger`)
+    }
     assert.ok(plain.length > 0 && plain[0] === 0x16, 'the plain stranger saw only TLS handshakes')
     for (const s of [SECRET_BODY, 'POST', 'GET', 'b.test', 'c.test', 'deliver', 'hello']) assert.ok(!plain.includes(s), `no "${s}" in what the stranger received`)
     const st = JSON.parse(cli('a', 'status'))
@@ -466,7 +497,9 @@ try {
     assert.match(r.stdout, /New network created/)
     inv = parseInvite(r.stdout)
     const fp1 = readIdentity(path.join(ROOT, 's-i')).fp
-    assert.equal(inv.pin, fp1)
+    assert.notEqual(inv.pin, fp1, 'the invite pins an invite key, not the machine key')
+    assert.equal((await peerCertificate(`127.0.0.1:${NODES.i}`)).fp, inv.pin, 'presented while the invite is open')
+    const first = inv
     r = setup('i')
     assert.equal(r.status, 0, r.stderr)
     assert.doesNotMatch(r.stdout, /New network created/)
@@ -477,6 +510,8 @@ try {
     const h = await sLocal('i').health()
     assert.equal(h.fp, readIdentity(path.join(ROOT, 's-i')).fp, 'the old node was stopped and the new one runs')
     inv = parseInvite(r.stdout)
+    assert.notEqual(inv.pin, first.pin, 'a new network gets a new invite key')
+    assert.equal(spawnSync(curlBin, ['-fsSL', '-k', `https://127.0.0.1:${NODES.i}/join/install?t=${first.token}`]).status, 22, 'the old network\'s invites are gone')
   })
 
   await step('the invite line works with real curl, and only with the right key', async () => {
@@ -500,7 +535,10 @@ try {
     // the token is single-use
     const again = setup('l', joinArgs(inv))
     assert.notEqual(again.status, 0)
-    assert.match(again.stderr, /not valid \(already used, expired or revoked\)/)
+    assert.match(again.stderr, /not presenting this invite's key\. Either the invite was already used/)
+    // the invite key went with the last open invite: back to throwaway keys
+    const after = await peerCertificate(`127.0.0.1:${NODES.i}`)
+    assert.ok(![inv.pin, readIdentity(path.join(ROOT, 's-i')).fp].includes(after.fp), 'neither the spent invite key nor the machine key')
     // k can message i (k learns i's address from the join address)
     await waitFor(() => JSON.parse(scli('k', 'status').stdout).peers.some(p => p.host === 'i.test' && p.addr), 8000, 'k knows where i is')
     assert.match(scli('k', 'send', 'x@i.test', 'hello from k').stdout, /stored on i\.test/)
@@ -511,7 +549,7 @@ try {
     let fresh = parseInvite(scli('i', 'invite').stdout)
     let r = setup('l', joinArgs({ ...fresh, pin: newIdentity().fp }))
     assert.notEqual(r.status, 0)
-    assert.match(r.stderr, /not the one that made this invite/)
+    assert.match(r.stderr, /not presenting this invite's key/)
     // a name that's already a member
     r = setup('l', joinArgs(fresh), { AGENTLINK_HOST: 'k.test' })
     assert.notEqual(r.status, 0)
@@ -519,15 +557,18 @@ try {
     // revoked
     assert.match(scli('i', 'invite', '--revoke').stdout, /revoked [1-9]/)
     r = setup('l', joinArgs(fresh))
-    assert.match(r.stderr, /not valid/)
-    // expired
+    assert.match(r.stderr, /not presenting this invite's key/, 'no invite open: its key is gone')
+    // expired, while another invite is open (both pin the same invite key, so the token decides)
     fresh = parseInvite(scli('i', 'invite').stdout)
+    const other = parseInvite(scli('i', 'invite').stdout)
+    assert.equal(other.pin, fresh.pin, 'open invites share the invite key')
     const { DatabaseSync } = await import('node:sqlite')
     const db = new DatabaseSync(path.join(ROOT, 's-i', 'agentlink.db'))
-    db.exec(`UPDATE invites SET expires_at=1 WHERE used_at IS NULL`)
+    db.prepare(`UPDATE invites SET expires_at=1 WHERE hash=?`).run(crypto.createHash('sha256').update(fresh.token).digest('base64url'))
     db.close()
     r = setup('l', joinArgs(fresh))
-    assert.match(r.stderr, /not valid/)
+    assert.match(r.stderr, /not valid \(already used, expired or revoked\)/)
+    scli('i', 'invite', '--revoke')
   })
 
   await step('a removed machine can neither send nor receive', async () => {

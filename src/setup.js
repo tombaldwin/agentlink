@@ -10,6 +10,7 @@ import { newIdentity, certDer, shortFp } from './cert.js'
 import { Roster } from './roster.js'
 import { peerCertificate, pinnedRequest } from './tls.js'
 import { Local } from './local.js'
+import { openStore } from './store.js'
 import { claudeAccounts, register, unregister, writeShellBlock, removeShellBlock, claudeBin, nodePath, BIN } from './claude.js'
 
 /**
@@ -30,9 +31,9 @@ const warn = (/** @type {string} */ m) => console.log(`  ! ${m}`)
 
 /**
  * @param {{ host?: string, peers?: string[], noService?: boolean, noClaude?: boolean, noAlias?: boolean, newNetwork?: boolean,
- *           join?: string, pin?: string, token?: string }} opts
+ *           join?: string, pin?: string, net?: string, token?: string }} opts
  */
-export async function setup({ host, peers = [], noService, noClaude, noAlias, newNetwork, join, pin, token }) {
+export async function setup({ host, peers = [], noService, noClaude, noAlias, newNetwork, join, pin, net: netFp, token }) {
   noService ||= process.env.AGENTLINK_NO_SERVICE === '1'
   if (host) host = normHost(host)   // throws before anything is written
   if (join && (!pin || !token)) throw new Error('--join needs --pin and --token (use the line printed by `agentlink invite`)')
@@ -56,25 +57,27 @@ export async function setup({ host, peers = [], noService, noClaude, noAlias, ne
   let banner = ''
 
   if (join) {
-    // 1. the machine at the invite's address must hold the key the invite names
+    // 1. the machine at the invite's address must present the key the invite names (its invite key)
     let inviter
     try { inviter = await peerCertificate(join) } catch (e) { throw new Error(`cannot reach ${join}: ${errMsg(e)}`) }
-    if (inviter.fp !== pin) throw new Error(`the machine at ${join} is not the one that made this invite (its key doesn't match). Not joining.`)
-    // 2. keep this machine's key only if it is already a member of that same network
-    const same = member && roster?.members.has(pin) && identity
+    if (inviter.fp !== pin) throw new Error(`the machine at ${join} is not presenting this invite's key. Either the invite was already used, expired or was revoked (run \`agentlink invite\` on a member for a new one), or something else is answering at that address. Not joining.`)
+    // 2. keep this machine's key only if it is already a member of that same network (a key that
+    // isn't carried between networks can't be used to link them)
+    const same = member && !!netFp && roster?.net === netFp && identity
     const id = same && identity ? identity : newIdentity()
     // 3. join: the inviter checks the token and adds our key under our name
     let r
     try {
-      r = await pinnedRequest({ addr: join, method: 'POST', path: '/join', body: JSON.stringify({ token, host: myHost, cert: certDer(id.cert) }), identity: id, trust: [{ pem: inviter.pem, fp: pin }], timeout: 20_000 })
+      r = await pinnedRequest({ addr: join, method: 'POST', path: '/join', body: JSON.stringify({ token, host: myHost, cert: certDer(id.cert) }), trust: [{ pem: inviter.pem, fp: pin }], timeout: 20_000 })
     } catch (e) { throw new Error(`could not join via ${join}: ${errMsg(e)}`) }
     /** @type {any} */
     let data = {}
     try { data = JSON.parse(r.text) } catch {}
     if (r.status !== 200) throw new Error(`could not join via ${join}: ${data.error || `HTTP ${r.status}`}`)
     const joined = new Roster({ net: String(data.net), records: data.records }, rosterPath())
-    if (joined.members.get(id.fp)?.host !== myHost || !joined.members.has(pin)) throw new Error(`could not join via ${join}: it did not add this machine`)
+    if (joined.members.get(id.fp)?.host !== myHost || !joined.byHost.has(String(data.host)) || (netFp && joined.net !== netFp)) throw new Error(`could not join via ${join}: it did not add this machine`)
     await stopRunningNode(prev ? [prev] : [])
+    if (!same) dropInvites()
     writeIdentity(id)
     joined.save()
     if (myHost !== joined.members.get(id.fp)?.host) throw new Error('internal: name mismatch')
@@ -88,6 +91,7 @@ export async function setup({ host, peers = [], noService, noClaude, noAlias, ne
     }
     const id = newIdentity()
     await stopRunningNode(prev ? [prev] : [])
+    dropInvites()
     writeIdentity(id)
     Roster.genesis(id, myHost, rosterPath()).save()
     allPeers = [...peers]
@@ -139,6 +143,15 @@ Name a session with AGENTLINK_NAME=<name> (default: the project folder name).`)
   } else console.log('\nRun `agentlink invite` once the node is running to add other machines.')
 }
 
+/** Invites made for the network this machine is leaving must not let anyone into its new one. */
+function dropInvites() {
+  fs.rmSync(path.join(homeDir(), 'invite.key'), { force: true })
+  const file = path.join(homeDir(), 'agentlink.db')
+  if (!fs.existsSync(file)) return
+  const db = openStore(file)
+  try { db.exec('DELETE FROM invites') } finally { db.close() }
+}
+
 /** Stop the node on this machine (it only accepts the key it was started with). */
 /** @param {import('./types.js').Config[]} cfgs */
 async function stopRunningNode(cfgs) {
@@ -164,7 +177,7 @@ function portInUse(port) {
 
 /**
  * The one line to paste on another machine: fetches the installer from this machine's node over
- * TLS pinned to this machine's key (curl's -k only skips CA checks; --pinnedpubkey still applies).
+ * TLS pinned to the invite key (curl's -k only skips CA checks; --pinnedpubkey still applies).
  * @param {{ token: string, fp: string, port: number }} inv @param {string} host
  */
 export const installLine = (inv, host) =>
@@ -175,12 +188,13 @@ export const installLine = (inv, host) =>
 export function invitePrompt(inv) {
   let prompt = `Join my agentlink network: run  ${installLine(inv, inv.host)}`
   if (inv.tailscale) prompt += `  — if ${inv.host} can't be reached, run  ${installLine(inv, inv.tailscale)}  instead`
-  prompt += ` — then tell me how to start Claude with agentlink enabled. (The -k is safe here: --pinnedpubkey makes curl accept only my machine's key.)`
+  prompt += ` — then tell me how to start Claude with agentlink enabled. (The -k is safe here: --pinnedpubkey makes curl accept only the key this invite names. If curl says the public key does not match, this invite was already used, expired or was revoked: ask me for a new one.)`
   return `To add another machine, paste this into Claude Code on it (or just run the command):
 
   ${prompt}
 
-It lets one machine join and expires in 24 hours (\`agentlink invite --revoke\` cancels unused invites).${inv.tailscale ? '' : `
+It lets one machine join and expires in 24 hours (\`agentlink invite --revoke\` cancels unused invites).
+Once it's used, expired or revoked, curl rejects the line with "public key does not match": run \`agentlink invite\` for a new one.${inv.tailscale ? '' : `
 (For machines off this LAN: install Tailscale on both, then run \`agentlink invite\` again.)`}
 `
 }

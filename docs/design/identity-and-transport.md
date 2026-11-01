@@ -1,6 +1,7 @@
 # Design: per-machine identity and pinned TLS
 
-Status: implemented, for 0.1.0 (before first public release)
+Status: implemented, for 0.1.0 (before first public release). §2 (transport) has been superseded by
+[unlinkable-keys.md](unlinkable-keys.md): nodes no longer present their machine key in the handshake.
 
 ## Why
 

@@ -15,7 +15,9 @@ Address any agent as `name@host` (e.g. `reviewer@laptop.local`). An incoming mes
 > Join my agentlink network: run `curl -fsSL -k --pinnedpubkey "sha256//…" "https://desk.local:7777/join/install?t=…" | sh` — then tell me how to start Claude with agentlink enabled.
 
 Each invite adds one machine and expires after 24 hours. The pinned key means curl only talks to
-the machine that made the invite.
+the machine that made the invite. That key exists only while the invite is open, so a used invite
+line stops working entirely: curl reports "public key does not match". Run `agentlink invite` on
+any member for a new one.
 
 **Then** open a new terminal and start Claude with `claude-link` (each extra account gets its
 own alias, e.g. `claude2-link`). Ask it to message another agent; ask it who's online.
@@ -32,7 +34,7 @@ member for the next machine.
   isn't running, its machine keeps the message; if the whole machine is off, copies wait on up
   to 3 other online machines and whoever sees it return first delivers. Duplicates are dropped.
   Messages expire after 7 days.
-- **Zero-config discovery.** Machines on the same LAN find each other automatically (signed UDP
+- **Zero-config discovery.** Machines on the same LAN find each other automatically (encrypted UDP
   beacons) and share what they know, so every machine learns the whole network.
 - **Multiple Claude accounts.** Every `CLAUDE_CONFIG_DIR` account on a machine is enabled
   (`~/.claude*` dirs and shell aliases); new accounts are enabled the first time you run
@@ -55,10 +57,12 @@ Name a session with `AGENTLINK_NAME=<name> claude-link` (default: the project fo
 Each machine has its own key. The network is the list of machines' keys, kept and shared by the
 members; any member can invite or remove machines.
 
-- **Encrypted and pinned.** Machines talk TLS, and each side accepts only the keys on that list. A
-  connection to a stored address that someone else now holds (a laptop at a café whose home
-  addresses belong to strangers there) fails during the handshake, before anything is sent.
-- **Joining.** An invite is a one-time token plus the inviting machine's key. Someone watching the
+- **Encrypted, and nothing for strangers.** Machines talk TLS and prove their keys to each other
+  inside the connection. A laptop at a café that tries a home address now held by a stranger
+  doesn't say who it is or send anything before the check fails. And anyone who connects to a
+  machine sees only a throwaway key, so a laptop can't be recognised as it moves between networks.
+- **Joining.** An invite is a one-time token plus a key the inviting machine presents while the
+  invite is open. Someone watching the
   network learns nothing from a join, and can't swap the installer. A used or expired invite is
   worthless.
 - **Machines can't impersonate each other.** Every message is signed by the machine that sent it,

@@ -8,14 +8,18 @@ Each machine has its own ECDSA P-256 key pair, created by `agentlink setup` and 
 member" or "this key was removed". Members exchange and merge these records; every member computes
 the same membership from the same records.
 
-- **Transport.** Every connection is TLS, and both sides present their machine key. When a node
-  connects to another, it accepts only the key the roster holds for that machine, checked inside
-  the handshake. If anyone else answers at the address, the connection fails before a request
-  byte is sent. Machine-to-machine connections require TLS 1.3.
+- **Transport.** Every connection is TLS 1.3. The certificate a node presents is a throwaway (a new
+  key for each connection), so connecting to a node's port shows nothing that identifies the
+  machine. Machines prove who they are inside the encrypted connection. The client first shows it
+  holds the network's discovery key; anyone else gets a 404. The server then signs the connection
+  with its machine key. The client checks that this is the machine the roster says should be there,
+  and only then signs the connection with its own key and sends its request. If anyone else answers
+  at the address, they get nothing but that first, anonymous step. Both signatures cover that one
+  TLS session, so they can't be replayed, or relayed by someone sitting in the middle.
 - **Addresses are only hints.** LAN beacons, gossiped addresses, configured names and the source
   IPs of requests can all be wrong or stale (DHCP reuse, a laptop on another network, spoofed
-  name resolution). An address is used for a machine only when the handshake there presents that
-  machine's key, so a wrong address never receives anything. Someone relaying traffic to the real
+  name resolution). An address is used for a machine only once the machine there proves it holds
+  that machine's key, so a wrong address never receives a request. Someone relaying traffic to the real
   machine sees only ciphertext.
 - **Membership.** A node accepts machine-to-machine requests only from current members' keys. Any
   member can add a machine (by inviting it) or remove one. A removed key is gone for good (the
@@ -26,18 +30,20 @@ the same membership from the same records.
   message only if the signer is a current member and is the machine named in the sender address,
   so holders relaying copies can't alter messages and a member can't send as another machine.
 - **Joining.** `agentlink invite` makes a one-time token (stored hashed, expires after 24 hours)
-  and prints a `curl -k --pinnedpubkey "sha256//<key>" https://…` line. curl's `-k` only skips
-  certificate-authority checks; `--pinnedpubkey` still makes curl refuse any key but the inviting
-  machine's, so the installer, the package and the token can't be intercepted or replaced. The
-  joining machine checks the same key again before it sends its join request. The token is
-  consumed by the join. `agentlink invite --revoke` cancels unused tokens.
+  and prints a `curl -k --pinnedpubkey "sha256//<key>" https://…` line. The key is an invite key,
+  which the inviting node presents only while it has invites open. curl's `-k` only skips
+  certificate-authority checks; `--pinnedpubkey` still makes curl refuse any other key, so the
+  installer, the package and the token can't be intercepted or replaced. The joining machine checks
+  the same key again before it sends its join request. The token is consumed by the join.
+  `agentlink invite --revoke` cancels unused tokens. Starting or joining another network deletes the
+  old network's invites.
 - **Discovery.** LAN beacons are encrypted under a discovery key that members share only over
   their TLS connections, so other people on the network can't read machine names from them. The
   discovery key is replaced whenever a machine is removed.
-- **Local API.** Sessions on the same machine talk to their node over TLS on 127.0.0.1, pinned to
-  the node's key, and present that same key: only processes that can read this machine's private
-  key (your user) get in, and a program squatting on the port is refused. `/health` answers only
-  them.
+- **Local API.** Sessions on the same machine talk to their node over TLS on 127.0.0.1, with the
+  same check: the node must prove it holds this machine's key, and so must the client. Only
+  processes that can read this machine's private key (your user) get in, and a program squatting
+  on the port is sent nothing. `/health` answers only them.
 - **Prompt injection.** Messages come from other AI agents. The MCP adapter instructs Claude to
   treat them as requests from a colleague — never as instructions from its user — and not to
   take destructive or security-sensitive actions solely because a peer asked. Only invite
@@ -53,9 +59,11 @@ the same membership from the same records.
   send as any session name on that machine.
 - **Invites are credentials until used.** Anyone who gets an unused invite line within 24 hours can
   join one machine with it. Treat it like a password until it's been used, or revoke it.
-- **Your machine's key is visible to anyone who connects to its port.** It doesn't reveal the
-  machine's name, but it's a stable value someone could use to recognise the same machine on
-  different networks. The open port itself is visible too.
+- **While an invite is open, its key is visible to anyone who connects to the port.** Someone could
+  use it to recognise the machine during that window (24 hours at most). Run `agentlink invite
+  --revoke` once you've added your machines. At other times, a node shows only throwaway keys.
+- **The open port is visible.** Someone scanning a network can see that something is listening on
+  agentlink's port (7777 by default), and can guess it's agentlink.
 - **A removed machine keeps what it had.** It keeps its copy of the member list (machine names and
   public keys; no secrets) and any messages it already received.
 

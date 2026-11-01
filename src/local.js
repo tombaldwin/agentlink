@@ -1,13 +1,15 @@
 // Client for the local node's loopback API, plus auto-start of the node.
 //
-// The local API runs over TLS on 127.0.0.1, pinned to this machine's own certificate, and the
-// client presents that same certificate: only a process that can read this machine's private key
-// (this user) gets in, and a process squatting on the port is refused at the handshake.
+// The local API runs over TLS on 127.0.0.1 with the same in-band identity check as connections
+// between machines (see tls.js): the node must prove it holds this machine's key, and so must the
+// client. Only a process that can read this machine's private key (this user) gets in, and a
+// process squatting on the port is refused before it is sent anything.
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
-import { pinnedRequest, pinnedRaw, PinError } from './tls.js'
-import { ensureHomeDir, errMsg } from './config.js'
+import crypto from 'node:crypto'
+import { authedRequest, authedRaw, PinError } from './tls.js'
+import { ensureHomeDir, errMsg, readDks } from './config.js'
 import { BIN, nodePath } from './claude.js'
 
 const sleep = (/** @type {number} */ ms) => new Promise(r => setTimeout(r, ms))
@@ -17,8 +19,11 @@ export class Local {
   constructor(cfg) {
     this.cfg = cfg
     this.addr = `127.0.0.1:${cfg.port}`
-    this.trust = [{ pem: cfg.identity.cert, fp: cfg.identity.fp }]
+    this.accept = new Map([[cfg.identity.fp, crypto.createPublicKey(cfg.identity.key)]])
   }
+
+  /** @param {{ path: string, method?: 'GET' | 'POST', body?: string, timeout?: number, signal?: AbortSignal }} o */
+  opts(o) { return { addr: this.addr, identity: this.cfg.identity, accept: this.accept, dks: readDks(this.cfg.dir), ...o } }
 
   /** @param {unknown} e */
   wrap(e) {
@@ -36,7 +41,7 @@ export class Local {
   async req(method, p, obj, query = '') {
     let r
     try {
-      r = await pinnedRequest({ addr: this.addr, method, path: p + query, body: obj === undefined ? '' : JSON.stringify(obj), identity: this.cfg.identity, trust: this.trust, timeout: 15_000 })
+      r = await authedRequest(this.opts({ method, path: p + query, body: obj === undefined ? '' : JSON.stringify(obj), timeout: 15_000 }))
     } catch (e) { throw this.wrap(e) }
     /** @type {any} */
     let data = {}
@@ -52,7 +57,7 @@ export class Local {
    */
   async health() {
     try {
-      const r = await pinnedRequest({ addr: this.addr, path: '/health', identity: this.cfg.identity, trust: this.trust, timeout: 1000 })
+      const r = await authedRequest(this.opts({ path: '/health', timeout: 1000 }))
       return r.status === 200 ? JSON.parse(r.text) : { foreign: true }
     } catch (e) {
       const code = /** @type {any} */ (e)?.code
@@ -100,10 +105,10 @@ export class Local {
   async stream(name, token, onEvent, { signal, poll = false } = {}) {
     let res
     try {
-      ({ res } = await pinnedRaw({
-        addr: this.addr, identity: this.cfg.identity, trust: this.trust, timeout: 0, signal,
+      ({ res } = await authedRaw(this.opts({
+        timeout: 0, signal,
         path: `/local/stream?name=${encodeURIComponent(name)}&token=${encodeURIComponent(token)}${poll ? '&mode=poll' : ''}`,
-      }))
+      })))
     } catch (e) { throw /** @type {any} */ (e)?.name === 'AbortError' ? e : this.wrap(e) }
     if (res.statusCode !== 200) { res.destroy(); throw new Error(`stream HTTP ${res.statusCode}`) }
     const dec = new TextDecoder()
