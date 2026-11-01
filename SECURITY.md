@@ -47,7 +47,7 @@ the same membership from the same records.
 - **Discovery.** LAN beacons are encrypted under a discovery key that members share only over
   their TLS connections, so other people on the network can't read machine names from them. The
   discovery key is replaced whenever a machine is removed. A replaced key still opens other
-  members' gates for 30 days, so a machine that was offline during a removal can catch up. After
+  members' gates for 14 days, so a machine that was offline during a removal can catch up. After
   that, it needs a new invite.
 - **Local API.** Sessions on the same machine talk to their node over TLS on 127.0.0.1, with the
   same check: the node must prove it holds this machine's key, and so must the client. Only
@@ -72,13 +72,15 @@ the same membership from the same records.
   gets it to a member that hasn't heard of its removal yet, the removal stands, like any removal
   made at the same moment. It can never remove a machine that joined before it, add one, or get
   back in. The affected machines re-join with an invite.
-- **A removed machine can still tell which member it is talking to, for 30 days.** It can pass the
+- **A removed machine can still tell which member it is talking to, for 14 days.** It can pass the
   gate with an old discovery key during the grace period, and learn which member is at an address
   (which it knew already). It still can't send, receive or change the member list.
 - **Agents on a machine aren't separately authenticated.** Any process running as your user can
   send as any session name on that machine.
 - **Invites are credentials until used.** Anyone who gets an unused invite line within 24 hours can
-  join one machine with it. Treat it like a password until it's been used, or revoke it.
+  join one machine with it. Treat it like a password until it's been used, or revoke it. On a
+  shared machine, other users can see the line's token in the process list for the few seconds the
+  first `curl` runs (the installer keeps it off command lines after that).
 - **While an invite is open, its key is visible to anyone who connects to the port.** Someone could
   use it to recognise the machine during that window (24 hours at most). Run `agentlink invite
   --revoke` once you've added your machines. At other times, a node shows only throwaway keys.

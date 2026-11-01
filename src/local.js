@@ -9,7 +9,7 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import { authedRequest, authedRaw, PinError } from './tls.js'
-import { ensureHomeDir, errMsg, readDks } from './config.js'
+import { ensureHomeDir, errMsg, readDks, VERSION } from './config.js'
 import { BIN, nodePath } from './claude.js'
 
 const sleep = (/** @type {number} */ ms) => new Promise(r => setTimeout(r, ms))
@@ -23,7 +23,8 @@ export class Local {
   }
 
   /** @param {{ path: string, method?: 'GET' | 'POST', body?: string, timeout?: number, signal?: AbortSignal }} o */
-  opts(o) { return { addr: this.addr, identity: this.cfg.identity, accept: this.accept, dks: readDks(this.cfg.dir), ...o } }
+  // anyProto: after an upgrade the running node may be the previous version; setup must still reach it to stop it
+  opts(o) { return { addr: this.addr, identity: this.cfg.identity, accept: this.accept, dks: readDks(this.cfg.dir), anyProto: true, ...o } }
 
   /** @param {unknown} e */
   wrap(e) {
@@ -69,9 +70,14 @@ export class Local {
 
   /** Make sure a node is running on this machine (start one in the background if not). */
   async ensureNode() {
-    const h = await this.health()
+    let h = await this.health()
     if (h && 'foreign' in h) throw new Error(`port ${this.cfg.port} is used by something that is not this machine's agentlink node`)
-    if (h) return h
+    // agentlink was upgraded under a running node: replace it with this version
+    if (h && h.version !== VERSION) {
+      try { await this.req('POST', '/local/shutdown') } catch {}
+      for (let i = 0; i < 30 && (h = await this.health()) && !('foreign' in h) && h.version !== VERSION; i++) await sleep(100)
+    }
+    if (h && !('foreign' in h) && h.version === VERSION) return h
     if (fs.existsSync(path.join(this.cfg.dir, 'disabled'))) throw new Error('agentlink is uninstalled on this machine (run `agentlink setup` to re-enable)')
     ensureHomeDir(this.cfg.dir)
     const out = fs.openSync(path.join(this.cfg.dir, 'node.log'), 'a', 0o600)

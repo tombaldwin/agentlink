@@ -71,6 +71,12 @@ function cliAsync(n, ...args) {
   return new Promise((resolve, reject) => execFile(process.execPath, ['--no-warnings', BIN, ...args], { env: envFor(n), encoding: 'utf8' },
     (err, out) => err ? reject(err) : resolve(out.trim())))
 }
+/** A command expected to fail: its stderr. */
+function cliFails(n, ...args) {
+  const r = spawnSync(process.execPath, ['--no-warnings', BIN, ...args], { env: envFor(n), encoding: 'utf8' })
+  assert.notEqual(r.status, 0, `expected \`agentlink ${args.join(' ')}\` to fail:\n${r.stdout}`)
+  return r.stderr
+}
 function cli(n, ...args) {
   return execFileSync(process.execPath, ['--no-warnings', BIN, ...args], { env: envFor(n), encoding: 'utf8' }).trim()
 }
@@ -234,8 +240,7 @@ try {
     for (const p of ['/v1/auth', '/v1/sessions', '/health', '/local/status']) assert.equal(await outsiderGet(NODES.b, p), 404, `${p} tells outsiders nothing`)
     await assert.rejects(memberPost('b', '/v1/hello', { records: OTHER_NET.records }, IDS.d, OTHER_NET.dks), /not the expected machine/, 'another network: not let through the gate')
     assert.equal((await memberPost('b', '/v1/hello', { records: OTHER_NET.records }, IDS.d)).status, 403, 'a non-member key, even holding the discovery key and its own records')
-    const out = cli('d', 'send', 'bob@b.test', 'intruder')
-    assert.match(out, /unreachable/)
+    assert.match(cli('d', 'send', 'bob@b.test', 'intruder'), /unreachable/, 'a configured peer is queued (it may be offline)')
     await sleep(500)
     assert.ok(!bob.got.some(g => g.content === 'intruder'))
   })
@@ -486,8 +491,8 @@ try {
     const st = JSON.parse(cli('a', 'status'))
     assert.ok(!st.peers.some(p => p.host === 'laptop.test'), 'a non-member name is ignored')
     assert.ok(!st.peers.some(p => p.host === 'h.test' && p.addr === `127.0.0.1:${NODES.c}`), 'a wrong address for a member is not adopted')
-    const out = cli('a', 'send', 'bob@laptop.test', 'for the laptop only')
-    assert.doesNotMatch(out, /pushed to|stored on/, 'not handed to c.test')
+    assert.match(cliFails('a', 'send', 'bob@laptop.test', 'for the laptop only'), /laptop\.test is not a machine on this network/, 'not handed to c.test')
+    assert.match(cliFails('a', 'send', 'bob@typo.test', 'hi'), /machines: a\.test, /, 'a typo is refused at once, listing the machines')
   })
 
   // ---- setup, invites, joining, removal (real `agentlink setup`, nodes on ports i/k/l) ----
@@ -515,6 +520,7 @@ try {
     r = setup('i')
     assert.equal(r.status, 0, r.stderr)
     assert.doesNotMatch(r.stdout, /New network created/)
+    assert.doesNotMatch(r.stdout, /Join my agentlink network/, 're-running setup makes no new invite')
     assert.equal(readIdentity(path.join(ROOT, 's-i')).fp, fp1, 'key kept')
     r = setup('i', ['--new-network'])
     assert.match(r.stdout, /New network created/)
@@ -595,7 +601,7 @@ try {
     assert.deepEqual(iStatus.members.map(m => m.host), ['i.test'])
     const out = scli('k', 'send', 'x@i.test', 'after removal').stdout
     assert.doesNotMatch(out, /pushed to|stored on/)
-    assert.match(scli('i', 'send', 'x@k.test', 'to the removed').stdout, /removed from the network/)
+    assert.match(scli('i', 'send', 'x@k.test', 'to the removed').stderr, /k\.test was removed from the network/)
     assert.match(scli('i', 'remove', 'i.test').stderr, /agentlink uninstall/)
   })
 
@@ -659,6 +665,26 @@ try {
     const r = spawnSync(process.execPath, ['--no-warnings', BIN, 'node', '--on-demand'], { env: setupEnv('i'), encoding: 'utf8', timeout: 10_000 })
     assert.equal(r.status, 0, 'exited on its own')
     assert.match(r.stderr, /already running/)
+  })
+
+  await step('a held message from a machine the recipient has not heard of yet is delivered, not dropped', async () => {
+    await ensureNode('a'); await ensureNode('c')
+    // n.test joins while c is not listening: a learns of it, c doesn't
+    const n = newIdentity()
+    const addN = new Roster({ net: NET.net, records: NET.records }).add(IDS.a, 'n.test', n.cert)
+    assert.equal((await memberPost('a', '/v1/hello', { records: [...NET.records, addN] })).status, 200)
+    // a holds a message from n.test for c (n has since gone offline) and hands it on: c doesn't
+    // know n.test yet, so a tells it what it knows and tries again
+    const e = envelope('zed@c.test', 'from the newcomer', { from: 'x@n.test' }, n.key)
+    assert.deepEqual((await memberPost('a', '/v1/deliver', { messages: [e] })).data.results, { [e.id]: 'held' })
+    await waitFor(async () => (await localOf('c').req('GET', '/local/history', undefined, '?name=zed')).messages.some(m => m.id === e.id), 15000, 'delivery to c')
+    assert.ok(JSON.parse(cli('c', 'status')).members.some(m => m.host === 'n.test'), 'c learned of n.test from a')
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(path.join(ROOT, 'a', 'agentlink.db'))
+    const row = db.prepare('SELECT state, attempts FROM messages WHERE id=?').get(e.id)
+    db.close()
+    assert.equal(row.state, 'forwarded')
+    assert.ok(row.attempts >= 1, 'c turned it away at first (it didn\'t know the sender), and a retried')
   })
 
   await step('local clients refuse a process squatting on the node port', async () => {

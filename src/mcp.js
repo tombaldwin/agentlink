@@ -181,7 +181,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        to: { type: 'string', description: 'Recipient address "name@host", e.g. "buffy@anya.local". A bare name means this machine.' },
+        to: { type: 'string', description: 'Recipient address "name@host", e.g. "reviewer@laptop.local". A bare name means this machine.' },
         message: { type: 'string', description: 'Message text (max 64KB).' },
       },
       required: ['to', 'message'],

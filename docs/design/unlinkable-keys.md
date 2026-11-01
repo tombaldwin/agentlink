@@ -45,7 +45,7 @@ Properties:
 - **No replay or relaying.** Both proofs sign this TLS session's exporter. A relay in the middle
   runs two sessions with two exporters, so it can't pass proofs from one side to the other, even if
   it holds a discovery key. Role labels stop a server proof being reflected back as a client proof.
-- **Recently replaced discovery keys still open the gate, for 30 days** (`Roster.gateDks`). A
+- **Recently replaced discovery keys still open the gate, for 14 days** (`Roster.gateDks`). A
   machine that was offline during a removal, and missed the key rotation, can still get in. Passing
   the gate only tells a client which member it is talking to, and anyone who held the key already
   has the member list. Membership is checked in step 3 as before, so a removed machine still gets

@@ -24,6 +24,21 @@ export function splitAddr(addr) {
 }
 
 export class PinError extends Error {}
+/** The other machine speaks a different version of the protocol. */
+export class ProtoError extends Error {
+  /** @param {number} theirs */
+  constructor(theirs) {
+    super(`it runs ${theirs > PROTO ? 'a newer' : 'an older'} version of agentlink (protocol ${theirs}; this machine: ${PROTO}). Upgrade the older machine: re-run the installer, or \`npm install -g @tombaldwin/agentlink\` and \`agentlink setup\``)
+    this.theirs = theirs
+  }
+}
+
+/**
+ * The version of the machine-to-machine protocol (the identity exchange, roster and message
+ * formats). Machines exchange it first, so a mismatch is reported as such instead of looking like
+ * a stranger. Bump it on any incompatible change.
+ */
+export const PROTO = 1
 const notExpected = () => new PinError('not the expected machine (key mismatch)')
 
 /** A connection's TLS exporter: the value both identity proofs sign. @param {tls.TLSSocket} sock */
@@ -56,9 +71,12 @@ async function readAll(res, max) {
  *   addr: string, method?: 'GET' | 'POST', path: string, body?: string, headers?: Record<string, string>,
  *   identity: import('./types.js').Identity,
  *   accept: Map<string, crypto.KeyObject>, dks: string[], timeout?: number, signal?: AbortSignal,
+ *   anyProto?: boolean,
  * }} AuthOpts
  * accept: the machines we are willing to be talking to (fingerprint -> public key)
  * dks: the network's discovery keys (oldest first), which open the gate
+ * anyProto: talk to a node with a different protocol version (the local node after an upgrade, to
+ *   stop it); otherwise that fails with ProtoError
  */
 
 /**
@@ -77,7 +95,7 @@ export async function authedRaw(o) {
     /** @type {tls.TLSSocket | null} */
     let sock = null
     const r1 = await new Promise((resolve, reject) => {
-      const req = https.request({ ...base, method: 'GET', path: '/v1/auth' }, resolve)
+      const req = https.request({ ...base, method: 'GET', path: '/v1/auth', headers: { 'x-agentlink-proto': String(PROTO) } }, resolve)
       req.setTimeout(o.timeout || 4000, () => req.destroy(new Error('timed out')))
       req.on('error', e => reject(mapErr(e)))
       req.on('socket', s => {
@@ -94,6 +112,8 @@ export async function authedRaw(o) {
     /** @type {any} */
     let who = null
     try { who = JSON.parse(text) } catch {}
+    // a member of our network running another version (the claim is only used for the message)
+    if (r1.statusCode === 200 && Number.isSafeInteger(who?.proto) && who.proto !== PROTO && !o.anyProto) throw new ProtoError(who.proto)
     const key = r1.statusCode === 200 && typeof who?.fp === 'string' ? o.accept.get(who.fp) : undefined
     if (!key || !checkAuth(key, 'server', ekm, who.sig)) throw notExpected()
     const peerFp = String(who.fp)

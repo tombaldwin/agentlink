@@ -30,7 +30,7 @@ const HELP = `agentlink ${VERSION} — wake-on-message networking for AI agents
   agentlink setup               set up this machine (keeps its network, or creates one if it has
                                 none; --new-network to start over). Joining uses the invite line.
   agentlink claude [args...]    start Claude Code (current account) with agentlink enabled
-  agentlink send <to> <msg...>  send a message, e.g. agentlink send buffy@anya.local "hi"
+  agentlink send <to> <msg...>  send a message, e.g. agentlink send reviewer@laptop.local "hi"
   agentlink peers               who's online
   agentlink status              node status, queues, known machines
   agentlink invite [--revoke]   print a one-time line to add another machine (--revoke: cancel unused ones)
