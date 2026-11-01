@@ -56,6 +56,7 @@ export async function setup({ host, peers = [], noService, noClaude, noAlias, ne
   /** @type {string[]} */
   let allPeers = []
   let banner = ''
+  let invite = false              // print an invite: only for a new network or a machine that just joined
 
   if (join) {
     // 1. the machine at the invite's address must present the key the invite names (its invite key)
@@ -84,6 +85,7 @@ export async function setup({ host, peers = [], noService, noClaude, noAlias, ne
     if (myHost !== joined.members.get(id.fp)?.host) throw new Error('internal: name mismatch')
     allPeers = [...new Set([...(same ? existing.peers || [] : []), join, ...peers])]
     banner = same ? `Already a member of this network (via ${data.host}).` : `Joined the network via ${data.host}.`
+    invite = !same
   } else if (!member || newNetwork) {
     if (identity && roster && !member && !newNetwork) {
       throw new Error(roster.removed.has(identity.fp)
@@ -97,6 +99,7 @@ export async function setup({ host, peers = [], noService, noClaude, noAlias, ne
     Roster.genesis(id, myHost, rosterPath()).save()
     allPeers = [...peers]
     banner = 'New network created.'
+    invite = true
   } else {
     if (host && host !== roster?.members.get(identity?.fp || '')?.host) {
       throw new Error(`this machine is on its network as ${roster?.members.get(identity?.fp || '')?.host}; to change its name, join again under the new name (an invite plus --host), or start a new network with --new-network`)
@@ -138,10 +141,10 @@ Done. Open a new terminal, then start Claude with agentlink enabled using:
 Agents address each other as name@host, e.g. "send the test results to reviewer@laptop.local".
 Name a session with AGENTLINK_NAME=<name> (default: the project folder name).`)
   if (banner) console.log(`\n${banner}`)
-  if (running) {
+  if (running && invite) {
     try { console.log(`\n${invitePrompt(await local.req('POST', '/local/invite'))}`) }
     catch (e) { warn(`could not create an invite (${errMsg(e)}); run \`agentlink invite\` later`) }
-  } else console.log('\nRun `agentlink invite` once the node is running to add other machines.')
+  } else console.log(`\nRun \`agentlink invite\`${running ? '' : ' once the node is running'} to add another machine.`)
 }
 
 /** Invites made for the network this machine is leaving must not let anyone into its new one. */

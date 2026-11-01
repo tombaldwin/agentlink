@@ -112,7 +112,7 @@ export interface Member {
 export type AcceptResult = 'live' | 'queued' | 'held' | 'expired' | 'unknown-sender' | null
 
 /** Health reply from a node's /health endpoint. */
-export interface Health { ok: boolean; host: string; net: string; fp: string; version: string; pid: number }
+export interface Health { ok: boolean; host: string; net: string; fp: string; version: string; proto?: number; pid: number }
 
 /** A Claude account on this machine ('' dir = the default account). */
 export interface ClaudeAccount { dir: string; alias: string; aliasValue?: string }

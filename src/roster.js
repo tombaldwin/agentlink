@@ -28,7 +28,7 @@ const MAX_SEEN = 2000
 const MAX_DROPPED = 50                 // adds that didn't count, kept per removed machine (so their keys stay known as dropped)
 // a replaced discovery key still opens other members' gates for this long, so a machine that was
 // offline during a removal can catch up; after that it needs a new invite
-export const DK_GRACE_MS = 30 * 86400_000
+export const DK_GRACE_MS = 14 * 86400_000
 
 /** @typedef {import('./types.js').RosterRecord} RosterRecord */
 /** @typedef {import('./types.js').Member} Member */

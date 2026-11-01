@@ -21,3 +21,9 @@ First release.
 - Joining by one-time invite (expires in 24 hours) with the invite key pinned in the curl line;
   any member machine can invite and serves the installer.
 - Tailscale-aware invites for machines off the LAN.
+- Machines exchange a protocol version first: a machine running an incompatible version is
+  reported as needing an upgrade, not as a stranger. Sessions restart a node left running from an
+  older version.
+- Sending to a name that isn't a machine on the network (a typo) fails at once and lists the
+  machines, instead of queueing; configured peers (Tailscale names, IPs) are still queued while
+  offline.

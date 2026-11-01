@@ -19,7 +19,7 @@ import { startDiscovery } from './discovery.js'
 import { signEnvelope, verifyEnvelope, sha256, randomToken, gateOk, proveAuth, checkAuth } from './crypto.js'
 import { fingerprint, shortFp, newIdentity, selfSignedCert } from './cert.js'
 import { Roster } from './roster.js'
-import { authedRequest, exporterOf, PinError } from './tls.js'
+import { authedRequest, exporterOf, PinError, ProtoError, PROTO } from './tls.js'
 import { parseAddr, normHost, sanitizeName, validAddr, tailscaleName, errMsg, ensureHomeDir, rosterPath, MAX_TTL_MS, VERSION } from './config.js'
 
 const MAX_REQ = 2 << 20
@@ -261,6 +261,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       r = await authedRequest({ addr: target, method, path: p, body, headers: { 'x-agentlink-port': String(cfg.port) }, identity: me, accept: new Map([[m.fp, m.publicKey]]), dks: roster.dks, timeout }, MAX_REQ)
     } catch (e) {
       if (e instanceof PinError) throw new Error(`${host} at ${target}: answered by a different machine (not ${host}'s key)`)
+      if (e instanceof ProtoError) throw new Error(`${host}: ${e.message}`)
       throw new Error(`${host} at ${target}: ${errMsg(e)}`)
     }
     // a member that hasn't heard we joined yet: tell it (hello carries the records that add us), then retry
@@ -638,6 +639,14 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       else if (r) to.host = r
     }
     if (isSelf(to.host)) to.host = cfg.host
+    // not a machine on this network (a typo, or a machine that hasn't joined): say so now rather
+    // than queue it for days. Names configured as peers (a Tailscale name, an IP) are queued: the
+    // machine may just be offline, and is found when it answers.
+    if (to.host !== cfg.host && !member(to.host) && !peerRow(to.host)?.configured) {
+      if (removedHost(to.host)) throw httpErr(410, `${to.host} was removed from the network`)
+      const known = [cfg.host, ...knownPeers()].join(', ')
+      throw httpErr(404, `${to.host} is not a machine on this network, and nothing at that name answered as one (machines: ${known}). If it is new, run \`agentlink invite\` and join it first.`)
+    }
     /** @type {Omit<Envelope, 'sig'>} */
     const unsigned = {
       id: crypto.randomUUID(),
@@ -783,7 +792,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       const ekm = sock.getProtocol() === 'TLSv1.3' ? exporterOf(sock) : null
       if (!ekm || !gateOk(roster.gateDks(), ekm, req.headers['x-agentlink-gate'])) return reply(res, 404, { error: 'not found' })
       gated.add(sock)
-      return reply(res, 200, { fp: me.fp, sig: proveAuth(me.key, 'server', ekm) })
+      return reply(res, 200, { fp: me.fp, sig: proveAuth(me.key, 'server', ekm), proto: PROTO })
     }
     // ---- joining (an invite token is the credential) ----
     if (req.method === 'GET' && (p === '/join/install' || p === '/join/pkg.tgz')) {
@@ -830,7 +839,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
 
     if (p === '/health') {
       if (!local) return reply(res, 404, { error: 'not found' })
-      return reply(res, 200, { ok: true, host: cfg.host, net: cfg.net, fp: me.fp, version: VERSION, pid: process.pid })
+      return reply(res, 200, { ok: true, host: cfg.host, net: cfg.net, fp: me.fp, version: VERSION, proto: PROTO, pid: process.pid })
     }
 
     if (p.startsWith('/local/')) {

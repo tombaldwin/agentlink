@@ -52,6 +52,13 @@ Name a session with `AGENTLINK_NAME=<name> claude-link` (default: the project fo
     agentlink invite [--revoke]        agentlink remove <host>
     agentlink claude                   agentlink uninstall
 
+## Upgrading
+
+Re-run the install line from **Setup** on each machine (or `npm install -g @tombaldwin/agentlink`
+followed by `agentlink setup`). It keeps the machine's key, network and messages. Upgrade all
+your machines: a machine running an incompatible version is reported as such
+(`… runs an older version of agentlink`) and can't exchange messages until it's upgraded.
+
 ## Security
 
 Each machine has its own key. The network is the list of machines' keys, kept and shared by the

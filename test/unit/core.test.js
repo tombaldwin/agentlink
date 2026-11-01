@@ -7,8 +7,8 @@ import { newIdentity, fingerprint, certDer } from '../../src/cert.js'
 import { Roster } from '../../src/roster.js'
 
 test('normHost adds .local to bare names and normalises case', () => {
-  assert.equal(normHost('Anya'), 'anya.local')
-  assert.equal(normHost('anya.local.'), 'anya.local')
+  assert.equal(normHost('Laptop'), 'laptop.local')
+  assert.equal(normHost('laptop.local.'), 'laptop.local')
   assert.equal(normHost('box.tail1234.ts.net'), 'box.tail1234.ts.net')
   assert.equal(normHost('localhost'), 'localhost')
   assert.throws(() => normHost(''))
@@ -22,15 +22,15 @@ test('sanitizeName keeps names safe and non-empty', () => {
 })
 
 test('parseAddr splits name@host and defaults to this machine', () => {
-  assert.deepEqual(parseAddr('buffy@anya.local', 'me.local'), { name: 'buffy', host: 'anya.local' })
-  assert.deepEqual(parseAddr('buffy@anya', 'me.local'), { name: 'buffy', host: 'anya.local' })
-  assert.deepEqual(parseAddr('buffy', 'me.local'), { name: 'buffy', host: 'me.local' })
+  assert.deepEqual(parseAddr('reviewer@laptop.local', 'me.local'), { name: 'reviewer', host: 'laptop.local' })
+  assert.deepEqual(parseAddr('reviewer@laptop', 'me.local'), { name: 'reviewer', host: 'laptop.local' })
+  assert.deepEqual(parseAddr('reviewer', 'me.local'), { name: 'reviewer', host: 'me.local' })
   assert.deepEqual(parseAddr('a@b@c.local', 'me.local'), { name: 'a-b', host: 'c.local' })
 })
 
 test('parsePeer handles host, host:port and IPs', () => {
-  assert.deepEqual(parsePeer('anya'), { host: 'anya.local', addr: null })
-  assert.deepEqual(parsePeer('anya.local:7777'), { host: 'anya.local', addr: 'anya.local:7777' })
+  assert.deepEqual(parsePeer('laptop'), { host: 'laptop.local', addr: null })
+  assert.deepEqual(parsePeer('laptop.local:7777'), { host: 'laptop.local', addr: 'laptop.local:7777' })
   assert.deepEqual(parsePeer('100.64.1.2:7777'), { host: '100.64.1.2', addr: '100.64.1.2:7777' })
   assert.equal(parsePeer('bad host'), null)
   assert.equal(parsePeer(''), null)
@@ -152,7 +152,7 @@ test('roster: only earlier machines can remove, and a removed machine cannot fig
   assert.ok(r2.members.has(e.fp), 'machines the removed one added stay')
   // a replaced discovery key opens gates only for a while
   assert.deepEqual(r2.gateDks(), r2.dks)
-  assert.deepEqual(r2.gateDks(Date.now() + 31 * 86400_000), [r2.dk])
+  assert.deepEqual(r2.gateDks(Date.now() + 15 * 86400_000), [r2.dk])
 })
 
 test('roster: concurrent removals all stand, and the result never depends on arrival order', () => {
@@ -272,7 +272,7 @@ test('invite line pins the key and carries a URL- and shell-safe token', async (
 })
 
 test('only plain host:port addresses are dialable', () => {
-  assert.ok(validAddr('anya.local:7777'))
+  assert.ok(validAddr('laptop.local:7777'))
   assert.ok(validAddr('100.64.1.2:7777'))
   assert.ok(validAddr('[fe80::1]:7777'))
   for (const bad of ['169.254.169.254:80/latest?', 'a.local', 'a.local:0', 'a.local:99999', 'user@a.local:1', 'a b:1', null]) {
@@ -346,4 +346,21 @@ test('config: bad files throw, ttl is capped, and "localhost" is never an identi
   // no key or roster: not set up
   ;({ out } = await inSandbox({ '.agentlink/config.json': JSON.stringify({ host: 'box' }) }, load))
   assert.match(out.error, /not set up/)
+})
+
+test('a machine running another protocol version is reported as such, not as a stranger', async () => {
+  const https = await import('node:https')
+  const { authedRequest, ProtoError, PROTO } = await import('../../src/tls.js')
+  const srv = newIdentity(), me = newIdentity()
+  const server = https.createServer({ key: srv.key, cert: srv.cert }, (req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ fp: srv.fp, sig: 'x', proto: PROTO + 1 }))
+  })
+  await new Promise(r => server.listen(0, '127.0.0.1', () => r(undefined)))
+  const addr = `127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}`
+  const o = { addr, path: '/v1/sessions', identity: me, accept: new Map([[srv.fp, crypto.createPublicKey(srv.key)]]), dks: [newDiscoveryKey()] }
+  try {
+    await assert.rejects(authedRequest(o), e => e instanceof ProtoError && /newer version of agentlink/.test(e.message))
+    await assert.rejects(authedRequest({ ...o, anyProto: true }), /not the expected machine/, 'anyProto goes on to the identity check')
+  } finally { server.close() }
 })
