@@ -55,7 +55,8 @@ jobs:
       - name: Install with the private Node runtime
         # what machines without Node 22.13+ get: the runtime must stay off PATH and the home private
         run: |
-          export HOME="$RUNNER_TEMP/home2" SHELL=/bin/bash
+          # its own port: the previous step's node (another network) is still running on 7777
+          export HOME="$RUNNER_TEMP/home2" SHELL=/bin/bash AGENTLINK_PORT=7778
           mkdir -p "$HOME" "$RUNNER_TEMP/bin"
           export PATH="$RUNNER_TEMP/bin:$PATH"
           AGENTLINK_PRIVATE_NODE=1 AGENTLINK_PKG="$TGZ" AGENTLINK_NO_SERVICE=1 AGENTLINK_DISCOVERY=0 sh install.sh | tee out.txt
