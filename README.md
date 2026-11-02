@@ -131,3 +131,5 @@ name; see `scripts/build-app.mjs`):
     npm run build:app                     # dist/agentlink-<version>-macos-<arch>.zip
     npm run build:app -- --arch x64 --sign "Developer ID Application: …" --notarize <profile>
     AGENTLINK_TEST_EXE=dist/arm64/agentlink.app/Contents/MacOS/agentlink npm run test:e2e
+
+Releases (signed and notarized app, GitHub Release, npm): see [docs/releasing.md](docs/releasing.md).
