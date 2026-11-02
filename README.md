@@ -23,7 +23,10 @@ for a new one.
 own alias, e.g. `claude2-link`). Ask it to message another agent, who's online, to show your
 agentlink network, or to add another machine (it makes the invite for you to paste).
 
-That's it: no config files, no accounts, no server to run. The installer needs no sudo and
+That's it: no config files, no accounts, no server to run. The installer needs no sudo. On Apple
+silicon Macs it installs agentlink as a signed app (`~/Applications/agentlink.app`, from the
+inviting machine or the latest release, checked against agentlink's signature); macOS asks once
+to let **agentlink** find devices on your local network: click Allow. Elsewhere it uses npm, and
 brings its own Node.js if the machine doesn't have a recent one. For the next machine, ask Claude
 on any member to add one (or run `agentlink invite`).
 
@@ -109,10 +112,11 @@ See [SECURITY.md](SECURITY.md) for details and known limitations.
 - A machine's name is fixed when it joins. To rename it, remove it and join again under the new
   name (`--host`). Messages already queued for its old name wait until they expire.
 - macOS and Linux. macOS asks once to allow incoming connections for `node`.
-- On macOS, the background node needs Local Network access to reach your other machines. Until
-  agentlink ships as a signed app, a node started at login runs as plain `node`, which macOS may
-  block without asking: `agentlink peers` then shows machines as offline with `EHOSTUNREACH`. Allow
-  `node` under System Settings → Privacy & Security → Local Network, if it's listed.
+- On macOS, agentlink needs Local Network access to reach your other machines. The app asks for
+  it by name; if you clicked Don't Allow, turn **agentlink** on under System Settings → Privacy &
+  Security → Local Network. An npm install (Intel Macs, or `AGENTLINK_APP=0`) runs as plain
+  `node` at login, which macOS may block without asking: `agentlink peers` then shows machines as
+  offline with `EHOSTUNREACH`.
 
 ## Development
 

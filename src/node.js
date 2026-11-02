@@ -19,7 +19,7 @@ import { signEnvelope, verifyEnvelope, sha256, randomToken, gateOk, proveAuth, c
 import { fingerprint, shortFp, newIdentity, selfSignedCert } from './cert.js'
 import { Roster } from './roster.js'
 import { authedRequest, exporterOf, PinError, ProtoError, PROTO } from './tls.js'
-import { SEA, PKG_ROOT, readAsset } from './self.js'
+import { SEA, PKG_ROOT, readAsset, appBundle } from './self.js'
 import { parseAddr, normHost, sanitizeName, validAddr, tailscaleName, errMsg, netHint, ensureHomeDir, rosterPath, MAX_TTL_MS, VERSION } from './config.js'
 
 const MAX_REQ = 2 << 20
@@ -817,22 +817,24 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       return reply(res, 200, { fp: me.fp, sig: proveAuth(me.key, 'server', ekm), proto: PROTO })
     }
     // ---- joining (an invite token is the credential) ----
-    if (req.method === 'GET' && (p === '/join/install' || p === '/join/pkg.tgz')) {
+    if (req.method === 'GET' && (p === '/join/install' || p === '/join/pkg.tgz' || p === '/join/app.zip')) {
       const t = u.searchParams.get('t')
       if (!t || !inviteValid(t)) return reply(res, 404, { error: 'this invite is not valid (already used, expired or revoked): run `agentlink invite` on a member for a new one' })
       if (p === '/join/install') {
         res.writeHead(200, { 'content-type': 'text/x-shellscript' })
         return res.end(installScript(req.headers.host, cfg, t, invite?.fp || ''))
       }
-      let tgz, size
-      try { tgz = await packTarball(cfg.dir); size = (await fs.promises.stat(tgz)).size } catch (e) {
+      const bundle = appBundle()
+      if (p === '/join/app.zip' && !bundle) return reply(res, 404, { error: 'this machine does not run the agentlink app' })
+      let file, size
+      try { file = await (p === '/join/app.zip' && bundle ? packApp(cfg.dir, bundle) : packTarball(cfg.dir)); size = (await fs.promises.stat(file)).size } catch (e) {
         log('could not pack agentlink for an installing machine:', errMsg(e))
         return reply(res, 500, { error: 'package unavailable' })
       }
-      const stream = fs.createReadStream(tgz)
+      const stream = fs.createReadStream(file)
       stream.on('error', () => { if (!res.headersSent) reply(res, 500, { error: 'package unavailable' }); else res.destroy() })
       stream.on('open', () => {
-        res.writeHead(200, { 'content-type': 'application/gzip', 'content-length': size })
+        res.writeHead(200, { 'content-type': p === '/join/app.zip' ? 'application/zip' : 'application/gzip', 'content-length': size })
         stream.pipe(res)
       })
       return
@@ -1035,6 +1037,20 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
 }
 
 /** @type {Promise<string> | null} */
+let packingApp = null
+/** Zip the app this node runs from, for a Mac joining through us. @param {string} dir @param {string} bundle */
+function packApp(dir, bundle) {
+  return packingApp ||= (async () => {
+    const out = path.join(dir, 'dist')
+    fs.mkdirSync(out, { recursive: true })
+    const zip = path.join(out, 'agentlink-app.zip')
+    fs.rmSync(zip, { force: true })
+    await execFileP('ditto', ['-c', '-k', '--keepParent', bundle, zip])
+    return zip
+  })().finally(() => setTimeout(() => { packingApp = null }, 60_000))
+}
+
+/** @type {Promise<string> | null} */
 let packing = null
 /** npm-pack this installation so another machine can install it from us. */
 /** @param {string} dir @returns {Promise<string>} path of the tarball */
@@ -1066,6 +1082,8 @@ function installScript(hostHeader, cfg, token, pin) {
   if (!/:\d+$/.test(used)) used += `:${cfg.port}`
   const preset = [
     `AGENTLINK_PKG=${sh(`https://${used}/join/pkg.tgz?t=${token}`)}`,
+    // a Mac joining a machine that runs the app gets the same app (Apple silicon only)
+    ...(appBundle() ? [`AGENTLINK_APP_URL=${sh(`https://${used}/join/app.zip?t=${token}`)}`] : []),
     `AGENTLINK_PIN=${sh(pin)}`,
     // the token is passed in the environment: setup's command line is visible to other users (ps)
     `AGENTLINK_TOKEN=${sh(token)}; export AGENTLINK_TOKEN`,

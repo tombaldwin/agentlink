@@ -36,6 +36,11 @@ First release.
   new aliases are loaded.
 - A session left running across an upgrade asks to be restarted instead of replacing the newer
   node with its own version.
+- On Apple silicon Macs, agentlink installs as a signed app (`~/Applications/agentlink.app`), so
+  macOS asks for Local Network access by name and the permission covers agentlink only. A Mac
+  joining through a machine that runs the app gets the same app over the pinned invite
+  connection; otherwise it comes from the latest GitHub release. The installer checks the app's
+  signature and team, and falls back to the npm install only if no app is available.
 - Sending to a name that isn't a machine on the network (a typo) fails at once and lists the
   machines, instead of queueing; configured peers (Tailscale names, IPs) are still queued while
   offline.

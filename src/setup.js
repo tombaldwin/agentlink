@@ -11,6 +11,7 @@ import { Roster } from './roster.js'
 import { peerCertificate, pinnedRequest } from './tls.js'
 import { Local } from './local.js'
 import { openStore } from './store.js'
+import { appBundle, SEA } from './self.js'
 import { claudeAccounts, register, unregister, writeShellBlock, removeShellBlock, claudeBin, selfCmd, checkAdapter } from './claude.js'
 
 /**
@@ -147,6 +148,13 @@ export async function setup({ host, peers = [], noService, noClaude, noAlias, ne
   const binDir = process.env.AGENTLINK_BIN_DIR
   const onPath = !binDir || (process.env.AGENTLINK_ORIG_PATH ?? process.env.PATH ?? '').split(':').includes(binDir)
   const startNow = onPath ? 'agentlink claude' : `${path.join(binDir, 'agentlink')} claude`
+  // moved to the app from an npm install: the old copy still works, but is no longer what runs
+  if (SEA) {
+    const real = (/** @type {string} */ p) => { try { return fs.realpathSync(p) } catch { return '' } }
+    const old = (process.env.AGENTLINK_ORIG_PATH ?? process.env.PATH ?? '').split(':').filter(d => d && d !== binDir)
+      .map(d => path.join(d, 'agentlink')).find(f => real(f) && real(f) !== real(process.execPath))
+    if (old) console.log(`  (an earlier npm install of agentlink is still at ${old}; new terminals use the app. Remove the old one with: npm uninstall -g @tombaldwin/agentlink)`)
+  }
   console.log(`
 ${broken ? 'Done, but see the warning above.' : 'Done.'} Start Claude with agentlink enabled using:
   ${aliases.join('   ') || 'agentlink claude'}${aliases.length ? `
@@ -316,7 +324,7 @@ Its key, messages and settings remain in ${homeDir()}: \`agentlink setup\` turns
 To remove it completely:
   - take this machine off the network: on another member, run  agentlink remove ${host || '<this machine>'}
   - delete ${homeDir()}
-  - uninstall the program: npm uninstall -g @tombaldwin/agentlink  (not needed if agentlink brought its own Node.js: that lives in ${homeDir()})`)
+  - uninstall the program: ${appBundle() ? `delete ${appBundle()}` : `npm uninstall -g @tombaldwin/agentlink  (not needed if agentlink brought its own Node.js: that lives in ${homeDir()})`}`)
 }
 
 /** systemd unit quoting: double quotes, escaped \\ and ", and % doubled (specifier escape). */

@@ -21,6 +21,17 @@ export const PKG_ROOT = SEA ? '' : path.resolve(path.dirname(fileURLToPath(impor
 export const BIN = SEA ? process.execPath : path.join(PKG_ROOT, 'bin', 'agentlink.js')
 
 /**
+ * The app bundle this executable runs from (the macOS app on Apple silicon), or null. A machine
+ * running the app hands it to Macs that join through its invites.
+ * @returns {string | null}
+ */
+export function appBundle() {
+  if (!SEA || process.platform !== 'darwin' || process.arch !== 'arm64') return null
+  const dir = path.resolve(process.execPath, '..', '..', '..')
+  return dir.endsWith('.app') && fs.existsSync(path.join(dir, 'Contents', 'Info.plist')) ? dir : null
+}
+
+/**
  * A file agentlink ships with (install.sh, the npm package). For an npm install, `name` is
  * relative to the package directory; a single executable has it embedded under the same name.
  * @param {string} name @returns {Buffer}
