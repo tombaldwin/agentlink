@@ -120,3 +120,10 @@ See [SECURITY.md](SECURITY.md) for details and known limitations.
                 # via holders, dedupe, poll mode, outsiders, forged and altered messages, strangers
                 # at stored addresses, relays, invites and joining, removal, big backlogs, node
                 # restart, IP/Tailscale aliases
+
+The macOS app (agentlink as a single signed executable, so macOS asks for Local Network access by
+name; see `scripts/build-app.mjs`):
+
+    npm run build:app                     # dist/agentlink-<version>-macos-<arch>.zip
+    npm run build:app -- --arch x64 --sign "Developer ID Application: …" --notarize <profile>
+    AGENTLINK_TEST_EXE=dist/arm64/agentlink.app/Contents/MacOS/agentlink npm run test:e2e

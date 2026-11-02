@@ -19,6 +19,8 @@ import { Local } from '../src/local.js'
 import { readIdentity } from '../src/config.js'
 
 const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'agentlink.js')
+// AGENTLINK_TEST_EXE runs everything with a built single executable (the macOS app) instead
+const [EXE, ...PRE] = process.env.AGENTLINK_TEST_EXE ? [path.resolve(process.env.AGENTLINK_TEST_EXE)] : [process.execPath, '--no-warnings', BIN]
 const ROOT = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'agentlink-e2e-'))
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const NODES = { a: 17771, b: 17772, c: 17773, d: 17774, e: 17775, f: 17776, g: 17777, h: 17778, i: 17779, j: 17780, k: 17781, l: 17782 }
@@ -51,7 +53,7 @@ const localOf = n => new Local({ identity: readIdentity(path.join(ROOT, n)), por
 const procs = {}
 async function startNode(n) {
   const out = fs.openSync(path.join(ROOT, n, 'node.log'), 'a')
-  procs[n] = spawn(process.execPath, ['--no-warnings', BIN, 'node'], { env: envFor(n), stdio: ['ignore', out, out] })
+  procs[n] = spawn(EXE, [...PRE, 'node'], { env: envFor(n), stdio: ['ignore', out, out] })
   const local = localOf(n)
   for (let i = 0; i < 50; i++) {
     const h = await local.health()
@@ -68,24 +70,24 @@ async function stopNode(n) {
   await done
 }
 function cliAsync(n, ...args) {
-  return new Promise((resolve, reject) => execFile(process.execPath, ['--no-warnings', BIN, ...args], { env: envFor(n), encoding: 'utf8' },
+  return new Promise((resolve, reject) => execFile(EXE, [...PRE, ...args], { env: envFor(n), encoding: 'utf8' },
     (err, out) => err ? reject(err) : resolve(out.trim())))
 }
 /** A command expected to fail: its stderr. */
 function cliFails(n, ...args) {
-  const r = spawnSync(process.execPath, ['--no-warnings', BIN, ...args], { env: envFor(n), encoding: 'utf8' })
+  const r = spawnSync(EXE, [...PRE, ...args], { env: envFor(n), encoding: 'utf8' })
   assert.notEqual(r.status, 0, `expected \`agentlink ${args.join(' ')}\` to fail:\n${r.stdout}`)
   return r.stderr
 }
 function cli(n, ...args) {
-  return execFileSync(process.execPath, ['--no-warnings', BIN, ...args], { env: envFor(n), encoding: 'utf8' }).trim()
+  return execFileSync(EXE, [...PRE, ...args], { env: envFor(n), encoding: 'utf8' }).trim()
 }
 
 // mode: false = channel session, true = --poll, 'plain' = a session without the channel enabled
 async function adapter(n, name, poll = false) {
   const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: ['--no-warnings', BIN, 'mcp', '--name', name, ...(poll === 'plain' ? [] : poll ? ['--poll'] : ['--channel'])],
+    command: EXE,
+    args: [...PRE, 'mcp', '--name', name, ...(poll === 'plain' ? [] : poll ? ['--poll'] : ['--channel'])],
     env: envFor(n), stderr: 'ignore',
   })
   const client = new Client({ name: 'test', version: '0' }, { capabilities: {} })
@@ -154,7 +156,7 @@ try {
 
   let bob
   await step('the adapter passes its start-up check', async () => {
-    const r = spawnSync(process.execPath, ['--no-warnings', BIN, 'mcp', '--check'], { encoding: 'utf8' })
+    const r = spawnSync(EXE, [...PRE, 'mcp', '--check'], { encoding: 'utf8' })
     assert.equal(r.status, 0, r.stderr)
     assert.equal(r.stdout.trim(), 'ok')
   })
@@ -519,8 +521,8 @@ try {
 
   // ---- setup, invites, joining, removal (real `agentlink setup`, nodes on ports i/k/l) ----
   const setupEnv = (n, extra = {}) => ({ ...process.env, AGENTLINK_HOME: path.join(ROOT, `s-${n}`), AGENTLINK_PORT: String(NODES[n]), AGENTLINK_HOST: `${n}.test`, AGENTLINK_DISCOVERY: '0', AGENTLINK_AUTO_ALIASES: '0', ...extra })
-  const setup = (n, args = [], extra = {}) => spawnSync(process.execPath, ['--no-warnings', BIN, 'setup', ...args, '--no-service', '--no-claude', '--no-alias'], { env: setupEnv(n, extra), encoding: 'utf8', timeout: 60_000 })
-  const scli = (n, ...args) => spawnSync(process.execPath, ['--no-warnings', BIN, ...args], { env: setupEnv(n), encoding: 'utf8', timeout: 30_000 })
+  const setup = (n, args = [], extra = {}) => spawnSync(EXE, [...PRE, 'setup', ...args, '--no-service', '--no-claude', '--no-alias'], { env: setupEnv(n, extra), encoding: 'utf8', timeout: 60_000 })
+  const scli = (n, ...args) => spawnSync(EXE, [...PRE, ...args], { env: setupEnv(n), encoding: 'utf8', timeout: 30_000 })
   const sLocal = n => new Local({ identity: readIdentity(path.join(ROOT, `s-${n}`)), port: NODES[n], dir: path.join(ROOT, `s-${n}`) })
   const parseInvite = out => {
     const m = out.match(/curl -fsSL -k --pinnedpubkey "sha256\/\/([^"]+)" "https:\/\/[^/]+\/join\/install\?t=([^"]+)"/)
@@ -649,7 +651,7 @@ try {
 
   await step('a standing-by node does not start after uninstall', async () => {
     const env = setupEnv('i')
-    const standby = spawn(process.execPath, ['--no-warnings', BIN, 'node'], { env, stdio: 'ignore' })
+    const standby = spawn(EXE, [...PRE, 'node'], { env, stdio: 'ignore' })
     await sleep(1000)
     fs.writeFileSync(path.join(ROOT, 's-i', 'disabled'), '')        // what `agentlink uninstall` writes first
     await sLocal('i').req('POST', '/local/shutdown')
@@ -690,7 +692,7 @@ try {
 
   await step('a node started on demand exits when one is already running', async () => {
     assert.ok(await sLocal('i').health(), 'a node is running')
-    const r = spawnSync(process.execPath, ['--no-warnings', BIN, 'node', '--on-demand'], { env: setupEnv('i'), encoding: 'utf8', timeout: 10_000 })
+    const r = spawnSync(EXE, [...PRE, 'node', '--on-demand'], { env: setupEnv('i'), encoding: 'utf8', timeout: 10_000 })
     assert.equal(r.status, 0, 'exited on its own')
     assert.match(r.stderr, /already running/)
   })

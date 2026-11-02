@@ -10,7 +10,7 @@ import { spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import { authedRequest, authedRaw, PinError, PROTO } from './tls.js'
 import { ensureHomeDir, errMsg, readDks, VERSION } from './config.js'
-import { BIN, nodePath } from './claude.js'
+import { selfCmd } from './claude.js'
 
 const sleep = (/** @type {number} */ ms) => new Promise(r => setTimeout(r, ms))
 
@@ -108,8 +108,9 @@ export class Local {
     let exited = false, spawnErr = ''
     try {
       // --on-demand: if another node wins the race for the port, this one exits instead of standing by.
-      // nodePath(): a Node path that survives upgrades (the versioned execPath may be removed by brew).
-      const child = spawn(nodePath(), ['--no-warnings', BIN, 'node', '--on-demand'], { detached: true, stdio: ['ignore', out, out], env: process.env })
+      // selfCmd(): a Node path that survives upgrades (the versioned execPath may be removed by brew)
+      const [cmd, ...args] = selfCmd()
+      const child = spawn(cmd, [...args, 'node', '--on-demand'], { detached: true, stdio: ['ignore', out, out], env: process.env })
       child.on('error', e => { exited = true; spawnErr = errMsg(e) })   // e.g. ENOENT: must not crash the caller
       child.on('exit', () => { exited = true })
       child.unref()

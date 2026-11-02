@@ -13,13 +13,13 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { fileURLToPath } from 'node:url'
 import { openStore } from './store.js'
 import { startDiscovery } from './discovery.js'
 import { signEnvelope, verifyEnvelope, sha256, randomToken, gateOk, proveAuth, checkAuth } from './crypto.js'
 import { fingerprint, shortFp, newIdentity, selfSignedCert } from './cert.js'
 import { Roster } from './roster.js'
 import { authedRequest, exporterOf, PinError, ProtoError, PROTO } from './tls.js'
+import { SEA, PKG_ROOT, readAsset } from './self.js'
 import { parseAddr, normHost, sanitizeName, validAddr, tailscaleName, errMsg, netHint, ensureHomeDir, rosterPath, MAX_TTL_MS, VERSION } from './config.js'
 
 const MAX_REQ = 2 << 20
@@ -1034,7 +1034,6 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
   return { server, shutdown }
 }
 
-const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 /** @type {Promise<string> | null} */
 let packing = null
 /** npm-pack this installation so another machine can install it from us. */
@@ -1044,6 +1043,11 @@ function packTarball(dir) {
     const out = path.join(dir, 'dist')
     fs.rmSync(out, { recursive: true, force: true })
     fs.mkdirSync(out, { recursive: true })
+    if (SEA) {   // the app carries the npm package it was built from
+      const file = path.join(out, 'agentlink.tgz')
+      fs.writeFileSync(file, readAsset('agentlink.tgz'))
+      return file
+    }
     const { stdout } = await execFileP('npm', ['pack', '--silent', '--pack-destination', out], { cwd: PKG_ROOT })
     return path.join(out, stdout.trim().split('\n').pop() || '')
   })().finally(() => setTimeout(() => { packing = null }, 60_000))
@@ -1067,7 +1071,7 @@ function installScript(hostHeader, cfg, token, pin) {
     `AGENTLINK_TOKEN=${sh(token)}; export AGENTLINK_TOKEN`,
     `set -- --join ${sh(used)} --pin ${sh(pin)} --net ${sh(cfg.net)}${used !== `${cfg.host}:${cfg.port}` ? ` --peer ${sh(`${cfg.host}:${cfg.port}`)}` : ''}`,
   ].join('\n')
-  return fs.readFileSync(path.join(PKG_ROOT, 'install.sh'), 'utf8').replace('#@@PRESET@@', () => preset)   // no $-patterns
+  return readAsset('install.sh').toString('utf8').replace('#@@PRESET@@', () => preset)   // no $-patterns
 }
 
 /** @param {http.ServerResponse} res @param {string} event @param {unknown} data */

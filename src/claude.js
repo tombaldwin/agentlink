@@ -3,10 +3,10 @@ import os from 'node:os'
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
 import { errMsg, homeDir } from './config.js'
 
-export const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'agentlink.js')
+import { SEA, BIN } from './self.js'
+export { BIN }
 const HOME = os.homedir()
 const BEGIN = '# >>> agentlink >>> (managed by `agentlink setup`; re-run it to refresh)'
 const END = '# <<< agentlink <<<'
@@ -25,7 +25,9 @@ export function nodePath() {
   }
   return process.execPath
 }
-export const adapterCmd = () => [nodePath(), '--no-warnings', BIN, 'mcp']
+/** The command that runs agentlink: node and bin/agentlink.js, or the single executable. */
+export const selfCmd = () => SEA ? [process.execPath] : [nodePath(), '--no-warnings', BIN]
+export const adapterCmd = () => [...selfCmd(), 'mcp']
 
 /**
  * Can Claude Code actually start the adapter it is registered with? Runs the registered command
@@ -40,14 +42,14 @@ export function checkAdapter() {
   if (r.status === 0) return null
   const why = (r.error ? errMsg(r.error) : (r.stderr || r.stdout || `exit ${r.status}`)).trim().split('\n').filter(Boolean).slice(-2).join(' ')
   const root = path.dirname(path.dirname(BIN))
-  const clone = fs.existsSync(path.join(root, '.git')) && !fs.existsSync(path.join(root, 'node_modules'))
+  const clone = !SEA && fs.existsSync(path.join(root, '.git')) && !fs.existsSync(path.join(root, 'node_modules'))
   return clone ? `${why} — this is a git clone without its dependencies: run \`npm install\` in ${root}, then \`agentlink setup\` again` : why
 }
 /** Double-quote for sh, escaping the characters that stay special inside double quotes. */
 const dq = (/** @type {unknown} */ v) => `"${String(v).replace(/[\\"$`]/g, '\\$&')}"`
 /** Single-quote for sh. */
 const sq = (/** @type {unknown} */ v) => `'${String(v).replace(/'/g, `'\\''`)}'`
-const launcher = () => `${dq(nodePath())} --no-warnings ${dq(BIN)} claude`
+const launcher = () => `${selfCmd().map(a => a.startsWith('--') ? a : dq(a)).join(' ')} claude`
 
 /** Full path of `cmd` on PATH, or null. @param {string} cmd */
 export function which(cmd) {

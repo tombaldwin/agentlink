@@ -11,7 +11,7 @@ import { Roster } from './roster.js'
 import { peerCertificate, pinnedRequest } from './tls.js'
 import { Local } from './local.js'
 import { openStore } from './store.js'
-import { claudeAccounts, register, unregister, writeShellBlock, removeShellBlock, claudeBin, nodePath, BIN, checkAdapter } from './claude.js'
+import { claudeAccounts, register, unregister, writeShellBlock, removeShellBlock, claudeBin, selfCmd, checkAdapter } from './claude.js'
 
 /**
  * Service names. The usual install (~/.agentlink) gets the plain names; any other agentlink home
@@ -242,7 +242,7 @@ export function installService() {
   const env = { PATH: process.env.PATH, ...(process.env.AGENTLINK_HOME ? { AGENTLINK_HOME: cfgDir } : {}) }
   if (process.platform === 'darwin') {
     const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', `${LABEL}.plist`)
-    const args = [nodePath(), '--no-warnings', BIN, 'node']
+    const args = [...selfCmd(), 'node']
     fs.mkdirSync(path.dirname(plist), { recursive: true })
     fs.writeFileSync(plist, `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -276,7 +276,7 @@ export function installService() {
 Description=agentlink agent messaging node
 
 [Service]
-ExecStart=${[nodePath(), '--no-warnings', BIN, 'node'].map(sdQuote).join(' ')}
+ExecStart=${[...selfCmd(), 'node'].map(sdQuote).join(' ')}
 ${Object.entries(env).map(([k, v]) => `Environment=${sdQuote(`${k}=${v}`)}`).join('\n')}
 Restart=always
 RestartSec=5
