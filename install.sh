@@ -42,7 +42,9 @@ fetch_invite() {
 install_app() {
   [ "$(uname -s)-$(uname -m)" = Darwin-arm64 ] && [ "${AGENTLINK_APP:-1}" != 0 ] || return 1
   if [ -n "${AGENTLINK_APP_ZIP:-}" ]; then
-    cp "$AGENTLINK_APP_ZIP" "$TMP/app.zip" || return 1                 # a local build
+    # a local build: asked for by name, so failing to read it is an error, not a reason to use npm
+    cp "$AGENTLINK_APP_ZIP" "$TMP/app.zip" ||
+      { echo "agentlink: cannot read $AGENTLINK_APP_ZIP (on macOS, the terminal may not be allowed into that folder: move the file elsewhere, e.g. your home folder) — aborting"; exit 1; }
   elif [ -n "${AGENTLINK_APP_URL:-}" ]; then
     echo "Fetching agentlink.app from the inviting machine..."
     fetch_invite "$AGENTLINK_APP_URL" "$TMP/app.zip" || return 1
