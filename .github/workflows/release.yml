@@ -19,9 +19,8 @@ jobs:
   macos-app:
     runs-on: macos-latest          # Apple silicon
     timeout-minutes: 45
-    env:
-      KEYCHAIN: ${{ runner.temp }}/agentlink-signing.keychain-db
     steps:
+      - run: echo "KEYCHAIN=$RUNNER_TEMP/agentlink-signing.keychain-db" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
