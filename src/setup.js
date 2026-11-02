@@ -26,6 +26,7 @@ function serviceNames() {
 }
 const uid = () => process.getuid?.() ?? 0   // launchd domain (macOS only, where getuid exists)
 const sleep = (/** @type {number} */ ms) => new Promise(r => setTimeout(r, ms))
+const sleepSync = (/** @type {number} */ ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 const ok = (/** @type {string} */ m) => console.log(`  ✓ ${m}`)
 const warn = (/** @type {string} */ m) => console.log(`  ! ${m}`)
 
@@ -257,9 +258,16 @@ export function installService() {
 </dict></plist>
 `)
     const dom = `gui/${uid()}`
+    // bootout returns before launchd has finished removing the job, and loading it again meanwhile
+    // fails ("Bootstrap failed: 5: Input/output error"): wait for it to go, then retry the load
     spawnSync('launchctl', ['bootout', `${dom}/${LABEL}`], { stdio: 'ignore' })
-    execFileSync('launchctl', ['bootstrap', dom, plist], { stdio: 'pipe' })
-    return
+    for (let i = 0; i < 50 && spawnSync('launchctl', ['print', `${dom}/${LABEL}`], { stdio: 'ignore' }).status === 0; i++) sleepSync(100)
+    for (let i = 0; ; i++) {
+      try { execFileSync('launchctl', ['bootstrap', dom, plist], { stdio: 'pipe' }); return } catch (e) {
+        if (i >= 9) throw e
+        sleepSync(500)
+      }
+    }
   }
   if (process.platform === 'linux') {
     const unit = path.join(os.homedir(), '.config', 'systemd', 'user', `${UNIT}.service`)
