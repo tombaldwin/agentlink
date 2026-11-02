@@ -11,7 +11,7 @@ import { Roster } from './roster.js'
 import { peerCertificate, pinnedRequest } from './tls.js'
 import { Local } from './local.js'
 import { openStore } from './store.js'
-import { claudeAccounts, register, unregister, writeShellBlock, removeShellBlock, claudeBin, nodePath, BIN } from './claude.js'
+import { claudeAccounts, register, unregister, writeShellBlock, removeShellBlock, claudeBin, nodePath, BIN, checkAdapter } from './claude.js'
 
 /**
  * Service names. The usual install (~/.agentlink) gets the plain names; any other agentlink home
@@ -56,7 +56,9 @@ export async function setup({ host, peers = [], noService, noClaude, noAlias, ne
   /** @type {string[]} */
   let allPeers = []
   let banner = ''
-  let invite = false              // print an invite: only for a new network or a machine that just joined
+  // print an invite: only for a new network. A machine that just joined doesn't get one: an open
+  // invite makes the machine recognisable on its port for a day, and you add machines when you need them
+  let invite = false
 
   if (join) {
     // 1. the machine at the invite's address must present the key the invite names (its invite key)
@@ -85,7 +87,6 @@ export async function setup({ host, peers = [], noService, noClaude, noAlias, ne
     if (myHost !== joined.members.get(id.fp)?.host) throw new Error('internal: name mismatch')
     allPeers = [...new Set([...(same ? existing.peers || [] : []), join, ...peers])]
     banner = same ? `Already a member of this network (via ${data.host}).` : `Joined the network via ${data.host}.`
-    invite = !same
   } else if (!member || newNetwork) {
     if (identity && roster && !member && !newNetwork) {
       throw new Error(roster.removed.has(identity.fp)
@@ -125,18 +126,30 @@ export async function setup({ host, peers = [], noService, noClaude, noAlias, ne
   try { const h = await local.ensureNode(); ok(`node running on port ${cfg.port} (pid ${'pid' in h ? h.pid : '?'})`); running = true }
   catch (e) { warn(errMsg(e)) }
 
-  if (!noClaude) registerClaude()
+  let broken = null
+  if (!noClaude) {
+    registerClaude()
+    broken = checkAdapter()
+    if (broken) warn(`Claude Code can't start agentlink, so sessions won't have it until this is fixed: ${broken}`)
+  }
   /** @type {string[]} */
   let aliases = []
+  let rc = ''
   if (!noAlias) {
     const r = writeShellBlock({ pathDir: process.env.AGENTLINK_BIN_DIR })
     aliases = r.aliases.map(a => a.name)
+    rc = r.rc
     ok(`shell aliases in ${r.rc}: ${aliases.join(', ')}`)
   }
 
+  // this shell doesn't have the new aliases (or PATH entry) yet: say how to start Claude right now too
+  const binDir = process.env.AGENTLINK_BIN_DIR
+  const onPath = !binDir || (process.env.AGENTLINK_ORIG_PATH ?? process.env.PATH ?? '').split(':').includes(binDir)
+  const startNow = onPath ? 'agentlink claude' : `${path.join(binDir, 'agentlink')} claude`
   console.log(`
-Done. Open a new terminal, then start Claude with agentlink enabled using:
-  ${aliases.join('   ') || 'agentlink claude'}
+${broken ? 'Done, but see the warning above.' : 'Done.'} Start Claude with agentlink enabled using:
+  ${aliases.join('   ') || 'agentlink claude'}${aliases.length ? `
+(the aliases work in new terminals; in this one, run \`source ${rc}\` first, or use: ${startNow})` : ''}
 (or, for any account: CLAUDE_CONFIG_DIR=<dir> agentlink claude — new accounts are enabled automatically)
 Agents address each other as name@host, e.g. "send the test results to reviewer@laptop.local".
 Name a session with AGENTLINK_NAME=<name> (default: the project folder name).`)
@@ -186,6 +199,14 @@ function portInUse(port) {
  */
 export const installLine = (inv, host) =>
   `curl -fsSL -k --pinnedpubkey "sha256//${inv.fp}" "https://${host}:${inv.port}/join/install?t=${inv.token}" | sh`
+
+/** Unused invites, for people. @param {{ created_at: number, expires_at: number }[]} invites */
+export function formatInvites(invites) {
+  if (!invites.length) return 'No unused invites.'
+  const t = (/** @type {number} */ ms) => new Date(ms).toLocaleString()
+  return [`${invites.length} unused invite(s) (\`agentlink invite --revoke\` cancels them):`,
+    ...invites.map(i => `  made ${t(i.created_at)}, expires ${t(i.expires_at)}`)].join('\n')
+}
 
 /** Ready-to-paste instructions (for a person, or for Claude) to add another machine. */
 /** @param {{ token: string, fp: string, host: string, port: number, tailscale?: string | null }} inv */

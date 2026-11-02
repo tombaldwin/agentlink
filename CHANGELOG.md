@@ -25,6 +25,17 @@ First release.
 - Machines exchange a protocol version first: a machine running an incompatible version is
   reported as needing an upgrade, not as a stranger. Sessions restart a node left running from an
   older version.
+- `agentlink peers` (and the `peers` / `network` tools) say why a machine is offline, with a hint
+  when macOS Local Network privacy is the likely cause; the node log records when a machine stops
+  or starts answering. Connection errors to names with several addresses are readable.
+- `agentlink invite --list` (and the `invite` tool's `list`) shows unused invites. Commands
+  reject unknown options instead of ignoring them. A machine that has just joined no longer opens
+  an invite of its own.
+- Setup and `agentlink claude` check that Claude Code can start the adapter (e.g. a git clone
+  without `npm install`), and setup says how to start Claude in the current terminal, before the
+  new aliases are loaded.
+- A session left running across an upgrade asks to be restarted instead of replacing the newer
+  node with its own version.
 - Sending to a name that isn't a machine on the network (a typo) fails at once and lists the
   machines, instead of queueing; configured peers (Tailscale names, IPs) are still queued while
   offline.

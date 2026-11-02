@@ -54,8 +54,11 @@ Name a session with `AGENTLINK_NAME=<name> claude-link` (default: the project fo
 Claude handles everyday use and invites; these are for terminals and scripts.
 
     agentlink send <name@host> <msg>   agentlink peers     agentlink status
-    agentlink invite [--revoke]        agentlink remove <host>
+    agentlink invite [--list|--revoke] agentlink remove <host>
     agentlink claude                   agentlink uninstall
+
+`agentlink peers` says why a machine is offline (the node log, `~/.agentlink/node.log`, records
+when a machine stops or starts answering).
 
 ## Upgrading
 
@@ -63,6 +66,8 @@ Re-run the install line from **Setup** on each machine (or `npm install -g @tomb
 followed by `agentlink setup`). It keeps the machine's key, network and messages. Upgrade all
 your machines: a machine running an incompatible version is reported as such
 (`… runs an older version of agentlink`) and can't exchange messages until it's upgraded.
+Claude sessions that were running during the upgrade say they need restarting
+(`agentlink claude --continue` resumes the conversation); they never stop the newer node.
 
 ## Security
 
@@ -104,6 +109,10 @@ See [SECURITY.md](SECURITY.md) for details and known limitations.
 - A machine's name is fixed when it joins. To rename it, remove it and join again under the new
   name (`--host`). Messages already queued for its old name wait until they expire.
 - macOS and Linux. macOS asks once to allow incoming connections for `node`.
+- On macOS, the background node needs Local Network access to reach your other machines. Until
+  agentlink ships as a signed app, a node started at login runs as plain `node`, which macOS may
+  block without asking: `agentlink peers` then shows machines as offline with `EHOSTUNREACH`. Allow
+  `node` under System Settings → Privacy & Security → Local Network, if it's listed.
 
 ## Development
 

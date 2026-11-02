@@ -20,7 +20,7 @@ import { signEnvelope, verifyEnvelope, sha256, randomToken, gateOk, proveAuth, c
 import { fingerprint, shortFp, newIdentity, selfSignedCert } from './cert.js'
 import { Roster } from './roster.js'
 import { authedRequest, exporterOf, PinError, ProtoError, PROTO } from './tls.js'
-import { parseAddr, normHost, sanitizeName, validAddr, tailscaleName, errMsg, ensureHomeDir, rosterPath, MAX_TTL_MS, VERSION } from './config.js'
+import { parseAddr, normHost, sanitizeName, validAddr, tailscaleName, errMsg, netHint, ensureHomeDir, rosterPath, MAX_TTL_MS, VERSION } from './config.js'
 
 const MAX_REQ = 2 << 20
 const MAX_JOIN_REQ = 16 << 10
@@ -119,6 +119,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     revokeInvites: db.prepare(`DELETE FROM invites WHERE used_at IS NULL`),
     gcInvites: db.prepare(`DELETE FROM invites WHERE expires_at < ?`),
     openInvite: db.prepare(`SELECT 1 FROM invites WHERE used_at IS NULL AND expires_at > ? LIMIT 1`),
+    openInvites: db.prepare(`SELECT created_at, expires_at FROM invites WHERE used_at IS NULL AND expires_at > ? ORDER BY created_at`),
   }
 
   // ---------- the certificate we present ----------
@@ -260,10 +261,14 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     try {
       r = await authedRequest({ addr: target, method, path: p, body, headers: { 'x-agentlink-port': String(cfg.port) }, identity: me, accept: new Map([[m.fp, m.publicKey]]), dks: roster.dks, timeout }, MAX_REQ)
     } catch (e) {
-      if (e instanceof PinError) throw new Error(`${host} at ${target}: answered by a different machine (not ${host}'s key)`)
-      if (e instanceof ProtoError) throw new Error(`${host}: ${e.message}`)
-      throw new Error(`${host} at ${target}: ${errMsg(e)}`)
+      // reason: why the machine can't be reached, without its name (peers shows it next to the name)
+      const reason = e instanceof PinError ? `${target} is answered by a different machine (not ${host}'s key)`
+        : e instanceof ProtoError ? e.message
+        : `${target}: ${errMsg(e)}${netHint(e)}`
+      if (!addr) noteReach(host, reason)   // a probe of an unverified address says nothing about the machine
+      throw Object.assign(new Error(e instanceof ProtoError ? `${host}: ${reason}` : `${host} at ${reason}`), { reason })
     }
+    if (!addr) noteReach(host, null)
     // a member that hasn't heard we joined yet: tell it (hello carries the records that add us), then retry
     if (r.status === 403 && p !== '/v1/hello' && !retried) {
       await call(host, 'POST', '/v1/hello', helloBody(), { timeout: 2500, addr })
@@ -696,12 +701,29 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     return s?.live ? 'pushed to its live session' : s ? `waiting in ${name}'s inbox (the session is connected but reads with the inbox tool)` : `queued until ${name} connects`
   }
 
+  /** @type {Map<string, string>} host -> why it was last unreachable ('' once reached) */
+  const reach = new Map()
+  /**
+   * Log when a machine becomes unreachable, or reachable again (not every attempt).
+   * @param {string} host @param {string | null} reason null: reached
+   */
+  function noteReach(host, reason) {
+    const prev = reach.get(host)
+    if (reason === null) {
+      if (prev) log(`${host} is reachable again`)
+      reach.set(host, '')
+    } else if (prev !== reason) {
+      log(`cannot reach ${host}: ${reason}`)
+      reach.set(host, reason)
+    }
+  }
+
   async function localPeers() {
     const remote = await Promise.all(knownPeers().map(async h => {
       try {
         const r = await call(h, 'GET', '/v1/sessions', undefined, { timeout: 1500 })
         return { host: h, online: true, sessions: Array.isArray(r.sessions) ? r.sessions.map(String) : [] }
-      } catch { return { host: h, online: false, sessions: [] } }
+      } catch (e) { return { host: h, online: false, sessions: [], error: /** @type {any} */ (e).reason || errMsg(e) } }
     }))
     return { self: cfg.host, local: [...sessions.keys()], remote }
   }
@@ -945,6 +967,8 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
         const { token, fp } = newInvite()
         return reply(res, 200, { token, fp, host: cfg.host, port: cfg.port, tailscale: ts, expires_at: now() + INVITE_TTL_MS })
       }
+      case 'GET /local/invites':                // open invites (their tokens are stored hashed, so only times)
+        return reply(res, 200, { invites: q.openInvites.all(now()) })
       case 'POST /local/invite/revoke': {
         const revoked = Number(q.revokeInvites.run().changes)
         rotate()
