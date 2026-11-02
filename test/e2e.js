@@ -153,6 +153,12 @@ try {
   await Promise.all(['a', 'b', 'c'].map(startNode))
 
   let bob
+  await step('the adapter passes its start-up check', async () => {
+    const r = spawnSync(process.execPath, ['--no-warnings', BIN, 'mcp', '--check'], { encoding: 'utf8' })
+    assert.equal(r.status, 0, r.stderr)
+    assert.equal(r.stdout.trim(), 'ok')
+  })
+
   await step('adapter connects and learns its address', async () => {
     bob = await adapter('b', 'bob')
     assert.match(bob.instructions, /bob@b\.test/)
@@ -185,8 +191,10 @@ try {
     const inv = await bob.call('invite')
     assert.match(inv, /Join my agentlink network: run  curl -fsSL -k --pinnedpubkey "sha256\/\/[^"]+" "https:\/\/b\.test:\d+\/join\/install\?t=/)
     assert.match(inv, /Don't send it to another agent/)
+    assert.match(await bob.call('invite', { list: true }), /^1 unused invite\(s\)[^\n]*\n  made .*, expires /)
     assert.match(await bob.call('invite', { revoke: true }), /Cancelled 1 unused invite/)
     assert.match(await bob.call('invite', { revoke: true }), /no unused invites/)
+    assert.equal(await bob.call('invite', { list: true }), 'No unused invites.')
   })
 
   await step('session offline: stored on recipient node, delivered on connect', async () => {
@@ -204,6 +212,7 @@ try {
     await stopNode('b')
     const out = cli('a', 'send', 'bob@b.test', 'held for you')
     assert.match(out, /b\.test unreachable/)
+    assert.match(cli('a', 'peers'), /b\.test: offline — 127\.0\.0\.1:\d+: .*ECONNREFUSED/, 'peers says why a machine is offline')
     assert.match(out, /offering copies to other online machines/)
     await waitFor(() => JSON.parse(cli('a', 'status')).pending.some(p => p.replicated), 10000, 'copy handed to c')
     await stopNode('a')                     // the sender goes away too: only c has it now
@@ -561,6 +570,12 @@ try {
     const r = setup('k', joinArgs(inv))
     assert.equal(r.status, 0, r.stdout + r.stderr)
     assert.match(r.stdout, /Joined the network via i\.test/)
+    assert.doesNotMatch(r.stdout, /Join my agentlink network/, 'a machine that just joined opens no invite of its own')
+    assert.equal(scli('k', 'invite', '--list').stdout.trim(), 'No unused invites.')
+    const typo = scli('k', 'invite', '--lsit')
+    assert.equal(typo.status, 2)
+    assert.match(typo.stderr, /unknown option --lsit/)
+    assert.equal(scli('k', 'invite', '--list').stdout.trim(), 'No unused invites.', 'a mistyped option makes no invite')
     const iStatus = JSON.parse(scli('i', 'status').stdout)
     assert.deepEqual(iStatus.members.map(m => m.host).sort(), ['i.test', 'k.test'])
     assert.equal(iStatus.members.find(m => m.host === 'k.test').added_by, 'i.test')

@@ -26,6 +26,23 @@ export function nodePath() {
   return process.execPath
 }
 export const adapterCmd = () => [nodePath(), '--no-warnings', BIN, 'mcp']
+
+/**
+ * Can Claude Code actually start the adapter it is registered with? Runs the registered command
+ * with --check (which loads the adapter and its dependencies, then exits). Without this, a broken
+ * install (say, a git clone without \`npm install\`) only shows up as a session that silently has
+ * no agentlink. Returns null if it starts, otherwise why not.
+ * @returns {string | null}
+ */
+export function checkAdapter() {
+  const [cmd, ...args] = adapterCmd()
+  const r = spawnSync(cmd, [...args, '--check'], { encoding: 'utf8', timeout: 20_000 })
+  if (r.status === 0) return null
+  const why = (r.error ? errMsg(r.error) : (r.stderr || r.stdout || `exit ${r.status}`)).trim().split('\n').filter(Boolean).slice(-2).join(' ')
+  const root = path.dirname(path.dirname(BIN))
+  const clone = fs.existsSync(path.join(root, '.git')) && !fs.existsSync(path.join(root, 'node_modules'))
+  return clone ? `${why} — this is a git clone without its dependencies: run \`npm install\` in ${root}, then \`agentlink setup\` again` : why
+}
 /** Double-quote for sh, escaping the characters that stay special inside double quotes. */
 const dq = (/** @type {unknown} */ v) => `"${String(v).replace(/[\\"$`]/g, '\\$&')}"`
 /** Single-quote for sh. */
@@ -218,6 +235,8 @@ export async function launchClaude(args, ensureNode) {
     if (!isRegistered(dir)) {
       try { register(dir); console.error(`agentlink: enabled for this Claude account (${dir || 'default'})`) }
       catch (e) { console.error(`agentlink: could not register with this account: ${errMsg(e)}`) }
+      const broken = checkAdapter()
+      if (broken) console.error(`agentlink: WARNING: Claude Code can't start agentlink, so this session won't have it: ${broken}`)
     }
     await Promise.resolve().then(ensureNode).catch(e => console.error(`agentlink: ${errMsg(e)}`))   // never blocks claude
   }

@@ -8,11 +8,31 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import crypto from 'node:crypto'
-import { authedRequest, authedRaw, PinError } from './tls.js'
+import { authedRequest, authedRaw, PinError, PROTO } from './tls.js'
 import { ensureHomeDir, errMsg, readDks, VERSION } from './config.js'
 import { BIN, nodePath } from './claude.js'
 
 const sleep = (/** @type {number} */ ms) => new Promise(r => setTimeout(r, ms))
+
+/**
+ * The running node is a newer agentlink than this process: this process (a session's adapter
+ * started before an upgrade, say) is the one that is out of date, and must not replace the node.
+ */
+export class StaleError extends Error {}
+
+/** Compare dotted versions numerically. @param {string} a @param {string} b */
+function cmpVersion(a, b) {
+  const x = String(a).split(/[.-]/).map(Number), y = String(b).split(/[.-]/).map(Number)
+  for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0)
+  return 0
+}
+/** Is the node behind `h` a different version from this process, and is it newer? @param {import('./types.js').Health} h */
+export function versionOf(h) {
+  const proto = h.proto ?? 0     // nodes from before the protocol number count as older
+  const differs = proto !== PROTO || h.version !== VERSION
+  const newer = proto !== PROTO ? proto > PROTO : cmpVersion(h.version, VERSION) > 0
+  return { differs, newer: differs && newer }
+}
 
 export class Local {
   /** @param {Pick<import('./types.js').Config, 'identity' | 'port' | 'dir'>} cfg */
@@ -72,12 +92,16 @@ export class Local {
   async ensureNode() {
     let h = await this.health()
     if (h && 'foreign' in h) throw new Error(`port ${this.cfg.port} is used by something that is not this machine's agentlink node`)
-    // agentlink was upgraded under a running node: replace it with this version
-    if (h && h.version !== VERSION) {
-      try { await this.req('POST', '/local/shutdown') } catch {}
-      for (let i = 0; i < 30 && (h = await this.health()) && !('foreign' in h) && h.version !== VERSION; i++) await sleep(100)
+    if (h && versionOf(h).newer) {
+      // agentlink was upgraded while this process was running: replacing the node would downgrade it
+      throw new StaleError(`agentlink on this machine was upgraded (to ${h.version}, protocol ${h.proto}) while this program (${VERSION}, protocol ${PROTO}) was running, so it can't use the node any more`)
     }
-    if (h && !('foreign' in h) && h.version === VERSION) return h
+    // agentlink was upgraded under a running node: replace it with this version
+    if (h && versionOf(h).differs) {
+      try { await this.req('POST', '/local/shutdown') } catch {}
+      for (let i = 0; i < 30 && (h = await this.health()) && !('foreign' in h) && versionOf(h).differs; i++) await sleep(100)
+    }
+    if (h && !('foreign' in h) && !versionOf(h).differs) return h
     if (fs.existsSync(path.join(this.cfg.dir, 'disabled'))) throw new Error('agentlink is uninstalled on this machine (run `agentlink setup` to re-enable)')
     ensureHomeDir(this.cfg.dir)
     const out = fs.openSync(path.join(this.cfg.dir, 'node.log'), 'a', 0o600)

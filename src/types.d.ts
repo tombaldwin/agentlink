@@ -137,5 +137,6 @@ export interface InboundMessage { id: string; from: string; to: string; body: st
 export interface PeersReply {
   self: string
   local: string[]
-  remote: { host: string; online: boolean; sessions: string[] }[]
+  /** error: why an offline machine couldn't be reached */
+  remote: { host: string; online: boolean; sessions: string[]; error?: string }[]
 }

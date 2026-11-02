@@ -5,7 +5,7 @@ const [cmd, ...rest] = process.argv.slice(2)
 // Only these are flags; anything else (a message that happens to start with "--") is an argument,
 // and "--" ends the flags.
 const VALUE_FLAGS = ['name', 'from', 'host', 'peer', 'join', 'pin', 'net', 'token']
-const BOOL_FLAGS = ['no-service', 'no-claude', 'no-alias', 'new-network', 'poll', 'channel', 'on-demand', 'revoke']
+const BOOL_FLAGS = ['no-service', 'no-claude', 'no-alias', 'new-network', 'poll', 'channel', 'on-demand', 'revoke', 'list', 'check']
 /** @type {Record<string, any>} */
 const flags = {}
 /** @type {string[]} */
@@ -24,6 +24,9 @@ for (let i = 0; i < rest.length; i++) {
   else pos.push(a)
 }
 function usage(/** @type {string} */ m) { console.error(`agentlink: ${m}`); process.exit(2) }
+// a mistyped option (e.g. \`invite --lsit\`) must not run the command as if it weren't there; send
+// takes free text and claude passes everything on to Claude Code
+if (!['send', 'claude'].includes(cmd)) { const bad = pos.find(a => a.startsWith('-')); if (bad) usage(`unknown option ${bad} (see agentlink help)`) }
 
 const HELP = `agentlink ${VERSION} — wake-on-message networking for AI agents
 
@@ -33,7 +36,8 @@ const HELP = `agentlink ${VERSION} — wake-on-message networking for AI agents
   agentlink send <to> <msg...>  send a message, e.g. agentlink send reviewer@laptop.local "hi"
   agentlink peers               who's online
   agentlink status              node status, queues, known machines
-  agentlink invite [--revoke]   print a one-time line to add another machine (--revoke: cancel unused ones)
+  agentlink invite [--list|--revoke]  print a one-time line to add another machine
+                                (--list: show unused ones; --revoke: cancel them)
   agentlink remove <host>       remove a machine from the network (it can no longer send or receive)
   agentlink uninstall           remove service and Claude Code registration
 
@@ -73,7 +77,8 @@ async function main() {
       }
     }
     case 'mcp': {
-      const { runAdapter } = await import('../src/mcp.js')
+      const { runAdapter } = await import('../src/mcp.js')   // --check: loading it (and its dependencies) is the check
+      if (flags.check) return console.log('ok')
       return runAdapter(loadConfig(), { name: flags.name, poll: !!flags.poll, channel: flags.channel ? true : undefined })
     }
     case 'claude': {
@@ -90,14 +95,20 @@ async function main() {
     case 'peers': {
       const p = await (await client()).req('GET', '/local/peers')
       console.log(`${p.self} (this machine): ${p.local.join(', ') || '(no agents)'}`)
-      for (const r of p.remote) console.log(`${r.host}: ${r.online ? (r.sessions.join(', ') || '(no agents)') : 'offline'}`)
+      for (const r of p.remote) console.log(`${r.host}: ${r.online ? (r.sessions.join(', ') || '(no agents)') : `offline${r.error ? ` — ${r.error}` : ''}`}`)
       return
     }
     case 'status':
       return console.log(JSON.stringify(await (await client()).req('GET', '/local/status'), null, 2))
     case 'invite': {
       const local = await client()
+      if (pos.length) throw new Error('usage: agentlink invite [--list|--revoke]')
       if (flags.revoke) return console.log(`revoked ${(await local.req('POST', '/local/invite/revoke')).revoked} unused invite(s)`)
+      if (flags.list) {
+        const { invites } = await local.req('GET', '/local/invites')
+        const { formatInvites } = await import('../src/setup.js')
+        return console.log(formatInvites(invites))
+      }
       const { invitePrompt } = await import('../src/setup.js')
       return console.log(invitePrompt(await local.req('POST', '/local/invite')))
     }

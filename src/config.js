@@ -213,9 +213,42 @@ export function readConfigFile() {
   } catch (e) { throw new Error(`bad config ${configPath()}: ${errMsg(e)} — fix the file (or delete it to start over)`) }
 }
 
-/** The message of a caught value (which may not be an Error), with a network cause code if any. @param {unknown} e */
+/**
+ * The message of a caught value (which may not be an Error), with a network cause code if any.
+ * A connection to a name with several addresses fails with an AggregateError whose own message is
+ * empty: report the codes of the attempts instead.
+ * @param {unknown} e
+ */
 export const errMsg = e => {
   if (!(e instanceof Error)) return String(e)
-  const code = /** @type {any} */ (e).cause?.code
+  const cause = /** @type {any} */ (e).cause
+  const agg = e instanceof AggregateError ? e : cause instanceof AggregateError ? cause : null
+  if (agg && agg.errors.length) {
+    const codes = [...new Set(agg.errors.map(x => x?.code || (x instanceof Error ? x.message : String(x))))]
+    const desc = `connect ${codes.join(', ')}${agg.errors.length > 1 ? ` (tried ${agg.errors.length} addresses)` : ''}`
+    return e === agg ? (e.message ? `${e.message}: ${desc}` : desc) : `${e.message}: ${desc}`
+  }
+  const code = cause?.code
   return code && !e.message.includes(code) ? `${e.message} (${code})` : e.message
+}
+
+/** The network error code behind a caught value (its own, its cause's, or the first attempt's). @param {unknown} e @returns {string} */
+export const errCode = e => {
+  const x = /** @type {any} */ (e)
+  if (!x || typeof x !== 'object') return ''
+  if (typeof x.code === 'string') return x.code
+  if (x instanceof AggregateError) return errCode(x.errors[0])
+  return x.cause ? errCode(x.cause) : ''
+}
+
+/**
+ * A hint for errors with a well-known local cause: on macOS, a process without Local Network
+ * permission gets EHOSTUNREACH for every machine on the LAN.
+ * @param {unknown} e
+ */
+export const netHint = e => {
+  const code = errCode(e)
+  if (process.platform === 'darwin' && (code === 'EHOSTUNREACH' || code === 'ENETUNREACH'))
+    return ' (if that machine is on, macOS may be blocking agentlink from the local network: check System Settings → Privacy & Security → Local Network)'
+  return ''
 }

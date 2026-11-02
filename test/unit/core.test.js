@@ -1,7 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
-import { normHost, sanitizeName, parseAddr, parsePeer, validAddr } from '../../src/config.js'
+import fs from 'node:fs'
+import { normHost, sanitizeName, parseAddr, parsePeer, validAddr, errMsg, errCode } from '../../src/config.js'
+import { versionOf } from '../../src/local.js'
+import { PROTO } from '../../src/tls.js'
 import { signEnvelope, verifyEnvelope, sealBeacon, openBeacon, newDiscoveryKey, randomToken, gateTags, gateOk, proveAuth, checkAuth, signRecord } from '../../src/crypto.js'
 import { newIdentity, fingerprint, certDer } from '../../src/cert.js'
 import { Roster } from '../../src/roster.js'
@@ -363,4 +366,25 @@ test('a machine running another protocol version is reported as such, not as a s
     await assert.rejects(authedRequest(o), e => e instanceof ProtoError && /newer version of agentlink/.test(e.message))
     await assert.rejects(authedRequest({ ...o, anyProto: true }), /not the expected machine/, 'anyProto goes on to the identity check')
   } finally { server.close() }
+})
+
+test('connection errors to several addresses are readable', () => {
+  const at = (/** @type {string} */ code) => Object.assign(new Error(`connect ${code}`), { code })
+  const agg = new AggregateError([at('EHOSTUNREACH'), at('ETIMEDOUT')])
+  assert.equal(errMsg(agg), 'connect EHOSTUNREACH, ETIMEDOUT (tried 2 addresses)')
+  assert.equal(errMsg(new Error('fetch failed', { cause: agg })), 'fetch failed: connect EHOSTUNREACH, ETIMEDOUT (tried 2 addresses)')
+  assert.equal(errMsg(new AggregateError([at('EHOSTUNREACH')])), 'connect EHOSTUNREACH')
+  assert.equal(errCode(agg), 'EHOSTUNREACH')
+  assert.equal(errMsg(new Error('x', { cause: at('ECONNREFUSED') })), 'x (ECONNREFUSED)')
+})
+
+test('only an older node is replaced; a newer one means this process is out of date', () => {
+  const h = (/** @type {string} */ version, /** @type {number | undefined} */ proto) => ({ ok: true, host: 'h', net: 'n', fp: 'f', pid: 1, version, proto })
+  const v = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
+  assert.deepEqual(versionOf(h(v, PROTO)), { differs: false, newer: false })
+  assert.deepEqual(versionOf(h(v, undefined)), { differs: true, newer: false }, 'from before protocol numbers')
+  assert.deepEqual(versionOf(h(v, PROTO + 1)), { differs: true, newer: true })
+  assert.deepEqual(versionOf(h('999.0.0', PROTO)), { differs: true, newer: true })
+  assert.deepEqual(versionOf(h('0.0.1', PROTO)), { differs: true, newer: false })
+  assert.deepEqual(versionOf(h('999.0.0', PROTO - 1)), { differs: true, newer: false }, 'the protocol decides first')
 })
