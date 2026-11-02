@@ -39,14 +39,14 @@ jobs:
 
       - name: Check the signing secrets are set
         env:
-          CERT: ${{ secrets.MACOS_CERT_P12 }}
-          CERT_PW: ${{ secrets.MACOS_CERT_PASSWORD }}
-          KEY: ${{ secrets.NOTARY_KEY_P8 }}
-          KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
-          ISSUER: ${{ secrets.NOTARY_ISSUER_ID }}
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
         run: |
           missing=""
-          for v in CERT CERT_PW KEY KEY_ID ISSUER; do eval "[ -n \"\$$v\" ]" || missing="$missing $v"; done
+          for v in MACOS_CERT_P12 MACOS_CERT_PASSWORD NOTARY_KEY_P8 NOTARY_KEY_ID NOTARY_ISSUER_ID; do eval "[ -n \"\$$v\" ]" || missing="$missing $v"; done
           [ -z "$missing" ] || { echo "missing signing secrets (see docs/releasing.md):$missing"; exit 1; }
 
       - name: Set up a throwaway signing keychain
