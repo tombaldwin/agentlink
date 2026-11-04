@@ -12,7 +12,7 @@ import { peerCertificate, pinnedRequest } from './tls.js'
 import { Local } from './local.js'
 import { openStore } from './store.js'
 import { appBundle, SEA } from './self.js'
-import { claudeAccounts, register, unregister, writeShellBlock, removeShellBlock, claudeBin, selfCmd, checkAdapter } from './claude.js'
+import { claudeAccounts, register, unregister, writeShellBlock, removeShellBlock, claudeBin, selfCmd, checkAdapter, wakeSupport, WAKE_MIN_CLAUDE } from './claude.js'
 
 /**
  * Service names. The usual install (~/.agentlink) gets the plain names; any other agentlink home
@@ -233,6 +233,8 @@ function registerClaude() {
     try { register(acct.dir); ok(`enabled for Claude account: ${label}`) }
     catch (e) { warn(`could not enable for ${label}: ${errMsg(e)}`) }
   }
+  const { ok: wakes, version } = wakeSupport()
+  if (!wakes) warn(`Claude Code ${version || '(unknown version)'} is older than ${WAKE_MIN_CLAUDE}, so sessions won't wake by themselves; they read messages with the inbox tool. Update Claude Code, then run agentlink setup again`)
 }
 
 // ---------- services ----------
@@ -308,11 +310,13 @@ export async function uninstall() {
     spawnSync('systemctl', ['--user', 'disable', '--now', UNIT], { stdio: 'ignore' })
     fs.rmSync(path.join(os.homedir(), '.config', 'systemd', 'user', `${UNIT}.service`), { force: true })
   }
-  for (const acct of claudeAccounts()) unregister(acct.dir)
+  for (const acct of claudeAccounts()) {
+    try { unregister(acct.dir) } catch (e) { warn(errMsg(e)) }     // one account's settings mustn't stop the rest
+  }
   removeShellBlock()
   let host = ''
   try { host = loadConfig().host } catch {}
-  console.log(`Stopped agentlink and removed its service, Claude Code registrations and shell aliases.
+  console.log(`Stopped agentlink and removed its service and Claude Code registrations.
 Its key, messages and settings remain in ${homeDir()}: \`agentlink setup\` turns it back on as before.
 To remove it completely:
   - take this machine off the network: on another member, run  agentlink remove ${host || '<this machine>'}

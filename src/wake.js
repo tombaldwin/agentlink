@@ -8,8 +8,7 @@ import path from 'node:path'
 import { homeDir, loadConfig } from './config.js'
 import { Local } from './local.js'
 
-const RETRY_MS = 2000
-const GIVE_UP_MS = 60_000      // no session of ours for this long: Claude has gone (or has no agentlink)
+const RETRY_MS = 5000
 
 /** This process's ancestors, nearest first: one of them is the Claude session that started us. */
 function ancestors() {
@@ -22,14 +21,15 @@ function ancestors() {
   return out
 }
 
-/** Is the session that started us interactive? (Every ancestor counts: a shell may sit between.) @param {number[]} pids */
-function isInteractive(pids) {
-  try {
-    const rows = pids.map(p => execFileSync('ps', ['-ww', '-o', 'tty=,args=', '-p', String(p)], { encoding: 'utf8', timeout: 2000 }).trim())
-    const claude = rows.find(r => /claude/.test(r)) || rows[0] || ''
-    const [tty = '', ...rest] = claude.split(/\s+/)
-    return rows.every(r => interactive(r, 'x')) && interactive(rest.join(' '), tty)
-  } catch { return false }
+/** The Claude Code process among `pids`, nearest first, with its terminal and command line. @param {number[]} pids */
+function findClaude(pids) {
+  for (const pid of pids) {
+    const row = execFileSync('ps', ['-ww', '-o', 'tty=,args=', '-p', String(pid)], { encoding: 'utf8', timeout: 2000 }).trim()
+    const [tty = '', ...args] = row.split(/\s+/)
+    // by what's running, not by anything that merely mentions claude (the shell running this hook might)
+    if (/^claude(\.exe)?$/.test(path.basename(args[0] || '')) || /[\\/]claude-code[\\/]/.test(args[1] || '')) return { pid, tty, args: args.join(' ') }
+  }
+  return null
 }
 
 /**
@@ -55,16 +55,21 @@ export async function runWake() {
     local = new Local(loadConfig())
   } catch { return 0 }                      // not set up: stay out of the session's way
   const pids = ancestors()
-  if (!isInteractive(pids) && !process.env.AGENTLINK_WAKE_ANY) return 0    // (the end-to-end tests have no terminal)
-  let since = Date.now()
+  let claude = null
+  try { claude = findClaude(pids) } catch {}
+  const testing = !!process.env.AGENTLINK_WAKE_ANY       // (the end-to-end tests have no Claude and no terminal)
+  if (!testing && !(claude && interactive(claude.args, claude.tty))) return 0
+  // the Claude that started us, and only it: an enclosing session must not be mistaken for ours
+  const mine = claude && !testing ? [claude.pid] : pids
+  const owner = mine[0]
   for (;;) {
     /** @type {{ event: string, name?: string, count?: number } | null} */
     let r = null
-    try { r = await local.wakeWait(pids) } catch {}
+    try { r = await local.wakeWait(mine) } catch {}
     if (r?.event === 'wake') { process.stderr.write(`${wakeText(r.count || 1, r.name || 'this session')}\n`); return 2 }
     if (r?.event === 'done') return 0       // a newer wait took over, or this session is woken another way
-    if (r?.event === 'closed') since = Date.now()    // it was there: the node restarted, or the session reconnected
-    if (Date.now() - since > GIVE_UP_MS) return 0
+    // the node is restarting, or the session hasn't connected yet: keep going for as long as Claude runs
+    try { process.kill(owner, 0) } catch { return 0 }
     await new Promise(res => setTimeout(res, RETRY_MS))
   }
 }

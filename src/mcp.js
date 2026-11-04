@@ -1,6 +1,6 @@
-// MCP adapter run by each agent session. In Claude Code it is a *channel*: incoming
-// messages are pushed into the session and wake it even when idle. With --poll it is a
-// plain MCP server (for agents without channels) and messages are read with `inbox`.
+// MCP adapter run by each agent session. Messages are read with the `inbox` tool, and in Claude Code
+// a hook wakes the session when one arrives (see wake.js). In a session started with channels
+// enabled (`agentlink claude`), messages are pushed into it instead.
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { execFileSync } from 'node:child_process'

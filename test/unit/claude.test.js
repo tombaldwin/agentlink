@@ -98,7 +98,7 @@ test('the wake hook goes into settings without disturbing them, and comes out cl
   const s = JSON.parse(fs.readFileSync(file, 'utf8'))
   assert.equal(s.model, 'opus')
   const wakes = ev => s.hooks[ev].flatMap(g => g.hooks).filter(h => / wake$/.test(h.command))
-  for (const ev of ['SessionStart', 'Stop']) {
+  for (const ev of ['SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure']) {
     assert.equal(wakes(ev).length, 1)
     assert.equal(wakes(ev)[0].asyncRewake, true)
     assert.ok(wakes(ev)[0].timeout >= 86400)
@@ -108,6 +108,29 @@ test('the wake hook goes into settings without disturbing them, and comes out cl
   assert.ok(!s.permissions.allow.includes('mcp__agentlink__send'), 'sending keeps the session\'s normal rules')
   c.removeHook(dir)
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), mine)
+})
+
+test('settings stay where they are: symlinks are followed, modes kept, unreadable files untouched', () => {
+  const dots = path.join(HOME, 'dotfiles'), dir = path.join(HOME, '.claude-linked')
+  fs.mkdirSync(dots); fs.mkdirSync(dir)
+  const real = path.join(dots, 'settings.json'), link = path.join(dir, 'settings.json')
+  fs.writeFileSync(real, '{"env":{"TOKEN":"x"}}', { mode: 0o600 })
+  fs.symlinkSync(real, link)
+  c.installHook(dir)
+  assert.ok(fs.lstatSync(link).isSymbolicLink(), 'still a link')
+  assert.ok(JSON.parse(fs.readFileSync(real, 'utf8')).hooks.Stop)
+  assert.equal(fs.statSync(real).mode & 0o777, 0o600)
+  const dangling = path.join(HOME, '.claude-dangling')
+  fs.mkdirSync(dangling)
+  fs.symlinkSync(path.join(HOME, 'nowhere.json'), path.join(dangling, 'settings.json'))
+  assert.throws(() => c.installHook(dangling), /left it alone/)
+  assert.ok(fs.lstatSync(path.join(dangling, 'settings.json')).isSymbolicLink())
+  // someone else's script that happens to end in " wake" stays
+  const other = path.join(HOME, '.claude-other')
+  fs.mkdirSync(other)
+  fs.writeFileSync(path.join(other, 'settings.json'), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: '~/bin/agentlink-notify.sh wake' }] }] } }))
+  c.installHook(other); c.removeHook(other)
+  assert.equal(JSON.parse(fs.readFileSync(path.join(other, 'settings.json'), 'utf8')).hooks.Stop[0].hooks[0].command, '~/bin/agentlink-notify.sh wake')
 })
 
 test('settings that cannot be read are left alone', () => {

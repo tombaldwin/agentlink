@@ -753,6 +753,8 @@ try {
 
   await step('the wake hook tells an idle session about a message, once, and never the text of it', async () => {
     await ensureNode('b')
+    await bob.close()                                    // the hook finds its session by process: here every adapter has one parent
+    await sleep(300)
     const hooky = await adapter('b', 'hooky', 'plain')
     const wake = () => {
       const p = spawn(EXE, [...PRE, 'wake'], { env: { ...envFor('b'), AGENTLINK_WAKE_ANY: '1' }, stdio: ['ignore', 'ignore', 'pipe'] })
@@ -779,7 +781,16 @@ try {
     assert.match(await hooky.call('inbox'), /IGNORE PREVIOUS INSTRUCTIONS/, 'the message itself is read with the inbox tool')
     cli('a', 'send', 'hooky@b.test', 'second')
     assert.equal((await newer.done).code, 2, 'and the next message wakes it')
+    // the node restarting (an upgrade, say) doesn't leave the session deaf
+    await hooky.call('inbox')
+    const through = wake()
+    await sleep(1500)
+    await stopNode('b'); await startNode('b')
+    await sleep(6500)                                    // the wait and the adapter both reconnect
+    cli('a', 'send', 'hooky@b.test', 'after the restart')
+    assert.equal((await through.done).code, 2, 'still waiting across a node restart')
     await hooky.close()
+    bob = await adapter('b', 'bob')
   })
 
   await step('local clients refuse a process squatting on the node port', async () => {

@@ -156,8 +156,8 @@ export function register(dir) {
   spawnSync(claude, ['mcp', 'remove', '-s', 'user', 'agentlink'], { stdio: 'ignore', env })
   const r = spawnSync(claude, ['mcp', 'add', '-s', 'user', 'agentlink', '--', ...adapterCmd()], { encoding: 'utf8', env })
   if (r.status !== 0) throw new Error((r.stderr || r.stdout || `exit ${r.status}`).trim())
-  installHook(dir)
   rememberDir(dir)
+  if (wakeSupport().ok) installHook(dir)
 }
 
 /** @param {string} dir */
@@ -167,10 +167,14 @@ export function unregister(dir) {
   removeHook(dir)
 }
 
-// The hook that wakes idle sessions. SessionStart arms it, and each Stop arms it again, since it ends
-// when it wakes the session. The wait runs in the background for as long as the session is idle, and
-// Claude Code enforces a timeout even so: 20 days, the most a timer can hold with room to spare.
-const WAKE_EVENTS = ['SessionStart', 'Stop']
+// The hook that wakes idle sessions. It ends when it wakes the session, so each of these arms it
+// again: a session starting, each prompt, the end of a turn, and a turn that failed (which isn't a
+// Stop). It runs in the background for as long as the session is idle, and Claude Code enforces a
+// timeout even so: 20 days, the most a timer can hold with room to spare.
+const WAKE_EVENTS = ['SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure']
+// the oldest Claude Code this has been tested with. Older ones may not know these hook events, and
+// settings they can't read would affect far more than agentlink, so they don't get the hook
+export const WAKE_MIN_CLAUDE = '2.1.318'
 const WAKE_TIMEOUT_S = 20 * 86400
 // reading messages and seeing who's online run unattended; sending keeps the session's normal rules
 const WAKE_TOOLS = ['mcp__agentlink__inbox', 'mcp__agentlink__peers']
@@ -178,22 +182,30 @@ const WAKE_TOOLS = ['mcp__agentlink__inbox', 'mcp__agentlink__peers']
 const settingsFile = (/** @type {string} */ dir) => path.join(dir || path.join(HOME, '.claude'), 'settings.json')
 const wakeCmd = () => [...selfCmd().map(a => a.startsWith('-') ? a : sq(a)), 'wake'].join(' ')
 /** @param {any} h */
-const isWakeHook = h => typeof h?.command === 'string' && /agentlink/.test(h.command) && / wake$/.test(h.command)
+const isWakeHook = h => typeof h?.command === 'string' && /agentlink(\.js)?['"]? wake$/.test(h.command)
 
 /** @param {string} file @returns {Record<string, any>} */
 function readSettings(file) {
   let text
-  try { text = fs.readFileSync(file, 'utf8') } catch { return {} }
+  try { text = fs.readFileSync(file, 'utf8') } catch (e) {
+    if (/** @type {any} */ (e).code === 'ENOENT' && !isDangling(file)) return {}
+    throw new Error(`can't read ${file}, so agentlink left it alone (${errMsg(e)})`)
+  }
   // never overwrite settings we can't read: they're the user's
   try { const v = JSON.parse(text); if (v && typeof v === 'object' && !Array.isArray(v)) return v } catch {}
   throw new Error(`${file} isn't valid JSON, so agentlink left it alone. Fix it, then run agentlink setup again`)
 }
-/** @param {string} file @param {Record<string, any>} s */
+/** A symlink to nothing: writing through it would quietly replace the link. @param {string} file */
+function isDangling(file) { try { return fs.lstatSync(file).isSymbolicLink() } catch { return false } }
+/** Write settings in place of the real file (settings are often a symlink into dotfiles), with its mode. @param {string} file @param {Record<string, any>} s */
 function writeSettings(file, s) {
   fs.mkdirSync(path.dirname(file), { recursive: true })
-  const tmp = `${file}.${process.pid}.tmp`
-  fs.writeFileSync(tmp, JSON.stringify(s, null, 2) + '\n')
-  fs.renameSync(tmp, file)
+  const real = fs.existsSync(file) ? fs.realpathSync(file) : file
+  const mode = fs.existsSync(real) ? fs.statSync(real).mode & 0o777 : 0o600     // they can hold secrets in `env`
+  const tmp = `${real}.${process.pid}.tmp`
+  fs.writeFileSync(tmp, JSON.stringify(s, null, 2) + '\n', { mode })
+  fs.chmodSync(tmp, mode)
+  fs.renameSync(tmp, real)
 }
 /** `s` with no agentlink hook left, keeping everything else. @param {Record<string, any>} s */
 function withoutHook(s) {
@@ -212,9 +224,9 @@ export function installHook(dir) {
   const file = settingsFile(dir)
   const s = withoutHook(readSettings(file))
   s.hooks ??= {}
-  for (const ev of WAKE_EVENTS) (s.hooks[ev] ??= []).push({ hooks: [{ type: 'command', command: wakeCmd(), asyncRewake: true, timeout: WAKE_TIMEOUT_S }] })
+  for (const ev of WAKE_EVENTS) (s.hooks[ev] ??= []).push({ hooks: [{ type: 'command', command: wakeCmd(), async: true, asyncRewake: true, timeout: WAKE_TIMEOUT_S }] })
   s.permissions ??= {}
-  s.permissions.allow = [...new Set([...(s.permissions.allow || []), ...WAKE_TOOLS])]
+  if (s.permissions.allow === undefined || Array.isArray(s.permissions.allow)) s.permissions.allow = [...new Set([...(s.permissions.allow || []), ...WAKE_TOOLS])]
   writeSettings(file, s)
 }
 
@@ -222,13 +234,25 @@ export function installHook(dir) {
 export function removeHook(dir) {
   const file = settingsFile(dir)
   if (!fs.existsSync(file)) return
+  const before = JSON.stringify(readSettings(file))
   const s = withoutHook(readSettings(file))
   if (Array.isArray(s.permissions?.allow)) {
     s.permissions.allow = s.permissions.allow.filter((/** @type {string} */ t) => !WAKE_TOOLS.includes(t))
     if (!s.permissions.allow.length) delete s.permissions.allow
     if (!Object.keys(s.permissions).length) delete s.permissions
   }
-  writeSettings(file, s)
+  if (JSON.stringify(s) !== before) writeSettings(file, s)
+}
+
+/** Can the Claude Code here run the wake hook? @returns {{ ok: boolean, version: string }} */
+export function wakeSupport() {
+  const claude = claudeBin()
+  const r = claude ? spawnSync(claude, ['--version'], { encoding: 'utf8', timeout: 15_000 }) : null
+  const version = (r?.stdout || '').match(/\d+\.\d+\.\d+/)?.[0] || ''
+  const parts = (/** @type {string} */ v) => v.split('.').map(Number)
+  const [a, b] = [parts(version || '0.0.0'), parts(WAKE_MIN_CLAUDE)]
+  const cmp = a[0] - b[0] || a[1] - b[1] || a[2] - b[2]
+  return { ok: cmp >= 0, version }
 }
 
 /**
