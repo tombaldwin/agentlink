@@ -379,7 +379,8 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
   function otherAddrs(host) {
     const cur = addrOf(host)
     const names = allPeers().filter(r => r.alias_of === host).map(r => addrOf(r.host))
-    return [...new Set([...names, ...(heard.get(host) || []), `${host}:${cfg.port}`])].filter(a => a !== cur && validAddr(a))
+    // what we were told comes last, newest first: any member can say anything, and can't crowd out the rest
+    return [...new Set([...names, `${host}:${cfg.port}`, ...[...(heard.get(host) || [])].reverse()])].filter(a => a !== cur && validAddr(a))
   }
 
   /** Addresses worth telling other members about (so every node learns the whole network). */
@@ -417,7 +418,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       if (q.wake.run(host).changes) kick()   // it's reachable: retry anything waiting for it now
     } catch {
       // nothing answers where we think it is: look for it. Each address must prove it holds the key.
-      if (!cfg.routes[host]) await Promise.all(otherAddrs(host).slice(-4).map(addr => probe(host, addr)))
+      if (!cfg.routes[host]) await Promise.all(otherAddrs(host).slice(0, 4).map(addr => probe(host, addr)))
     }
   }
   let helloing = false

@@ -26,7 +26,8 @@ the same membership from the same records.
   Before a machine has proved its key, the only membership records it can submit are the ones that
   add it. Any member can add a machine by inviting it. A record counts, and is kept and passed on,
   only if its signature checks out against the signer it names. A roster stops taking new records
-  at about 1.5 MB, except removals of known machines, so nothing can fill it to stop a removal.
+  at about 1.5 MB, except removals their signer is entitled to make, so nothing can fill it to stop
+  a removal.
 - **Removal.** Machines are ranked in the order they joined, and a machine can remove only machines
   that joined after it. The founding machine can remove anyone, and two machines can never remove
   each other. A removal can't be undone: removing the remover doesn't bring a machine back, and

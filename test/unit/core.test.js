@@ -372,6 +372,32 @@ test('roster: loading never drops what is held, however full', () => {
   assert.equal(again.dk, dk)
 })
 
+test('roster: which encoding of a signature a node got decides nothing', () => {
+  const f = newIdentity(), m = newIdentity(), k1 = newIdentity(), k2 = newIdentity()
+  const base = Roster.genesis(f, 'f.local')
+  base.add(f, 'm.local', m.cert)
+  const at = base.nextAt()
+  const x = signed(m, { type: 'add', host: 'k.local', fp: k1.fp, cert: certDer(k1.cert), at, by: m.fp })
+  const y = signed(m, { type: 'add', host: 'k.local', fp: k2.fp, cert: certDer(k2.cert), at, by: m.fp })
+  const one = reload(base), two = reload(base)
+  // one node sees x sort first by its signature, the other sees y
+  one.merge([{ ...x, sig: '!' + x.sig }, { ...y, sig: y.sig + '~' }])
+  two.merge([{ ...x, sig: x.sig + '~' }, { ...y, sig: '!' + y.sig }])
+  one.merge(two.records)
+  two.merge(one.records)
+  assert.equal(one.byHost.get('k.local')?.fp, two.byHost.get('k.local')?.fp)
+  assert.equal(reload(one).byHost.get('k.local')?.fp, reload(two).byHost.get('k.local')?.fp)
+})
+
+test('roster: removals a machine cannot make neither pass the size limit nor stay', () => {
+  const f = newIdentity(), m = newIdentity(), r = Roster.genesis(f, 'f.local')
+  r.add(f, 'm.local', m.cert)
+  const n = r.records.length
+  const seen = Array.from({ length: 4000 }, (_, i) => String(i).padStart(22, '0'))
+  r.merge(Array.from({ length: 45 }, () => signed(m, { type: 'remove', fp: f.fp, at: r.nextAt(), by: m.fp, dk: newDiscoveryKey(), seen })))
+  assert.equal(r.records.length, n)
+})
+
 test('roster: a removal the same signer repeats changes nothing', () => {
   const f = newIdentity(), c = newIdentity(), r = Roster.genesis(f, 'f.local')
   r.add(f, 'c.local', c.cert)

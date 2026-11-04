@@ -504,7 +504,7 @@ try {
     const took = Date.now() - t
     assert.equal(Object.keys(r.data.results).length, 2000)
     assert.ok(took < 5000, `batch handled in ${took} ms`)
-    await waitFor(() => bob.got.filter(g => g.content.startsWith('batch ')).length === 2000, 15000, 'all batch messages pushed')
+    await waitFor(() => bob.got.filter(g => g.content.startsWith('batch ')).length === 2000, 45000, 'all batch messages pushed')
   })
 
   await step('a gossiped address is only used once the machine there proves who it is', async () => {

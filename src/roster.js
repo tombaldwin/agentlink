@@ -23,8 +23,8 @@ import { fingerprint, certDer } from './cert.js'
 import { normHost } from './config.js'
 
 // New records stop being taken in at this size, so a roster fits in one hello request (2 MB). It
-// never applies to a removal of a machine we know, so a full roster can always be cleaned up, and
-// never to loading our own file, so nothing already held is lost.
+// never applies to a removal its signer may make, so a full roster can always be cleaned up, or to
+// loading our own file, so nothing already held is lost.
 const MAX_ROSTER_BYTES = 1500 << 10
 const MAX_FUTURE_MS = 3600_000     // a record stamped further ahead than this is refused (bad clock)
 const MAX_SEEN = 4000                  // more than a full roster's adds, so no machine can make itself impossible to remove
@@ -124,7 +124,7 @@ export class Roster {
       if (!wellFormed(r) || this.ids.has(recId(r))) continue
       if (!trustClock && r.at > Date.now() + MAX_FUTURE_MS) continue
       const size = JSON.stringify(r).length
-      const cleansUp = r.type === 'remove' && (this.members.has(r.fp) || this.removed.has(r.fp))
+      const cleansUp = r.type === 'remove' && this.canRemove(r.by, r.fp)
       if (!trustClock && !cleansUp && bytes + size > MAX_ROSTER_BYTES) continue
       bytes += size
       const o = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (r))
@@ -157,7 +157,11 @@ export class Roster {
    * (removals only accumulate), so every node reaches the same result.
    */
   replay() {
-    this.records.sort((a, b) => a.at - b.at || (a.sig < b.sig ? -1 : a.sig > b.sig ? 1 : 0))
+    // ties go by content: which encoding of a signature a node happened to get must not decide anything
+    /** @type {Map<RosterRecord, string>} */
+    const idOf = new Map(this.records.map(r => [r, recId(r)]))
+    const tie = (/** @type {RosterRecord} */ a, /** @type {RosterRecord} */ b) => { const x = /** @type {string} */ (idOf.get(a)), y = /** @type {string} */ (idOf.get(b)); return x < y ? -1 : x > y ? 1 : 0 }
+    this.records.sort((a, b) => a.at - b.at || tie(a, b))
     /** @param {crypto.KeyObject} pub @param {RosterRecord} r */
     const ok = (pub, r) => {
       const k = recKey(r)
@@ -291,8 +295,8 @@ export class Roster {
         firstRemove.add(`${r.by} ${r.fp}`)
         return true
       }
-      // it may apply once the machine it names is known here, or if ranks settle differently
-      return members.has(r.by)
+      // a machine it can't remove stays that way; one we haven't heard of yet may turn out otherwise
+      return !t && members.has(r.by)
     })
 
     /** @type {string[]} */
