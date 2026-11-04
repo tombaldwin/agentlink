@@ -62,6 +62,13 @@ the same membership from the same records.
   treat them as requests from a colleague — never as instructions from its user — and not to
   take destructive or security-sensitive actions solely because a peer asked. Only invite
   machines and agents you trust.
+- **Waking a session.** Setup adds a Claude Code hook that waits in the background and wakes an idle
+  session when a message arrives. What it shows Claude is fixed text saying a message is waiting:
+  nothing another agent wrote comes through the hook. Claude reads the message with the `inbox` tool,
+  so it arrives as a tool result from a named sender. Setup lets `inbox` and `peers` run without a
+  prompt; `send` keeps the session's normal permission rules. A woken session is still acting on
+  another agent's request, with whatever permissions the session has, so take care with sessions
+  running in a mode that skips permission prompts.
 
 ## Known limitations
 

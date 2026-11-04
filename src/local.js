@@ -147,6 +147,22 @@ export class Local {
 
   /** Long-lived SSE stream of messages for session `name`; `token` lets a reconnect reclaim the same name. Resolves when the stream ends. */
   /**
+   * Wait for news for the session owned by one of `pids`. null: there's no such session (yet).
+   * @param {number[]} pids @returns {Promise<{ event: string, name?: string, count?: number } | null>}
+   */
+  async wakeWait(pids) {
+    const { res } = await authedRaw(this.opts({ timeout: 0, path: `/local/wake?pids=${pids.join(',')}` }))
+    if (res.statusCode !== 200) { res.destroy(); return null }
+    let buf = ''
+    for await (const chunk of res) {
+      buf += chunk
+      const m = buf.match(/event: (\w+)\ndata: (.*)\n\n/)
+      if (m) { res.destroy(); return { event: m[1], ...JSON.parse(m[2]) } }
+    }
+    return { event: 'closed' }
+  }
+
+  /**
    * @param {string} name
    * @param {string} token
    * @param {(event: string, data: any) => Promise<void> | void} onEvent
@@ -157,7 +173,8 @@ export class Local {
     try {
       ({ res } = await authedRaw(this.opts({
         timeout: 0, signal,
-        path: `/local/stream?name=${encodeURIComponent(name)}&token=${encodeURIComponent(token)}${poll ? '&mode=poll' : ''}`,
+        // owner: the Claude session that started this adapter, so its hook can find it (see wake.js)
+        path: `/local/stream?name=${encodeURIComponent(name)}&token=${encodeURIComponent(token)}&owner=${process.ppid}${poll ? '&mode=poll' : ''}`,
       })))
     } catch (e) { throw /** @type {any} */ (e)?.name === 'AbortError' ? e : this.wrap(e) }
     if (res.statusCode !== 200) { res.destroy(); throw new Error(`stream HTTP ${res.statusCode}`) }

@@ -49,7 +49,6 @@ export function checkAdapter() {
 const dq = (/** @type {unknown} */ v) => `"${String(v).replace(/[\\"$`]/g, '\\$&')}"`
 /** Single-quote for sh. */
 const sq = (/** @type {unknown} */ v) => `'${String(v).replace(/'/g, `'\\''`)}'`
-const launcher = () => `${selfCmd().map(a => a.startsWith('--') ? a : dq(a)).join(' ')} claude`
 
 /** Full path of `cmd` on PATH, or null. @param {string} cmd */
 export function which(cmd) {
@@ -136,7 +135,8 @@ const configFile = dir => dir ? path.join(dir, '.claude.json') : path.join(HOME,
 export function isRegistered(dir) {
   try {
     const s = JSON.parse(fs.readFileSync(configFile(dir), 'utf8')).mcpServers?.agentlink
-    return !!s && JSON.stringify([s.command, ...(s.args || [])]) === JSON.stringify(adapterCmd())
+    if (!s || JSON.stringify([s.command, ...(s.args || [])]) !== JSON.stringify(adapterCmd())) return false
+    return WAKE_EVENTS.every(ev => readSettings(settingsFile(dir)).hooks?.[ev]?.some((/** @type {any} */ g) => g.hooks?.some((/** @type {any} */ h) => isWakeHook(h) && h.command === wakeCmd())))
   } catch { return false }
 }
 
@@ -156,6 +156,7 @@ export function register(dir) {
   spawnSync(claude, ['mcp', 'remove', '-s', 'user', 'agentlink'], { stdio: 'ignore', env })
   const r = spawnSync(claude, ['mcp', 'add', '-s', 'user', 'agentlink', '--', ...adapterCmd()], { encoding: 'utf8', env })
   if (r.status !== 0) throw new Error((r.stderr || r.stdout || `exit ${r.status}`).trim())
+  installHook(dir)
   rememberDir(dir)
 }
 
@@ -163,21 +164,76 @@ export function register(dir) {
 export function unregister(dir) {
   const claude = claudeBin()
   if (claude) spawnSync(claude, ['mcp', 'remove', '-s', 'user', 'agentlink'], { stdio: 'ignore', env: envFor(dir) })
+  removeHook(dir)
 }
 
-/** The `<alias>-link` aliases: each account's own launch command with agentlink + channels enabled. */
-export function peerAliases(accounts = claudeAccounts()) {
-  return accounts.map(a => {
-    let value
-    if (a.aliasValue) value = a.aliasValue.replace(/(^|\s)claude(?=\s|$)/, `$1${launcher()}`)
-    else if (a.dir) value = `CLAUDE_CONFIG_DIR=${dq(a.dir)} ${launcher()}`
-    else value = launcher()
-    return { name: `${a.alias}-link`, value }
-  })
+// The hook that wakes idle sessions. SessionStart arms it, and each Stop arms it again, since it ends
+// when it wakes the session. The wait runs in the background for as long as the session is idle, and
+// Claude Code enforces a timeout even so: 20 days, the most a timer can hold with room to spare.
+const WAKE_EVENTS = ['SessionStart', 'Stop']
+const WAKE_TIMEOUT_S = 20 * 86400
+// reading messages and seeing who's online run unattended; sending keeps the session's normal rules
+const WAKE_TOOLS = ['mcp__agentlink__inbox', 'mcp__agentlink__peers']
+
+const settingsFile = (/** @type {string} */ dir) => path.join(dir || path.join(HOME, '.claude'), 'settings.json')
+const wakeCmd = () => [...selfCmd().map(a => a.startsWith('-') ? a : sq(a)), 'wake'].join(' ')
+/** @param {any} h */
+const isWakeHook = h => typeof h?.command === 'string' && /agentlink/.test(h.command) && / wake$/.test(h.command)
+
+/** @param {string} file @returns {Record<string, any>} */
+function readSettings(file) {
+  let text
+  try { text = fs.readFileSync(file, 'utf8') } catch { return {} }
+  // never overwrite settings we can't read: they're the user's
+  try { const v = JSON.parse(text); if (v && typeof v === 'object' && !Array.isArray(v)) return v } catch {}
+  throw new Error(`${file} isn't valid JSON, so agentlink left it alone. Fix it, then run agentlink setup again`)
+}
+/** @param {string} file @param {Record<string, any>} s */
+function writeSettings(file, s) {
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  const tmp = `${file}.${process.pid}.tmp`
+  fs.writeFileSync(tmp, JSON.stringify(s, null, 2) + '\n')
+  fs.renameSync(tmp, file)
+}
+/** `s` with no agentlink hook left, keeping everything else. @param {Record<string, any>} s */
+function withoutHook(s) {
+  if (!s.hooks || typeof s.hooks !== 'object') return s
+  for (const ev of WAKE_EVENTS) {
+    if (!Array.isArray(s.hooks[ev])) continue
+    s.hooks[ev] = s.hooks[ev].map((/** @type {any} */ g) => (Array.isArray(g?.hooks) ? { ...g, hooks: g.hooks.filter(isWakeHook).length ? g.hooks.filter((/** @type {any} */ h) => !isWakeHook(h)) : g.hooks } : g)).filter((/** @type {any} */ g) => !Array.isArray(g?.hooks) || g.hooks.length)
+    if (!s.hooks[ev].length) delete s.hooks[ev]
+  }
+  if (!Object.keys(s.hooks).length) delete s.hooks
+  return s
+}
+
+/** Add the wake hook to one account's settings. @param {string} dir */
+export function installHook(dir) {
+  const file = settingsFile(dir)
+  const s = withoutHook(readSettings(file))
+  s.hooks ??= {}
+  for (const ev of WAKE_EVENTS) (s.hooks[ev] ??= []).push({ hooks: [{ type: 'command', command: wakeCmd(), asyncRewake: true, timeout: WAKE_TIMEOUT_S }] })
+  s.permissions ??= {}
+  s.permissions.allow = [...new Set([...(s.permissions.allow || []), ...WAKE_TOOLS])]
+  writeSettings(file, s)
+}
+
+/** @param {string} dir */
+export function removeHook(dir) {
+  const file = settingsFile(dir)
+  if (!fs.existsSync(file)) return
+  const s = withoutHook(readSettings(file))
+  if (Array.isArray(s.permissions?.allow)) {
+    s.permissions.allow = s.permissions.allow.filter((/** @type {string} */ t) => !WAKE_TOOLS.includes(t))
+    if (!s.permissions.allow.length) delete s.permissions.allow
+    if (!Object.keys(s.permissions).length) delete s.permissions
+  }
+  writeSettings(file, s)
 }
 
 /**
- * Rewrite the managed block in the shell rc (aliases + optional PATH entry).
+ * Rewrite the managed block in the shell rc (the PATH entry, if one is needed). It used to hold
+ * launch aliases too; a re-run clears those.
  * @param {{ pathDir?: string }} [opts]
  */
 export function writeShellBlock({ pathDir } = {}) {
@@ -201,15 +257,13 @@ export function writeShellBlock({ pathDir } = {}) {
  * @param {boolean} force
  */
 function writeBlock(rc, cur, pathDir, force) {
-  const aliases = peerAliases()
   const lines = [BEGIN]
   // compare with the PATH the user's shell had before the installer touched it
   const userPath = (process.env.AGENTLINK_ORIG_PATH || process.env.PATH || '').split(':')
   if (pathDir && (force || !userPath.includes(pathDir))) lines.push(`export PATH=${dq(pathDir)}:"$PATH"`)
-  for (const a of aliases) lines.push(`alias ${a.name}=${sq(a.value)}`)
   lines.push(END)
   fs.writeFileSync(rc, stripBlock(cur).replace(/\n*$/, '\n') + '\n' + lines.join('\n') + '\n')
-  return { rc, aliases }
+  return { rc }
 }
 
 export function removeShellBlock() {

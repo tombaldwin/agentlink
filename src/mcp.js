@@ -43,7 +43,7 @@ export async function runAdapter(cfg, { name, poll = false, channel } = {}) {
   // not a channel session (a plain `claude`, or --poll): keep messages queued for the inbox tool
   if (!poll && !(channel ?? channelEnabled())) {
     poll = true
-    log('channel not enabled for this session (start it with agentlink claude or a *-link alias for live wake-ups); messages are read with the inbox tool')
+    log('messages are read with the inbox tool; a hook wakes the session when one arrives')
   }
   const local = new Local(cfg)
   let myName = sanitizeName(name || process.env.AGENTLINK_NAME || path.basename(process.cwd()))
@@ -114,7 +114,7 @@ export async function runAdapter(cfg, { name, poll = false, channel } = {}) {
       } catch (e) {
         if (e instanceof StaleError) {
           if (!stale) log(errMsg(e))
-          stale = `${errMsg(e)}. Restart this Claude session to reconnect: exit, then start it again with \`agentlink claude --continue\` (or your *-link alias with --continue).`
+          stale = `${errMsg(e)}. Restart this Claude session to reconnect: exit, then start it again with \`claude --continue\`.`
           firstHello(null)
           await sleep(60_000)   // keep checking slowly, in case the node goes back to this version
           continue

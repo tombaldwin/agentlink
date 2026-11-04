@@ -32,7 +32,7 @@ const HELP = `agentlink ${VERSION} — wake-on-message networking for AI agents
 
   agentlink setup               set up this machine (keeps its network, or creates one if it has
                                 none; --new-network to start over). Joining uses the invite line.
-  agentlink claude [args...]    start Claude Code (current account) with agentlink enabled
+  agentlink claude [args...]    start Claude Code with channels instead of the wake hook (optional)
   agentlink send <to> <msg...>  send a message, e.g. agentlink send reviewer@laptop.local "hi"
   agentlink peers               who's online
   agentlink status              node status, queues, known machines
@@ -80,6 +80,10 @@ async function main() {
       const { runAdapter } = await import('../src/mcp.js')   // --check: loading it (and its dependencies) is the check
       if (flags.check) return console.log('ok')
       return runAdapter(loadConfig(), { name: flags.name, poll: !!flags.poll, channel: flags.channel ? true : undefined })
+    }
+    case 'wake': {                              // run by the Claude Code hook, not by people
+      const { runWake } = await import('../src/wake.js')
+      process.exit(await runWake())
     }
     case 'claude': {
       const { launchClaude } = await import('../src/claude.js')

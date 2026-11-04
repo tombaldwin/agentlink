@@ -29,11 +29,12 @@ the machine that made the invite. That key exists only while the invite is open,
 line stops working (curl reports a key mismatch or a 404). Run `agentlink invite` on any member
 for a new one.
 
-**Then** open a new terminal and start Claude with `claude-link` (each extra account gets its
-own alias, e.g. `claude2-link`). Claude Code shows a warning before it starts, which you should
-[read before accepting](#the-channels-warning).
+**Then** restart Claude Code, as usual with `claude`. New sessions are on the network from now on;
+`claude --continue` picks up where you left off.
 
-That's it: no config files, no accounts, no server to run. On Apple silicon Macs it installs
+That's it: no config files, no accounts, no server to run. Setup adds agentlink's tools and a small
+background hook to Claude Code's settings, and `agentlink uninstall` takes them out again. On Apple
+silicon Macs it installs
 agentlink as a signed app (`~/Applications/agentlink.app`, from the inviting machine or the latest
 release, refused unless Apple's certificate for agentlink's team signed it); macOS asks once to
 let **agentlink** find devices on your local network: click Allow. Elsewhere it uses npm, and
@@ -54,8 +55,8 @@ your laptop in the same way.
 
 ## What you get
 
-- **Wake on message.** Messages arrive in the recipient session as a Claude Code channel event
-  and Claude acts on them, even when idle (it still stops at any permission prompt). Tools: `send`, `peers`, `inbox`, plus `network` and
+- **Wake on message.** A background hook wakes the session when a message arrives, even when it's
+  idle, and Claude reads it and acts on it (it still stops at any permission prompt). Tools: `send`, `peers`, `inbox`, plus `network` and
   `invite` for managing the network. Removing machines and uninstalling stay in the terminal, so
   you always see the command first.
 - **Nothing gets lost.** Messages are stored on disk at every hop and retried. If the recipient
@@ -65,15 +66,14 @@ your laptop in the same way.
 - **Zero-config discovery.** Machines on the same LAN find each other automatically (encrypted UDP
   beacons) and share what they know, so every machine learns the whole network.
 - **Multiple Claude accounts.** Every `CLAUDE_CONFIG_DIR` account on a machine is enabled
-  (`~/.claude*` dirs and shell aliases); new accounts are enabled the first time you run
-  `agentlink claude` under them.
+  (`~/.claude*` dirs and shell aliases); run `agentlink setup` again to add new accounts.
 - **Beyond the LAN.** With Tailscale on both machines, `agentlink invite` includes the Tailscale
   name and joining machines use it automatically. A machine that moves between networks is found
   again at its other addresses, within a couple of minutes.
 - **Other agents.** Any MCP agent can join with `agentlink mcp --poll` (it reads with `inbox`
   instead of being woken).
 
-Name a session with `AGENTLINK_NAME=<name> claude-link` (default: the project folder name).
+Name a session with `AGENTLINK_NAME=<name> claude` (default: the project folder name).
 
 ## Commands
 
@@ -81,7 +81,7 @@ Claude handles everyday use and invites; these are for terminals and scripts.
 
     agentlink send <name@host> <msg>   agentlink peers     agentlink status
     agentlink invite [--list|--revoke] agentlink remove <host>
-    agentlink claude                   agentlink uninstall
+    agentlink uninstall
 
 `agentlink peers` says why a machine is offline (the node log, `~/.agentlink/node.log`, records
 when a machine stops or starts answering).
@@ -93,7 +93,7 @@ followed by `agentlink setup`). It keeps the machine's key, network and messages
 your machines: a machine running an incompatible version is reported as such
 (`… runs an older version of agentlink`) and can't exchange messages until it's upgraded.
 Claude sessions that were running during the upgrade say they need restarting
-(`agentlink claude --continue` resumes the conversation); they never stop the newer node.
+(`claude --continue` resumes the conversation); they never stop the newer node.
 
 ## Security
 
@@ -120,30 +120,15 @@ members. Any member can invite machines, and a machine can remove the ones that 
 
 See [SECURITY.md](SECURITY.md) for details and known limitations.
 
-## The channels warning
-
-Waking an idle session uses Claude Code channels, a research preview. Only channels on Claude
-Code's approved list load normally, and agentlink isn't on it, so `claude-link` passes
-`--dangerously-load-development-channels=server:agentlink`. Claude Code then stops at a full-screen
-warning, "WARNING: Loading development channels":
-
-> --dangerously-load-development-channels is for local channel development only. Do not use this
-> option to run channels you have downloaded off the internet.
-
-That describes agentlink, so it's your decision, and you should make it knowingly. A channel can put
-messages into your session, and agentlink's come from your other machines. To go on, choose **I am
-using this for local development**. If you'd rather not, choose **Exit**: agentlink still works
-without channels, just without waking idle sessions. Start sessions with plain `claude`, and
-Claude reads messages with the `inbox` tool.
-
 ## Caveats
 
-- A session started with plain `claude` (or `claude-link -p`) isn't woken: its messages wait for
-  the `inbox` tool instead.
-- Claude Code doesn't confirm that a pushed message reached the session, so senders see "pushed to
-  … live session" rather than "read". If your organisation doesn't allow channels (claude.ai
-  Team/Enterprise without `channelsEnabled`, Bedrock, Vertex), Claude Code silently drops pushes:
-  start sessions with `AGENTLINK_POLL=1 claude-link` so messages wait for the `inbox` tool.
+- Only interactive sessions are woken. `claude -p` runs and SDK sessions aren't, and nothing about
+  them changes: their messages wait for the `inbox` tool.
+- A woken session reads messages by itself, but stops at permission prompts as usual, so replying
+  may wait for you. Setup allows only the `inbox` and `peers` tools to run unattended.
+- Senders see "pushed to … live session" when the session has been told, not when Claude has read
+  the message.
+- A session idle for more than 20 days stops being woken until its next turn.
 - Re-running `agentlink setup` keeps the machine on its network; pass `--new-network` to start a
   new one.
 - A machine's name is fixed when it joins. To rename it, remove it and join again under the new

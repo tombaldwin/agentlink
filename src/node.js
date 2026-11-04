@@ -81,7 +81,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
   } catch (e) { server.close(); throw e }
   const myPub = crypto.createPublicKey(me.key)
   if (!roster.members.has(me.fp)) log(roster.removed.has(me.fp) ? 'this machine has been removed from the network' : 'this machine is not (yet) a member of its network')
-  /** @type {Map<string, { res: Res, sent: Set<string>, token: string, live: boolean }>} name -> session stream (live: woken by channel pushes) */
+  /** @type {Map<string, { res: Res, sent: Set<string>, token: string, live: boolean, owner: number, notified: Set<string>, waiter: Res | null, hooked: boolean }>} name -> session stream (live: woken by channel pushes) */
   const sessions = new Map()
 
   const q = {
@@ -503,7 +503,8 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       if (!store(env, cfg.host, to.name, 'inbox', 'queued')) return null
       if (toPump) toPump.add(to.name)
       else pump(to.name)
-      return sessions.get(to.name)?.live ? 'live' : 'queued'
+      const s = sessions.get(to.name)
+      return s?.live || s?.hooked ? 'live' : 'queued'
     }
     if (!store(env, to.host, to.name, 'held', 'pending')) return null
     kick()
@@ -519,6 +520,19 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       s.sent.add(r.id)
       sse(s.res, 'message', { id: r.id, from: r.from_addr, to: r.to_addr, body: r.body, sent_at: r.sent_at })
     }
+    nudge(name)
+  }
+
+  /** Wake `name`'s session if a wait is open and it has messages it hasn't been told about. @param {string} name */
+  function nudge(name) {
+    const s = sessions.get(name)
+    if (!s?.waiter) return
+    const fresh = [...s.sent].filter(id => !s.notified.has(id))
+    if (!fresh.length) return
+    for (const id of fresh) s.notified.add(id)
+    sse(s.waiter, 'wake', { name, count: fresh.length })
+    s.waiter.end()
+    s.waiter = null
   }
 
   /** Split rows into request-sized batches. */
@@ -724,7 +738,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
   /** @param {string} name */
   function localStatus(name) {
     const s = sessions.get(name)
-    return s?.live ? 'pushed to its live session' : s ? `waiting in ${name}'s inbox (the session is connected but reads with the inbox tool)` : `queued until ${name} connects`
+    return s?.live || s?.hooked ? 'pushed to its live session' : s ? `waiting in ${name}'s inbox (the session is connected but reads with the inbox tool)` : `queued until ${name} connects`
   }
 
   /** @type {Map<string, string>} host -> why it was last unreachable ('' once reached) */
@@ -948,16 +962,36 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
         let name = want
         const existing = sessions.get(want)
         // a reconnecting session (same token) replaces its own stale stream; anyone else gets a new name
-        if (existing && token && existing.token === token) { existing.res.end(); sessions.delete(want) }
+        const reconnecting = existing && token && existing.token === token ? existing : null
+        if (reconnecting) { reconnecting.res.end(); reconnecting.waiter?.end(); sessions.delete(want) }
         for (let i = 2; sessions.has(name); i++) name = `${want.slice(0, 47 - String(i).length)}-${i}`   // stays within the 48-char name limit
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
-        const s = { res, sent: new Set(), token, live: u.searchParams.get('mode') !== 'poll' }
+        const s = {
+          res, sent: new Set(), token, live: u.searchParams.get('mode') !== 'poll', owner: Number(u.searchParams.get('owner')) || 0,
+          // told about already, so a session that doesn't read a message isn't woken for it again and again
+          notified: reconnecting?.notified ?? new Set(), waiter: /** @type {Res | null} */ (null), hooked: !!reconnecting?.hooked,
+        }
         sessions.set(name, s)
         sse(res, 'hello', { name, address: `${name}@${cfg.host}`, host: cfg.host })
         const ping = setInterval(() => res.write(': ping\n\n'), 20_000)
-        res.on('close', () => { clearInterval(ping); if (sessions.get(name) === s) sessions.delete(name) })
+        res.on('close', () => { clearInterval(ping); s.waiter?.end(); if (sessions.get(name) === s) sessions.delete(name) })
         log(`session connected: ${name}`)
         pump(name)
+        return
+      }
+      case 'GET /local/wake': {                 // the wait behind `agentlink wake`: answers once, when there's news
+        const pids = String(u.searchParams.get('pids') || '').split(',').map(Number).filter(Boolean)
+        const found = [...sessions].find(([, x]) => x.owner && pids.includes(x.owner))
+        if (!found) return reply(res, 404, { error: 'no session' })
+        const [name, s] = found
+        res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
+        if (s.live) { sse(res, 'done', {}); return res.end() }   // a channel session is woken by the push itself
+        if (s.waiter) { sse(s.waiter, 'done', {}); s.waiter.end() }
+        s.waiter = res
+        s.hooked = true                         // its hook is working: this session gets woken
+        const ping = setInterval(() => res.write(': ping\n\n'), 20_000)
+        res.on('close', () => { clearInterval(ping); if (s.waiter === res) s.waiter = null })
+        nudge(name)
         return
       }
       case 'POST /local/ack': {               // state 'pushed': shown in a channel session (no read receipt)

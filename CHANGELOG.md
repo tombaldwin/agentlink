@@ -22,6 +22,8 @@ First release.
 - The installer checks the certificate behind the app's signature, not the team it states.
 - The app carries the licence notices of Node.js and the packages it bundles.
 - The app has an icon.
+- A background Claude Code hook wakes idle sessions, so people start Claude as usual: no launch
+  alias, no development-channels warning, and it works where channels are turned off.
 - Invites offer an IP address where there's no Tailscale name, for machines that can't look up
   `.local` names.
 

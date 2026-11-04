@@ -1,4 +1,4 @@
-// Account detection and shell-alias management, against a throwaway HOME.
+// Account detection, the shell block and the wake hook, against a throwaway HOME.
 import { test, before } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -37,14 +37,6 @@ test('finds the default account, ~/.claude* dirs and CLAUDE_CONFIG_DIR aliases',
   assert.equal(accts.length, 3)
 })
 
-test('peer aliases reuse each account alias, swapping claude for the launcher', () => {
-  const al = Object.fromEntries(c.peerAliases().map(a => [a.name, a.value]))
-  assert.deepEqual(Object.keys(al).sort(), ['claude-link', 'claude2-link', 'cw-link'])
-  assert.match(al['claude2-link'], /^CLAUDE_CONFIG_DIR="\$HOME\/\.claude2" ".*node.*" --no-warnings ".*agentlink\.js" claude$/)
-  assert.match(al['cw-link'], /agentlink\.js" claude --verbose$/)
-  assert.doesNotMatch(al['claude-link'], /CLAUDE_CONFIG_DIR/)
-})
-
 test('managed shell block is idempotent and removable', () => {
   const rc = path.join(HOME, '.zshrc')
   const original = fs.readFileSync(rc, 'utf8')
@@ -77,24 +69,69 @@ test('re-running setup from a normal shell keeps the PATH line', () => {
   fs.writeFileSync(rc, saved)
 })
 
-test('aliases with quotes and odd paths are written safely', () => {
-  const rc = path.join(HOME, '.zshrc')
-  const saved = fs.readFileSync(rc, 'utf8')
-  fs.appendFileSync(rc, `alias cq="CLAUDE_CONFIG_DIR=$HOME/.claude-q claude --append-system-prompt 'be brief'"\n`)
-  const { aliases } = c.writeShellBlock()
-  const line = fs.readFileSync(rc, 'utf8').split('\n').find(l => l.startsWith('alias cq-link='))
-  assert.ok(line, 'cq-link written')
-  assert.ok(aliases.some(a => a.name === 'cq-link'))
-  // the single quotes inside must be escaped for the single-quoted alias body
-  assert.match(line, /'\\''be brief'\\''/)
-  c.removeShellBlock()
-  fs.writeFileSync(rc, saved)
-})
-
 test('isRegistered reads the account config file', () => {
   assert.equal(c.isRegistered(''), false)
   fs.writeFileSync(path.join(HOME, '.claude.json'), JSON.stringify({ mcpServers: { agentlink: { command: c.adapterCmd()[0], args: c.adapterCmd().slice(1) } } }))
+  assert.equal(c.isRegistered(''), false, 'the adapter without the hook is half a setup')
+  c.installHook('')
   assert.equal(c.isRegistered(''), true)
   fs.writeFileSync(path.join(HOME, '.claude.json'), JSON.stringify({ mcpServers: { agentlink: { command: '/old/node', args: ['x'] } } }))
   assert.equal(c.isRegistered(''), false, 'stale path counts as unregistered')
+})
+
+test('a re-run clears the old launch aliases and keeps the PATH line', () => {
+  const rc = path.join(HOME, '.zshrc')
+  c.writeShellBlock({ pathDir: '/opt/agent link/bin' })
+  const text = fs.readFileSync(rc, 'utf8')
+  assert.ok(!/-link=/.test(text))
+  assert.match(text, /alias claude2=/, "the user's own aliases stay")
+})
+
+test('the wake hook goes into settings without disturbing them, and comes out cleanly', () => {
+  const dir = path.join(HOME, '.claude-hook')
+  fs.mkdirSync(dir)
+  const file = path.join(dir, 'settings.json')
+  const mine = { model: 'opus', hooks: { Stop: [{ hooks: [{ type: 'command', command: 'say done' }] }], PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'check' }] }] }, permissions: { allow: ['Bash(ls)'] } }
+  fs.writeFileSync(file, JSON.stringify(mine))
+  c.installHook(dir)
+  c.installHook(dir)                                   // twice is the same as once
+  const s = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(s.model, 'opus')
+  const wakes = ev => s.hooks[ev].flatMap(g => g.hooks).filter(h => / wake$/.test(h.command))
+  for (const ev of ['SessionStart', 'Stop']) {
+    assert.equal(wakes(ev).length, 1)
+    assert.equal(wakes(ev)[0].asyncRewake, true)
+    assert.ok(wakes(ev)[0].timeout >= 86400)
+  }
+  assert.ok(s.hooks.Stop.some(g => g.hooks.some(h => h.command === 'say done')), 'other Stop hooks stay')
+  assert.ok(s.permissions.allow.includes('mcp__agentlink__inbox') && s.permissions.allow.includes('Bash(ls)'))
+  assert.ok(!s.permissions.allow.includes('mcp__agentlink__send'), 'sending keeps the session\'s normal rules')
+  c.removeHook(dir)
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), mine)
+})
+
+test('settings that cannot be read are left alone', () => {
+  const dir = path.join(HOME, '.claude-broken')
+  fs.mkdirSync(dir)
+  fs.writeFileSync(path.join(dir, 'settings.json'), '{ not json')
+  assert.throws(() => c.installHook(dir), /isn't valid JSON/)
+  assert.equal(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'), '{ not json')
+})
+
+test('only an interactive session waits: a script must never hang on the hook', async () => {
+  const { interactive, wakeText } = await import('../../src/wake.js')
+  const env = {}
+  assert.ok(interactive('claude', 'ttys003', env))
+  assert.ok(interactive('claude --continue --rc', 'pts/2', env))
+  assert.ok(!interactive('claude -p hello', 'ttys003', env))
+  assert.ok(!interactive('claude --print hello', 'ttys003', env))
+  assert.ok(!interactive('claude --output-format=stream-json', 'ttys003', env))
+  assert.ok(!interactive('claude --input-format stream-json', 'ttys003', env))
+  assert.ok(!interactive('claude', '??', env), 'no terminal')
+  assert.ok(!interactive('claude', '?', env))
+  assert.ok(!interactive('claude', '', env))
+  assert.ok(!interactive('claude', 'ttys003', { CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' }))
+  assert.match(wakeText(1, 'bob'), /a new message has/)
+  assert.match(wakeText(3, 'bob'), /3 new messages have/)
+  assert.match(wakeText(1, 'bob'), /mcp__agentlink__inbox/)
 })

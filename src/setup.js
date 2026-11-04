@@ -138,20 +138,9 @@ export async function setup({ host, peers = [], noService, noClaude, noAlias, ne
     broken = checkAdapter()
     if (broken) warn(`Claude Code can't start agentlink, so sessions won't have it until this is fixed: ${broken}`)
   }
-  /** @type {string[]} */
-  let aliases = []
   let rc = ''
-  if (!noAlias) {
-    const r = writeShellBlock({ pathDir: process.env.AGENTLINK_BIN_DIR })
-    aliases = r.aliases.map(a => a.name)
-    rc = r.rc
-    ok(`shell aliases in ${r.rc}: ${aliases.join(', ')}`)
-  }
-
-  // this shell doesn't have the new aliases (or PATH entry) yet: say how to start Claude right now too
+  if (!noAlias) rc = writeShellBlock({ pathDir: process.env.AGENTLINK_BIN_DIR }).rc
   const binDir = process.env.AGENTLINK_BIN_DIR
-  const onPath = !binDir || (process.env.AGENTLINK_ORIG_PATH ?? process.env.PATH ?? '').split(':').includes(binDir)
-  const startNow = onPath ? 'agentlink claude' : `${path.join(binDir, 'agentlink')} claude`
   // moved to the app from an npm install: the old copy still works, but is no longer what runs
   if (SEA) {
     const real = (/** @type {string} */ p) => { try { return fs.realpathSync(p) } catch { return '' } }
@@ -160,17 +149,10 @@ export async function setup({ host, peers = [], noService, noClaude, noAlias, ne
     if (old) console.log(`  (an earlier npm install of agentlink is still at ${old}; new terminals use the app. Remove the old one with: npm uninstall -g @tombaldwin/agentlink)`)
   }
   console.log(`
-${broken ? 'Done, but see the warning above.' : 'Done.'} Start Claude with agentlink enabled using:
-  ${aliases.join('   ') || 'agentlink claude'}${aliases.length ? `
-(the aliases work in new terminals; in this one, run \`source ${rc}\` first, or use: ${startNow})` : ''}
-(or, for any account: CLAUDE_CONFIG_DIR=<dir> agentlink claude — new accounts are enabled automatically)
+${broken ? 'Done, but see the warning above.' : 'Done.'} Start Claude Code as usual: sessions started from now on are on the network
+(a session that's already running needs restarting: \`claude --continue\` picks up where it left off).
 Agents address each other as name@host, e.g. "send the test results to reviewer@laptop.local".
-Name a session with AGENTLINK_NAME=<name> (default: the project folder name).
-
-Claude Code shows "WARNING: Loading development channels" when these start: it's how a session gets
-woken by messages, and agentlink isn't on Claude Code's approved channel list. Read the warning, then
-choose "I am using this for local development" to go on. If you'd rather not, choose Exit and start
-sessions with plain \`claude\` instead: they aren't woken, and read messages with the inbox tool.`)
+Name a session with AGENTLINK_NAME=<name> (default: the project folder name).`)
   if (banner) console.log(`\n${banner}`)
   if (running && invite) {
     try { console.log(`\n${invitePrompt(await local.req('POST', '/local/invite'))}`) }
@@ -245,7 +227,7 @@ Once it's used, expired or revoked, curl rejects the line (a key mismatch or a 4
 }
 
 function registerClaude() {
-  if (!claudeBin()) return warn('claude not found on PATH — sessions started with `agentlink claude` will register automatically once it is installed')
+  if (!claudeBin()) return warn('claude not found on PATH — run `agentlink setup` again once it is installed')
   for (const acct of claudeAccounts()) {
     const label = acct.dir ? `${acct.alias} (${acct.dir})` : 'default account'
     try { register(acct.dir); ok(`enabled for Claude account: ${label}`) }
