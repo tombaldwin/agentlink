@@ -34,6 +34,12 @@ const recPayload = r => JSON.stringify(['agentlink-roster-1', r.type, r.host ?? 
   ...(r.type === 'remove' ? [(r.seen ?? []).join(',')] : [])])
 /** A short id for a roster record (what a remove record lists in `seen`). @param {string} sig */
 export const recId = sig => sha256(sig).slice(0, 22)
+/**
+ * What a check of a record is remembered under: its whole content and signature. Never the signature
+ * alone, or a signature that was good for one record would pass for any other record carrying it.
+ * @param {import('./types.js').RosterRecord} r
+ */
+export const recKey = r => sha256(JSON.stringify([recPayload(r), r.sig]))
 /** @param {string} key @param {Omit<import('./types.js').RosterRecord, 'sig'>} r */
 export const signRecord = (key, r) => sign(key, recPayload(r))
 /** @param {crypto.KeyLike} pub @param {import('./types.js').RosterRecord} r */

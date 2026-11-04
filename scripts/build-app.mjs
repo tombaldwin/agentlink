@@ -63,7 +63,7 @@ if (!fs.existsSync(tarball) || sha256(fs.readFileSync(tarball)) !== want) {
   fs.writeFileSync(tarball, Buffer.from(await res.arrayBuffer()))
 }
 if (sha256(fs.readFileSync(tarball)) !== want) throw new Error(`${nodeName}.tar.gz failed its checksum`)
-run('tar', ['xzf', tarball, '-C', WORK, `${nodeName}/bin/node`])
+run('tar', ['xzf', tarball, '-C', WORK, `${nodeName}/bin/node`, `${nodeName}/LICENSE`])
 const nodeBin = path.join(WORK, nodeName, 'bin', 'node')
 // codesign -dv reports on stderr
 const teamId = (run('sh', ['-c', 'codesign -dv "$1" 2>&1', 'sh', nodeBin], true).match(/TeamIdentifier=(\S+)/) || [])[1] || ''
@@ -79,7 +79,8 @@ fs.renameSync(path.join(WORK, tgzName), path.join(WORK, 'agentlink.tgz'))
 step('bundling')
 const esbuild = await import('esbuild')
 const mainJs = path.join(WORK, 'agentlink.cjs')
-await esbuild.build({
+const { metafile } = await esbuild.build({
+  metafile: true,
   entryPoints: [path.join(ROOT, 'bin', 'agentlink.js')],
   bundle: true, platform: 'node', format: 'cjs', target: 'node24', outfile: mainJs,
   // import.meta is only used when running from an npm install (src/self.js), never in the executable
@@ -108,6 +109,25 @@ run('codesign', ['--remove-signature', exe])
 step('injecting the program into the executable')
 run(process.execPath, [path.join(ROOT, 'node_modules', 'postject', 'dist', 'cli.js'), exe, 'NODE_SEA_BLOB', blob,
   '--sentinel-fuse', SEA_FUSE, '--macho-segment-name', 'NODE_SEA'], true)
+
+// the licences of everything the executable carries, which they require us to pass on
+const licenceOf = (/** @type {string} */ dir) => {
+  const f = fs.readdirSync(dir).find(n => /^licen[cs]e/i.test(n))
+  if (!f) throw new Error(`no licence file in ${dir}: add its notice to the app by hand`)
+  return fs.readFileSync(path.join(dir, f), 'utf8').trim()
+}
+const packages = [...new Set(Object.keys(metafile.inputs).map(f => f.match(/^(.*node_modules\/(?:@[^/]+\/)?[^/]+)\//)?.[1]).filter(d => d !== undefined))].sort()
+const line = '-'.repeat(72)
+fs.mkdirSync(path.join(appDir, 'Contents', 'Resources'))
+fs.writeFileSync(path.join(appDir, 'Contents', 'Resources', 'THIRD_PARTY_NOTICES.txt'), [
+  `agentlink ${PKG.version}\n\n${licenceOf(ROOT)}`,
+  `Node.js ${NODE_VERSION}\n\n${fs.readFileSync(path.join(WORK, nodeName, 'LICENSE'), 'utf8').trim()}`,
+  ...packages.map(d => {
+    const p = JSON.parse(fs.readFileSync(path.join(ROOT, d, 'package.json'), 'utf8'))
+    return `${p.name} ${p.version}\n\n${licenceOf(path.join(ROOT, d))}`
+  }),
+].join(`\n\n${line}\n\n`) + '\n')
+step(`licence notices for Node.js and ${packages.length} packages`)
 
 const esc = (/** @type {string} */ s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;')
 const plist = (/** @type {Record<string, string | boolean>} */ d) => `<?xml version="1.0" encoding="UTF-8"?>

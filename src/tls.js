@@ -95,8 +95,10 @@ export async function authedRaw(o) {
     /** @type {tls.TLSSocket | null} */
     let sock = null
     const r1 = await new Promise((resolve, reject) => {
-      const req = https.request({ ...base, method: 'GET', path: '/v1/auth', headers: { 'x-agentlink-proto': String(PROTO) } }, resolve)
-      req.setTimeout(o.timeout || 4000, () => req.destroy(new Error('timed out')))
+      // the timeout option, not req.setTimeout: that one only starts once the connection is up, so a
+      // silently dropped connect would wait out the OS's limit (over a minute)
+      const req = https.request({ ...base, method: 'GET', path: '/v1/auth', headers: { 'x-agentlink-proto': String(PROTO) }, timeout: o.timeout || 4000 }, resolve)
+      req.on('timeout', () => req.destroy(new Error('timed out')))
       req.on('error', e => reject(mapErr(e)))
       req.on('socket', s => {
         const t = /** @type {tls.TLSSocket} */ (s)
@@ -165,6 +167,7 @@ export async function pinnedRequest(o, max = 2 << 20) {
     const req = https.request({
       host, port, method: o.method || 'GET', path: o.path, agent: false,
       headers: body ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } : {},
+      timeout: o.timeout ?? 4000,                // covers connecting too (see authedRaw)
       ca: o.trust.map(t => t.pem),               // only these certificates can validate
       minVersion: 'TLSv1.2',
       checkServerIdentity: (_h, c) => {
@@ -173,7 +176,7 @@ export async function pinnedRequest(o, max = 2 << 20) {
         return notExpected()
       },
     }, resolve)
-    req.setTimeout(o.timeout ?? 4000, () => req.destroy(new Error('timed out')))
+    req.on('timeout', () => req.destroy(new Error('timed out')))
     req.on('error', e => {
       const code = /** @type {any} */ (e).code
       // a server whose certificate isn't one of ours fails CA validation before the identity check

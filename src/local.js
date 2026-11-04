@@ -9,7 +9,8 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import { authedRequest, authedRaw, PinError, PROTO } from './tls.js'
-import { ensureHomeDir, errMsg, readDks, VERSION } from './config.js'
+import { ensureHomeDir, errMsg, rosterPath, VERSION } from './config.js'
+import { Roster } from './roster.js'
 import { selfCmd } from './claude.js'
 
 const sleep = (/** @type {number} */ ms) => new Promise(r => setTimeout(r, ms))
@@ -32,6 +33,24 @@ export function versionOf(h) {
   const differs = proto !== PROTO || h.version !== VERSION
   const newer = proto !== PROTO ? proto > PROTO : cmpVersion(h.version, VERSION) > 0
   return { differs, newer: differs && newer }
+}
+
+/** @type {{ stamp: string, dks: string[] } | null} */
+let dkCache = null
+/**
+ * The discovery keys that open this machine's node, read fresh (a removal elsewhere rotates them
+ * while long-lived clients, like MCP adapters, keep running) but through the roster's own rules, so
+ * only keys that count are used. Replaying the roster is only needed when the file has changed.
+ * @param {string} [dir] @returns {string[]}
+ */
+function readDks(dir) {
+  try {
+    const file = rosterPath(dir)
+    const st = fs.statSync(file)
+    const stamp = `${file} ${st.mtimeMs} ${st.size}`
+    if (dkCache?.stamp !== stamp) dkCache = { stamp, dks: Roster.load(file).gateDks() }
+    return dkCache.dks
+  } catch { return [] }
 }
 
 export class Local {

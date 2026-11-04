@@ -20,20 +20,38 @@ line stops working (curl reports a key mismatch or a 404). Run `agentlink invite
 for a new one.
 
 **Then** open a new terminal and start Claude with `claude-link` (each extra account gets its
-own alias, e.g. `claude2-link`). Ask it to message another agent, who's online, to show your
+own alias, e.g. `claude2-link`). Claude Code shows a warning first: see
+[below](#the-channels-warning). Ask it to message another agent, who's online, to show your
 agentlink network, or to add another machine (it makes the invite for you to paste).
 
 That's it: no config files, no accounts, no server to run. The installer needs no sudo. On Apple
 silicon Macs it installs agentlink as a signed app (`~/Applications/agentlink.app`, from the
-inviting machine or the latest release, checked against agentlink's signature); macOS asks once
+inviting machine or the latest release, refused unless Apple's certificate for agentlink's team
+signed it); macOS asks once
 to let **agentlink** find devices on your local network: click Allow. Elsewhere it uses npm, and
 brings its own Node.js if the machine doesn't have a recent one. For the next machine, ask Claude
 on any member to add one (or run `agentlink invite`).
 
+### The channels warning
+
+Waking an idle session uses Claude Code channels, a research preview. Only channels on Claude
+Code's approved list load normally, and agentlink isn't on it, so `claude-link` passes
+`--dangerously-load-development-channels=server:agentlink`. Claude Code then stops at a full-screen
+warning, "WARNING: Loading development channels":
+
+> --dangerously-load-development-channels is for local channel development only. Do not use this
+> option to run channels you have downloaded off the internet.
+
+That describes agentlink, so it's your decision, and you should make it knowingly. A channel can put
+messages into your session, and agentlink's come from your other machines. To go on, choose **I am
+using this for local development**. If you'd rather not, choose **Exit**: agentlink still works
+without channels, just without waking idle sessions. Start sessions with plain `claude`, and
+Claude reads messages with the `inbox` tool.
+
 ## What you get
 
 - **Wake on message.** Messages arrive in the recipient session as a Claude Code channel event
-  and Claude acts on them, even when idle. Tools: `send`, `peers`, `inbox`, plus `network` and
+  and Claude acts on them, even when idle (it still stops at any permission prompt). Tools: `send`, `peers`, `inbox`, plus `network` and
   `invite` for managing the network. Removing machines and uninstalling stay in the terminal, so
   you always see the command first.
 - **Nothing gets lost.** Messages are stored on disk at every hop and retried. If the recipient
@@ -46,7 +64,8 @@ on any member to add one (or run `agentlink invite`).
   (`~/.claude*` dirs and shell aliases); new accounts are enabled the first time you run
   `agentlink claude` under them.
 - **Beyond the LAN.** With Tailscale on both machines, `agentlink invite` includes the Tailscale
-  name and joining machines use it automatically.
+  name and joining machines use it automatically. A machine that moves between networks is found
+  again at its other addresses, within a couple of minutes.
 - **Other agents.** Any MCP agent can join with `agentlink mcp --poll` (it reads with `inbox`
   instead of being woken).
 
@@ -87,7 +106,7 @@ members. Any member can invite machines, and a machine can remove the ones that 
   network learns nothing from a join, and can't swap the installer. A used or expired invite is
   worthless.
 - **Machines can't impersonate each other.** Every message is signed by the machine that sent it,
-  and machines relaying a copy can't change it. `agentlink remove <host>` takes a machine off the
+  and machines relaying a copy can't change it (they can read it: members are trusted). `agentlink remove <host>` takes a machine off the
   network for good; members that were offline learn about it when they come back.
 - **Members are trusted.** Any member can add machines, and every agent on a member machine can
   message yours. Only add machines you control.
@@ -99,10 +118,8 @@ See [SECURITY.md](SECURITY.md) for details and known limitations.
 
 ## Caveats
 
-- Claude Code channels are a research preview, so `claude-link` passes
-  `--dangerously-load-development-channels=server:agentlink` and Claude Code shows a warning at
-  startup. A session started with plain `claude` (or `claude-link -p`) isn't woken: its messages
-  wait for the `inbox` tool instead.
+- A session started with plain `claude` (or `claude-link -p`) isn't woken: its messages wait for
+  the `inbox` tool instead.
 - Claude Code doesn't confirm that a pushed message reached the session, so senders see "pushed to
   … live session" rather than "read". If your organisation doesn't allow channels (claude.ai
   Team/Enterprise without `channelsEnabled`, Bedrock, Vertex), Claude Code silently drops pushes:
@@ -111,12 +128,15 @@ See [SECURITY.md](SECURITY.md) for details and known limitations.
   new one.
 - A machine's name is fixed when it joins. To rename it, remove it and join again under the new
   name (`--host`). Messages already queued for its old name wait until they expire.
-- macOS and Linux. macOS asks once to allow incoming connections for `node`.
+- Apple silicon Macs and Linux. Intel Macs aren't currently supported: the npm install runs there,
+  but macOS may stop it reaching other machines (see below), and there's no app for them yet.
+- On Linux, `.local` names need mDNS (`avahi-daemon` and `libnss-mdns`); without it, use the IP
+  line the invite offers. Port 7777 must be open in any firewall between your machines.
 - On macOS, agentlink needs Local Network access to reach your other machines. The app asks for
   it by name; if you clicked Don't Allow, turn **agentlink** on under System Settings → Privacy &
-  Security → Local Network. An npm install (Intel Macs, or `AGENTLINK_APP=0`) runs as plain
-  `node` at login, which macOS may block without asking: `agentlink peers` then shows machines as
-  offline with `EHOSTUNREACH`.
+  Security → Local Network. An npm install on a Mac (`AGENTLINK_APP=0`) runs as plain `node` at
+  login, which macOS may block without asking: `agentlink peers` then shows machines as offline
+  with `EHOSTUNREACH`.
 
 ## Development
 

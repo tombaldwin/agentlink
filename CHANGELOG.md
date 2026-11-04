@@ -4,6 +4,25 @@
 
 First release.
 
+### Fixed before release, from the release review
+
+- A roster record now counts only if its own signature checks out. A check was remembered by
+  signature alone, so a good signature could be reused on a forged record; records that merely
+  claimed a member signer were also kept and passed on.
+- Discovery keys come only from the founder and from removals that stand, and malformed ones are
+  refused. Local clients read them through the roster's rules.
+- A machine can add at most 100 machines, and a full roster still takes removals. `remove` reports
+  an error instead of success if the removal wasn't recorded.
+- Timeouts cover connecting, so an address that silently drops packets fails in seconds, not after
+  more than a minute (which also made `peers` and `send` fail when one machine was away).
+- A machine whose stored address stops answering is found again at its other addresses.
+- Setup refuses to replace a key when the member list is missing or unreadable, and the list is
+  flushed to disk before it replaces the old one.
+- The installer checks the certificate behind the app's signature, not the team it states.
+- The app carries the licence notices of Node.js and the packages it bundles.
+- Invites offer an IP address where there's no Tailscale name, for machines that can't look up
+  `.local` names.
+
 - Per-machine node with durable SQLite store, store-and-forward delivery, retries, and
   replication to other online nodes while a recipient machine is offline.
 - Claude Code channel adapter: incoming messages wake idle sessions. Tools: `send`, `peers`,

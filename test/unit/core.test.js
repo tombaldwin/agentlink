@@ -8,6 +8,7 @@ import { PROTO } from '../../src/tls.js'
 import { signEnvelope, verifyEnvelope, sealBeacon, openBeacon, newDiscoveryKey, randomToken, gateTags, gateOk, proveAuth, checkAuth, signRecord } from '../../src/crypto.js'
 import { newIdentity, fingerprint, certDer } from '../../src/cert.js'
 import { Roster } from '../../src/roster.js'
+import { invitePrompt } from '../../src/setup.js'
 
 test('normHost adds .local to bare names and normalises case', () => {
   assert.equal(normHost('Laptop'), 'laptop.local')
@@ -229,13 +230,127 @@ test('roster: a removed machine cannot fill the roster with records that never c
   assert.ok(ro.members.has(c.fp), 'members can still add machines')
 })
 
-test('roster: a member can sign any number of records ', () => {
-  const a = newIdentity(), r = Roster.genesis(a, 'a.local')
-  const ids = Array.from({ length: 520 }, () => newIdentity())
-  ids.forEach((x, i) => r.add(a, `h${i}.local`, x.cert))
-  assert.equal(r.members.size, 521)
-  r.remove(a, ids[519].fp)
-  assert.ok(r.removed.has(ids[519].fp))
+test('roster: one machine can only add so many, and says so', () => {
+  const a = newIdentity(), b = newIdentity(), r = Roster.genesis(a, 'a.local')
+  r.add(a, 'b.local', b.cert)
+  for (let i = 0; i < 99; i++) r.add(a, `h${i}.local`, newIdentity().cert)
+  assert.equal(r.members.size, 101)
+  assert.throws(() => r.add(a, 'late.local', newIdentity().cert), /limit/)
+  const c = newIdentity()
+  r.add(b, 'c.local', c.cert)
+  assert.ok(r.members.has(c.fp), 'it uses up only its own allowance')
+  r.remove(a, c.fp)
+  assert.ok(r.removed.has(c.fp))
+})
+
+/** @param {any} id @param {any} o */
+const signed = (id, o) => ({ ...o, sig: signRecord(id.key, o) })
+const reload = (/** @type {any} */ r) => new Roster({ net: r.net, records: JSON.parse(JSON.stringify(r.records)) })
+
+test('roster: a signature that was good for one record proves nothing about another', () => {
+  const f = newIdentity(), t = newIdentity(), m = newIdentity(), x = newIdentity()
+  const r = Roster.genesis(f, 'f.local')
+  r.add(f, 't.local', t.cert)
+  r.add(f, 'm.local', m.cert)
+  r.merge([signed(m, { type: 'add', host: 'x.local', fp: x.fp, cert: certDer(x.cert), at: r.nextAt(), by: m.fp })])
+  // x signs a record that gets checked and then dropped, leaving its signature free to reuse
+  const used = signed(x, { type: 'add', host: 'q.local', fp: t.fp, cert: certDer(t.cert), at: r.nextAt(), by: x.fp })
+  r.merge([used])
+  r.merge([signed(m, { type: 'remove', fp: x.fp, at: r.nextAt(), by: m.fp, dk: newDiscoveryKey(), seen: [] })])
+  assert.ok(!r.sigs.has(used.sig))
+  const dk = newDiscoveryKey()
+  r.merge([{ type: 'remove', fp: t.fp, at: r.nextAt(), by: f.fp, dk, seen: [], sig: used.sig }])
+  assert.ok(r.members.has(t.fp), 'a removal claiming the founder, with a reused signature, does nothing')
+  assert.notEqual(r.dk, dk)
+  assert.ok(!r.records.some(x => x.dk === dk))
+})
+
+test('roster: a removed machine cannot bring a key in by claiming another signer', () => {
+  const f = newIdentity(), c = newIdentity(), j = newIdentity()
+  const r = Roster.genesis(f, 'f.local')
+  r.add(f, 'c.local', c.cert)
+  const t = r.nextAt()
+  const adds = Array.from({ length: 60 }, (_, i) => { const z = newIdentity(); return { z, rec: signed(c, { type: 'add', host: `z${i}.local`, fp: z.fp, cert: certDer(z.cert), at: t + i, by: c.fp }) } })
+  r.merge(adds.map(a => a.rec))
+  r.merge([signed(f, { type: 'remove', fp: c.fp, at: t + 100, by: f.fp, dk: newDiscoveryKey(), seen: [] })])
+  const last = /** @type {any} */ (adds.at(-1))
+  r.merge([{ type: 'add', host: 'j.local', fp: j.fp, cert: certDer(j.cert), at: t + 101, by: f.fp, sig: 'x'.repeat(86) }])
+  r.merge([{ ...last.rec, by: f.fp, at: t + 102 }])
+  assert.ok(!r.members.has(last.z.fp))
+})
+
+test('roster: only records with a good signature are kept, whoever they claim to be from', () => {
+  const f = newIdentity(), z = newIdentity(), r = Roster.genesis(f, 'f.local')
+  const n = r.records.length
+  const dk = newDiscoveryKey()
+  r.merge([
+    { type: 'add', host: 'z.local', fp: z.fp, cert: certDer(z.cert), at: Date.now(), by: f.fp, dk, sig: 'x'.repeat(86) },
+    { type: 'remove', fp: z.fp, at: Date.now(), by: f.fp, dk, seen: [], sig: 'y'.repeat(86) },
+    { type: 'add', host: 'f.local', fp: f.fp, cert: certDer(f.cert), at: Date.now() + 1, by: f.fp, dk, sig: 'z'.repeat(86) },
+  ])
+  assert.equal(r.records.length, n)
+  assert.notEqual(r.dk, dk)
+})
+
+test('roster: only the founder and standing removals bring in a discovery key', () => {
+  const f = newIdentity(), m = newIdentity(), r = Roster.genesis(f, 'f.local')
+  r.add(f, 'm.local', m.cert)
+  const dk = r.dk, evil = newDiscoveryKey()
+  // properly signed by a member: an add of itself, and a removal that doesn't apply to anything
+  r.merge([
+    signed(m, { type: 'add', host: 'm.local', fp: m.fp, cert: certDer(m.cert), at: r.nextAt(), by: m.fp, dk: evil }),
+    signed(m, { type: 'remove', fp: f.fp, at: r.nextAt(), by: m.fp, dk: evil, seen: [] }),
+  ])
+  assert.equal(r.dk, dk)
+  assert.deepEqual(r.gateDks(), [dk])
+})
+
+test('roster: a malformed discovery key is refused', () => {
+  const f = newIdentity(), m = newIdentity(), r = Roster.genesis(f, 'f.local')
+  r.add(f, 'm.local', m.cert)
+  const n = r.records.length
+  for (const dk of ['AAAA', 'not base64 at all, but forty-four chars long', 'A'.repeat(64)]) {
+    r.merge([signed(f, { type: 'remove', fp: m.fp, at: r.nextAt(), by: f.fp, dk, seen: [] })])
+  }
+  assert.equal(r.records.length, n)
+  assert.ok(r.members.has(m.fp))
+})
+
+test('roster: a member cannot fill the roster, and a full roster still takes removals', () => {
+  const f = newIdentity(), c = newIdentity(), r = Roster.genesis(f, 'f.local')
+  r.add(f, 'c.local', c.cert)
+  const t = r.nextAt()
+  r.merge(Array.from({ length: 300 }, (_, i) => { const z = newIdentity(); return signed(c, { type: 'add', host: `z${i}.local`, fp: z.fp, cert: certDer(z.cert), at: t + i, by: c.fp }) }))
+  assert.ok(r.records.filter(x => x.by === c.fp).length <= 100)
+  // however the roster got full: the same check with only the global limit left in the way
+  const full = new Roster({ net: r.net, records: r.records })
+  full.records.push(...Array.from({ length: 1000 }, () => /** @type {any} */ ({ type: 'add', by: 'filler', sig: 'filler', at: 0 })))
+  full.remove(f, c.fp)
+  assert.ok(full.removed.has(c.fp), 'the removal goes in')
+})
+
+test('roster: removing throws rather than report a removal that was not recorded', () => {
+  const f = newIdentity(), c = newIdentity(), r = Roster.genesis(f, 'f.local')
+  r.add(f, 'c.local', c.cert)
+  r.merge = () => false
+  assert.throws(() => r.remove(f, c.fp), /could not be recorded/)
+})
+
+test('roster: the largest full roster fits in one hello request', () => {
+  const rec = { type: 'add', host: 'h'.repeat(253), fp: 'f'.repeat(64), cert: 'c'.repeat(1024), at: Date.now(), by: 'b'.repeat(64), sig: 's'.repeat(200) }
+  assert.ok(JSON.stringify({ peers: [], records: Array(1000).fill(rec) }).length < 2 << 20)
+})
+
+test('roster: which of a machine\'s records are kept does not depend on arrival order', () => {
+  const f = newIdentity(), c = newIdentity(), r = Roster.genesis(f, 'f.local')
+  r.add(f, 'c.local', c.cert)
+  const t = r.nextAt()
+  const recs = Array.from({ length: 150 }, (_, i) => { const z = newIdentity(); return signed(c, { type: 'add', host: `z${i}.local`, fp: z.fp, cert: certDer(z.cert), at: t + i, by: c.fp }) })
+  const one = reload(r), two = reload(r)
+  one.merge(recs)
+  for (const x of [...recs].reverse()) two.merge([x])
+  assert.deepEqual([...one.members.keys()].sort(), [...two.members.keys()].sort())
+  assert.deepEqual(one.records.map(x => x.sig).sort(), two.records.map(x => x.sig).sort())
 })
 
 test('roster: same records in any order give the same membership; junk is not kept', () => {
@@ -387,4 +502,11 @@ test('only an older node is replaced; a newer one means this process is out of d
   assert.deepEqual(versionOf(h('999.0.0', PROTO)), { differs: true, newer: true })
   assert.deepEqual(versionOf(h('0.0.1', PROTO)), { differs: true, newer: false })
   assert.deepEqual(versionOf(h('999.0.0', PROTO - 1)), { differs: true, newer: false }, 'the protocol decides first')
+})
+
+test('invites offer an IP for machines that cannot look up .local names, unless Tailscale is there', () => {
+  const inv = { token: 't', fp: 'f', host: 'desk.local', port: 7777 }
+  assert.match(invitePrompt({ ...inv, ip: '192.168.1.20' }), /https:\/\/192\.168\.1\.20:7777\/join\/install/)
+  assert.doesNotMatch(invitePrompt({ ...inv, ip: '192.168.1.20', tailscale: 'desk.ts.net' }), /192\.168/)
+  assert.doesNotMatch(invitePrompt(inv), /can't be found/)
 })

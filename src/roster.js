@@ -18,11 +18,17 @@
 // order and offline machines catch up on their next hello.
 import fs from 'node:fs'
 import crypto from 'node:crypto'
-import { signRecord, verifyRecord, newDiscoveryKey, recId } from './crypto.js'
+import { signRecord, verifyRecord, newDiscoveryKey, recId, recKey } from './crypto.js'
 import { fingerprint, certDer } from './cert.js'
 import { normHost } from './config.js'
 
-const MAX_RECORDS = 5000
+// Adds stop being taken in at this many records (removals are always taken in). It keeps a full
+// roster inside one hello request: 1000 of the largest add records is about 1.6 MB.
+const MAX_RECORDS = 1000
+// Adds one machine can have count, and removals it can have stored that don't yet apply to anything.
+// Earliest first, so the set kept doesn't depend on arrival order. No machine can fill the roster
+// by itself, and a machine that tries only uses up its own allowance.
+const MAX_PER_SIGNER = 100
 const MAX_FUTURE_MS = 3600_000     // a record stamped further ahead than this is refused (bad clock)
 const MAX_SEEN = 2000
 const MAX_DROPPED = 50                 // adds that didn't count, kept per removed machine (so their keys stay known as dropped)
@@ -39,9 +45,9 @@ function wellFormed(r) {
   if (r.type !== 'add' && r.type !== 'remove') return false
   if (typeof r.fp !== 'string' || r.fp.length > 64 || typeof r.by !== 'string' || r.by.length > 64) return false
   if (typeof r.sig !== 'string' || r.sig.length > 200 || !Number.isSafeInteger(r.at) || r.at < 0) return false
-  if (r.dk !== undefined && (typeof r.dk !== 'string' || r.dk.length > 64)) return false
+  if (r.dk !== undefined && (typeof r.dk !== 'string' || r.dk.length !== 44 || Buffer.from(r.dk, 'base64').length !== 32)) return false
   if (r.seen !== undefined && (r.type !== 'remove' || !Array.isArray(r.seen) || r.seen.length > MAX_SEEN || !r.seen.every((/** @type {unknown} */ x) => typeof x === 'string' && x.length <= 32))) return false
-  if (r.type === 'add' && (typeof r.host !== 'string' || r.host.length > 253 || typeof r.cert !== 'string' || r.cert.length > 4096)) return false
+  if (r.type === 'add' && (typeof r.host !== 'string' || r.host.length > 253 || typeof r.cert !== 'string' || r.cert.length > 1024)) return false
   return true
 }
 
@@ -57,7 +63,7 @@ export class Roster {
     this.records = []
     /** @type {Set<string>} */
     this.sigs = new Set()
-    /** @type {Set<string>} signatures already checked against their signer */
+    /** @type {Set<string>} records whose signature checked out (see recKey) */
     this.verified = new Set()
     /** @type {Map<string, Member>} fp -> member */
     this.members = new Map()
@@ -71,7 +77,7 @@ export class Roster {
     this.dkAt = []
     /** @type {Set<string>} keys added by a machine that was removed before the add was seen: never members */
     this.dropped = new Set()
-    /** @type {Map<string, { host: string, pem: string, publicKey: crypto.KeyObject } | null>} parsed add records, by signature */
+    /** @type {Map<string, { host: string, pem: string, publicKey: crypto.KeyObject } | null>} parsed add records (see recKey) */
     this.parsed = new Map()
     this.merge(data.records, { trustClock: true })
   }
@@ -86,7 +92,12 @@ export class Roster {
   save() {
     if (!this.file) return
     const tmp = `${this.file}.${process.pid}.tmp`
-    fs.writeFileSync(tmp, JSON.stringify({ net: this.net, records: this.records }, null, 1) + '\n', { mode: 0o600 })
+    // on disk before the rename: a crash must leave the old roster or the new one, never an empty file
+    const fd = fs.openSync(tmp, 'w', 0o600)
+    try {
+      fs.writeSync(fd, JSON.stringify({ net: this.net, records: this.records }, null, 1) + '\n')
+      fs.fsyncSync(fd)
+    } finally { fs.closeSync(fd) }
     fs.renameSync(tmp, this.file)
   }
 
@@ -112,7 +123,7 @@ export class Roster {
     let added = false
     const before = this.sigs
     for (const r of Array.isArray(list) ? list : []) {
-      if (!wellFormed(r) || this.sigs.has(r.sig) || this.records.length >= MAX_RECORDS) continue
+      if (!wellFormed(r) || this.sigs.has(r.sig) || (r.type === 'add' && this.records.length >= MAX_RECORDS)) continue
       if (!trustClock && r.at > Date.now() + MAX_FUTURE_MS) continue
       const o = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (r))
       const clean = /** @type {RosterRecord} */ (/** @type {unknown} */ (Object.fromEntries(['type', 'host', 'fp', 'cert', 'at', 'by', 'dk', 'seen', 'sig'].filter(k => o[k] !== undefined).map(k => [k, o[k]]))))
@@ -148,14 +159,16 @@ export class Roster {
     this.records.sort((a, b) => a.at - b.at || (a.sig < b.sig ? -1 : a.sig > b.sig ? 1 : 0))
     /** @param {crypto.KeyObject} pub @param {RosterRecord} r */
     const ok = (pub, r) => {
-      if (this.verified.has(r.sig)) return true
+      const k = recKey(r)
+      if (this.verified.has(k)) return true
       if (!verifyRecord(pub, r)) return false
-      this.verified.add(r.sig)
+      this.verified.add(k)
       return true
     }
     /** @param {RosterRecord} r */
     const parse = r => {
-      let c = this.parsed.get(r.sig)
+      const k = recKey(r)
+      let c = this.parsed.get(k)
       if (c === undefined) {
         c = null
         try {
@@ -163,7 +176,7 @@ export class Roster {
           const host = normHost(String(r.host))
           if (host === r.host && fingerprint(x509) === r.fp) c = { host, pem: x509.toString(), publicKey: x509.publicKey }
         } catch {}
-        this.parsed.set(r.sig, c)
+        this.parsed.set(k, c)
       }
       return c
     }
@@ -206,6 +219,11 @@ export class Roster {
     const nameHolder = new Map()
     /** @type {Set<string>} keys whose add didn't count because their adder was removed first */
     const dropped = new Set()
+    /** @type {Map<string, number>} signer -> records of its counted against MAX_PER_SIGNER */
+    const signed = new Map()
+    const within = (/** @type {string} */ by) => { const n = (signed.get(by) || 0) + 1; signed.set(by, n); return n <= MAX_PER_SIGNER }
+    /** @type {Set<RosterRecord>} adds past their signer's allowance */
+    const over = new Set()
     let rank = 0
     for (const r of this.records) {
       if (r.type !== 'add') continue
@@ -217,6 +235,7 @@ export class Roster {
       } else {
         const s = ranked.get(r.by)
         if (!s || !ok(s.publicKey, r)) continue
+        if (!within(r.by)) { over.add(r); continue }
       }
       if (ranked.has(r.fp)) continue
       if (!genesis && !counts(r.by, r)) { dropped.add(r.fp); continue }
@@ -246,25 +265,34 @@ export class Roster {
     const dkAt = []
     for (const r of this.records) {
       if (!r.dk || !members.has(r.by)) continue                    // never a key made by a removed machine
-      const standing = r.type === 'add' ? r.by === r.fp && ranked.has(r.fp)
-        : status(r.fp).removed && ranked.has(r.fp) && /** @type {Member} */ (ranked.get(r.by)).rank < /** @type {Member} */ (ranked.get(r.fp)).rank && this.verified.has(r.sig)
-      if (standing) { dks.push(r.dk); dkAt.push(r.at) }
+      const signer = /** @type {Member} */ (members.get(r.by))
+      const target = ranked.get(r.fp)
+      // the founder's first key, and the keys in removals that stand: no other record brings one in
+      const standing = r.type === 'add' ? r.by === r.fp && r.fp === this.net
+        : !!target && status(r.fp).removed && signer.rank < target.rank
+      if (standing && ok(signer.publicKey, r)) { dks.push(r.dk); dkAt.push(r.at) }
     }
 
-    // Keep every record signed by a current member (members are trusted), and of what removed
-    // machines signed only what counts: adds every remover had seen, and the first standing removal
-    // per target. Nothing else from a removed or dropped key can ever count, whatever arrives later,
-    // so dropping it keeps every node's result the same, and a removed machine can't fill the roster.
-    // Adds that didn't count are kept too (at most MAX_DROPPED per removed machine), so their keys
-    // stay known as dropped: messages from them are refused instead of retried.
+    // Only records whose signature checks out are kept, whoever they claim to be from. Of those: what
+    // current members signed, up to their allowance, and of what removed machines signed only what
+    // counts (adds every remover had seen). A removal is kept if it is the first by its signer for a
+    // target it can remove. Nothing else from a removed or dropped key can ever count, whatever
+    // arrives later, so dropping it keeps every node's result the same, and a removed machine can't
+    // fill the roster. Adds that didn't count are kept too (at most MAX_DROPPED per removed machine),
+    // so their keys stay known as dropped: messages from them are refused instead of retried.
     /** @type {Set<string>} */
     const firstRemove = new Set()
     /** @type {Map<string, number>} */
     const droppedKept = new Map()
     const kept = this.records.filter(r => {
-      if (members.has(r.by)) return true
-      if (!ranked.has(r.by)) return r.by === r.fp && r.fp === this.net          // (the founder's genesis)
+      const s = ranked.get(r.by)
+      if (!s) {                                                                 // (the founder's genesis)
+        const c = r.type === 'add' && r.by === r.fp && r.fp === this.net ? parse(r) : null
+        return !!c && ok(c.publicKey, r)
+      }
+      if (!ok(s.publicKey, r) || over.has(r)) return false
       if (r.type === 'add') {
+        if (members.has(r.by)) return true
         if (ranked.get(r.fp)?.by === r.by && counts(r.by, r)) return true
         if (!dropped.has(r.fp) || ranked.has(r.fp)) return false
         const n = (droppedKept.get(r.by) || 0) + 1
@@ -272,11 +300,16 @@ export class Roster {
         return n <= MAX_DROPPED
       }
       // the removal that counts for this signer and target (the only one status() looks at)
-      const t = ranked.get(r.fp), s = /** @type {Member} */ (ranked.get(r.by))
-      if (!t || s.rank >= t.rank || !this.verified.has(r.sig) || firstRemove.has(`${r.by} ${r.fp}`)) return false
-      firstRemove.add(`${r.by} ${r.fp}`)
-      return true
+      const t = ranked.get(r.fp)
+      if (t && s.rank < t.rank) {
+        if (firstRemove.has(`${r.by} ${r.fp}`)) return false
+        firstRemove.add(`${r.by} ${r.fp}`)
+        return true
+      }
+      // it may apply once the machine it names is known here, or if ranks settle differently
+      return members.has(r.by) && within(r.by)
     })
+    this.parsed = new Map(kept.filter(r => r.type === 'add').map(r => [recKey(r), this.parsed.get(recKey(r)) ?? null]))
     Object.assign(this, { members, byHost, removed, dropped, dks, dkAt, records: kept, sigs: new Set(kept.map(r => r.sig)) })
   }
 
@@ -295,6 +328,7 @@ export class Roster {
     const r = { type: 'add', host, fp: fingerprint(pem), cert: certDer(pem), at: this.nextAt(), by: me.fp }
     const rec = { ...r, sig: signRecord(me.key, r) }
     this.merge([rec])
+    if (!this.sigs.has(rec.sig)) throw new Error('the network has reached its limit of machines')
     return rec
   }
 
@@ -309,6 +343,7 @@ export class Roster {
     const r = { type: 'remove', fp, at: this.nextAt(), by: me.fp, dk: newDiscoveryKey(), seen: this.records.filter(x => x.by === fp).map(x => recId(x.sig)) }
     const rec = { ...r, sig: signRecord(me.key, r) }
     this.merge([rec])
+    if (!this.sigs.has(rec.sig) || this.members.has(fp)) throw new Error('the removal could not be recorded')
     return rec
   }
 

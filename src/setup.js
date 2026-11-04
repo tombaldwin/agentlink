@@ -90,6 +90,10 @@ export async function setup({ host, peers = [], noService, noClaude, noAlias, ne
     allPeers = [...new Set([...(same ? existing.peers || [] : []), join, ...peers])]
     banner = same ? `Already a member of this network (via ${data.host}).` : `Joined the network via ${data.host}.`
   } else if (!member || newNetwork) {
+    // a key with no readable roster: making a new key here would silently abandon the network
+    if (identity && !roster && !newNetwork) {
+      throw new Error(`this machine has a key, but its member list (${rosterPath()}) is missing or unreadable. Restore it, join again with an invite, or start a new network with --new-network`)
+    }
     if (identity && roster && !member && !newNetwork) {
       throw new Error(roster.removed.has(identity.fp)
         ? 'this machine was removed from its network. Join again with a new invite (`agentlink invite` on a member), or start a new network with --new-network'
@@ -161,7 +165,12 @@ ${broken ? 'Done, but see the warning above.' : 'Done.'} Start Claude with agent
 (the aliases work in new terminals; in this one, run \`source ${rc}\` first, or use: ${startNow})` : ''}
 (or, for any account: CLAUDE_CONFIG_DIR=<dir> agentlink claude — new accounts are enabled automatically)
 Agents address each other as name@host, e.g. "send the test results to reviewer@laptop.local".
-Name a session with AGENTLINK_NAME=<name> (default: the project folder name).`)
+Name a session with AGENTLINK_NAME=<name> (default: the project folder name).
+
+Claude Code shows "WARNING: Loading development channels" when these start: it's how a session gets
+woken by messages, and agentlink isn't on Claude Code's approved channel list. Read the warning, then
+choose "I am using this for local development" to go on. If you'd rather not, choose Exit and start
+sessions with plain \`claude\` instead: they aren't woken, and read messages with the inbox tool.`)
   if (banner) console.log(`\n${banner}`)
   if (running && invite) {
     try { console.log(`\n${invitePrompt(await local.req('POST', '/local/invite'))}`) }
@@ -218,10 +227,12 @@ export function formatInvites(invites) {
 }
 
 /** Ready-to-paste instructions (for a person, or for Claude) to add another machine. */
-/** @param {{ token: string, fp: string, host: string, port: number, tailscale?: string | null }} inv */
+/** @param {{ token: string, fp: string, host: string, port: number, tailscale?: string | null, ip?: string }} inv */
 export function invitePrompt(inv) {
   let prompt = `Join my agentlink network: run  ${installLine(inv, inv.host)}`
   if (inv.tailscale) prompt += `  — if ${inv.host} can't be reached, run  ${installLine(inv, inv.tailscale)}  instead`
+  // not every machine can look up .local names (many Linux installs can't); the pinned key makes an IP just as safe
+  else if (inv.ip) prompt += `  — if ${inv.host} can't be found, run  ${installLine(inv, inv.ip)}  instead`
   prompt += ` — then tell me how to start Claude with agentlink enabled. (The -k is safe here: --pinnedpubkey makes curl accept only the key this invite names. If curl fails (a key mismatch or a 404), this invite was already used, expired or was revoked: ask me for a new one.)`
   return `To add another machine, paste this into Claude Code on it (or just run the command):
 

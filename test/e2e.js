@@ -17,13 +17,14 @@ import { signEnvelope, sealBeacon } from '../src/crypto.js'
 import { authedRequest, peerCertificate } from '../src/tls.js'
 import { Local } from '../src/local.js'
 import { readIdentity } from '../src/config.js'
+import { openStore } from '../src/store.js'
 
 const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'agentlink.js')
 // AGENTLINK_TEST_EXE runs everything with a built single executable (the macOS app) instead
 const [EXE, ...PRE] = process.env.AGENTLINK_TEST_EXE ? [path.resolve(process.env.AGENTLINK_TEST_EXE)] : [process.execPath, '--no-warnings', BIN]
 const ROOT = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'agentlink-e2e-'))
 const sleep = ms => new Promise(r => setTimeout(r, ms))
-const NODES = { a: 17771, b: 17772, c: 17773, d: 17774, e: 17775, f: 17776, g: 17777, h: 17778, i: 17779, j: 17780, k: 17781, l: 17782 }
+const NODES = { a: 17771, b: 17772, c: 17773, d: 17774, e: 17775, f: 17776, g: 17777, h: 17778, i: 17779, j: 17780, k: 17781, l: 17782, m: 17783, n: 17784 }
 const EXTRA_PORTS = [17790, 17791, 17792, 17793]
 const routes = Object.fromEntries(Object.entries(NODES).map(([n, p]) => [`${n}.test`, `127.0.0.1:${p}`]))
 
@@ -715,6 +716,32 @@ try {
     db.close()
     assert.equal(row.state, 'forwarded')
     assert.ok(row.attempts >= 1, 'c turned it away at first (it didn\'t know the sender), and a retried')
+  })
+
+  await step('a machine whose stored address went dead is found again at its other address', async () => {
+    const r = Roster.genesis(IDS.m, 'm.test')
+    r.add(IDS.m, 'n.test', IDS.n.cert)
+    home('m', { routes: {}, peers: [`127.0.0.1:${NODES.n}`] }, r)
+    home('n', { routes: {}, peers: [] }, r)
+    // a laptop that left the LAN: its LAN address is stored, and it's also known under a configured name
+    const db = openStore(path.join(ROOT, 'm', 'agentlink.db'))
+    const ins = db.prepare('INSERT INTO peers(host,addr,last_seen,configured,alias_of) VALUES(?,?,?,?,?)')
+    ins.run('n.test', '127.0.0.1:1', Date.now(), 0, null)
+    ins.run('127.0.0.1', `127.0.0.1:${NODES.n}`, Date.now(), 1, 'n.test')
+    db.close()
+    await startNode('n')
+    await startNode('m')
+    cli('m', 'send', 'y@n.test', 'found you')
+    await waitFor(async () => (await localOf('m').req('GET', '/local/status')).counts.some(c => c.role === 'outbox' && c.state === 'forwarded'), 15000, 'delivery to the new address')
+    await stopNode('m')
+    await stopNode('n')
+  })
+
+  await step('setup keeps the key when the member list is unreadable', async () => {
+    const key = fs.readFileSync(path.join(ROOT, 'm', 'node.key'), 'utf8')
+    fs.writeFileSync(path.join(ROOT, 'm', 'roster.json'), '')
+    assert.match(cliFails('m', 'setup', '--no-service', '--no-claude', '--no-alias'), /member list .* is missing or unreadable/)
+    assert.equal(fs.readFileSync(path.join(ROOT, 'm', 'node.key'), 'utf8'), key)
   })
 
   await step('local clients refuse a process squatting on the node port', async () => {

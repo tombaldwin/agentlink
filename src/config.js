@@ -142,18 +142,6 @@ export function readNet(dir = homeDir()) {
   try { return String(JSON.parse(fs.readFileSync(rosterPath(dir), 'utf8')).net) } catch { return null }
 }
 
-/**
- * The network's discovery keys, oldest first (they open other members' gates). Read fresh each
- * time: a removal elsewhere rotates them while long-lived clients (MCP adapters) keep running.
- * @returns {string[]}
- */
-export function readDks(dir = homeDir()) {
-  try {
-    const recs = JSON.parse(fs.readFileSync(rosterPath(dir), 'utf8')).records
-    return Array.isArray(recs) ? recs.filter(r => typeof r?.dk === 'string').map(r => r.dk) : []
-  } catch { return [] }
-}
-
 /** @returns {import('./types.js').Config} */
 export function loadConfig() {
   /** @type {import('./types.js').ConfigFile} */

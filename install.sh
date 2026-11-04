@@ -57,9 +57,9 @@ install_app() {
   mkdir -p "$TMP/app" && ditto -x -k "$TMP/app.zip" "$TMP/app" || return 1
   A="$TMP/app/agentlink.app"
   # a damaged or foreign app is an error, not a reason to fall back
-  codesign --verify --strict "$A" 2>/dev/null || { echo "agentlink: the app's signature is not valid — aborting"; exit 1; }
-  T=$(codesign -dv "$A" 2>&1 | sed -n 's/^TeamIdentifier=//p')
-  [ "$T" = "$TEAM" ] || { echo "agentlink: the app is signed by team '$T', not agentlink's ($TEAM) — aborting"; exit 1; }
+  # the requirement checks the certificate Apple issued: the team a signature merely states can be anything
+  codesign --verify --strict -R="anchor apple generic and certificate leaf[subject.OU] = \"$TEAM\"" "$A" 2>/dev/null ||
+    { echo "agentlink: the app isn't validly signed by agentlink's team ($TEAM) — aborting"; exit 1; }
   mkdir -p "$APPS"
   rm -rf "$APPS/agentlink.app"
   ditto "$A" "$APPS/agentlink.app"

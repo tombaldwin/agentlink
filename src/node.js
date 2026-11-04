@@ -20,7 +20,7 @@ import { fingerprint, shortFp, newIdentity, selfSignedCert } from './cert.js'
 import { Roster } from './roster.js'
 import { authedRequest, exporterOf, PinError, ProtoError, PROTO } from './tls.js'
 import { SEA, PKG_ROOT, readAsset, appBundle } from './self.js'
-import { parseAddr, normHost, sanitizeName, validAddr, tailscaleName, errMsg, netHint, ensureHomeDir, rosterPath, MAX_TTL_MS, VERSION } from './config.js'
+import { parseAddr, normHost, sanitizeName, validAddr, tailscaleName, localIPv4s, errMsg, netHint, ensureHomeDir, rosterPath, MAX_TTL_MS, VERSION } from './config.js'
 
 const MAX_REQ = 2 << 20
 const MAX_JOIN_REQ = 16 << 10
@@ -368,6 +368,20 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
 
   const knownPeers = () => otherMembers().map(m => m.host)
 
+  /** @type {Map<string, Set<string>>} member -> addresses other members have told us about */
+  const heard = new Map()
+  /**
+   * Other places `host` might be when its stored address stops answering: what it was configured or
+   * first found under (a Tailscale name, an IP), what other members told us, and its own name. A
+   * laptop that moves between networks keeps an address that no beacon will ever replace.
+   * @param {string} host
+   */
+  function otherAddrs(host) {
+    const cur = addrOf(host)
+    const names = allPeers().filter(r => r.alias_of === host).map(r => addrOf(r.host))
+    return [...new Set([...names, ...(heard.get(host) || []), `${host}:${cfg.port}`])].filter(a => a !== cur && validAddr(a))
+  }
+
   /** Addresses worth telling other members about (so every node learns the whole network). */
   function shareablePeers() {
     const cutoff = now() - 86400_000
@@ -383,7 +397,13 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       if (typeof pe?.host !== 'string' || !validAddr(pe?.addr)) continue
       let h
       try { h = normHost(pe.host) } catch { continue }
-      if (member(h) && !cfg.routes[h] && !peerRow(h)?.addr) probe(h, pe.addr, { refresh: false })
+      if (!member(h) || cfg.routes[h]) continue
+      if (!peerRow(h)?.addr) probe(h, pe.addr, { refresh: false })
+      else if (pe.addr !== peerRow(h)?.addr) {
+        if (!heard.has(h)) heard.set(h, new Set())
+        const known = /** @type {Set<string>} */ (heard.get(h))
+        if (known.size < 8) known.add(pe.addr)
+      }
     }
   }
 
@@ -393,7 +413,10 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       const r = await call(host, 'POST', '/v1/hello', helloBody(), { timeout: 2500 })
       learnPeers(r.peers)
       if (q.wake.run(host).changes) kick()   // it's reachable: retry anything waiting for it now
-    } catch {}
+    } catch {
+      // nothing answers where we think it is: look for it. Each address must prove it holds the key.
+      if (!cfg.routes[host]) for (const addr of otherAddrs(host)) await probe(host, addr)
+    }
   }
   let helloing = false
   async function helloAll() {
@@ -757,7 +780,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
     if (!cur) {
       if (roster.removed.has(fp)) throw httpErr(403, 'this machine\'s key was removed from the network; re-run the invite line (setup makes a new key)')
       if (roster.byHost.has(host)) throw httpErr(409, `${host} is already a member of this network with a different key. On a member, run \`agentlink remove ${host}\` first, or join under another name with \`--host <name>\``)
-      roster.add(me, host, pem)
+      try { roster.add(me, host, pem) } catch (e) { throw httpErr(507, errMsg(e)) }
       if (!roster.members.has(fp)) throw httpErr(500, 'could not add this machine')
       roster.save()
       log(`${host} joined the network (key ${shortFp(fp)})`)
@@ -967,7 +990,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       case 'POST /local/invite': {
         if (!roster.members.has(me.fp)) throw httpErr(409, 'this machine is not a member of its network, so it cannot invite others')
         const { token, fp } = newInvite()
-        return reply(res, 200, { token, fp, host: cfg.host, port: cfg.port, tailscale: ts, expires_at: now() + INVITE_TTL_MS })
+        return reply(res, 200, { token, fp, host: cfg.host, port: cfg.port, tailscale: ts, ip: localIPv4s()[0], expires_at: now() + INVITE_TTL_MS })
       }
       case 'GET /local/invites':                // open invites (their tokens are stored hashed, so only times)
         return reply(res, 200, { invites: q.openInvites.all(now()) })

@@ -11,7 +11,8 @@ the same membership from the same records.
 - **Transport.** Every connection is TLS 1.3. The certificate a node presents is a throwaway (a new
   key for each connection), so connecting to a node's port shows nothing that identifies the
   machine. Machines prove who they are inside the encrypted connection. The client first shows it
-  holds the network's discovery key; anyone else gets a 404. The server then signs the connection
+  holds the network's discovery key; without it, other paths get a 404 (the join paths answer
+  separately, see *The open port is visible*). The server then signs the connection
   with its machine key. The client checks that this is the machine the roster says should be there,
   and only then signs the connection with its own key and sends its request. If anyone else answers
   at the address, they get nothing but that first, anonymous step. Both signatures cover that one
@@ -23,7 +24,10 @@ the same membership from the same records.
   machine sees only ciphertext.
 - **Membership.** A node accepts machine-to-machine requests only from current members' keys.
   Before a machine has proved its key, the only membership records it can submit are the ones that
-  add it. Any member can add a machine by inviting it.
+  add it. Any member can add a machine by inviting it. A record counts, and is kept and passed on,
+  only if its signature checks out against the signer it names. One machine can add at most 100
+  machines, and a network holds about 1000 records; removals are always accepted, so nothing can
+  fill the roster to stop a removal.
 - **Removal.** Machines are ranked in the order they joined, and a machine can remove only machines
   that joined after it. The founding machine can remove anyone, and two machines can never remove
   each other. A removal can't be undone: removing the remover doesn't bring a machine back, and
@@ -33,9 +37,10 @@ the same membership from the same records.
   remover had. Machines it added stay if every remover had seen the add. An add the remover hadn't
   seen doesn't count, whatever date it carries, and that machine needs a new invite. Every member
   computes the same membership from the same records, whatever order they arrived in.
-- **Messages.** Each message is signed end to end by the machine that sent it. A node accepts a
-  message only if the signer is a current member and is the machine named in the sender address,
-  so holders relaying copies can't alter messages and a member can't send as another machine.
+- **Messages.** Each message is signed by the machine that sent it. A node accepts a message only
+  if the signer is a current member and is the machine named in the sender address, so holders
+  relaying copies can't alter messages and a member can't send as another machine. Messages are
+  encrypted between machines but not end to end: see *Known limitations*.
 - **Joining.** `agentlink invite` makes a one-time token (stored hashed, expires after 24 hours)
   and prints a `curl -k --pinnedpubkey "sha256//<key>" https://…` line. The key is an invite key,
   which the inviting node presents only while it has invites open. curl's `-k` only skips
@@ -64,7 +69,13 @@ the same membership from the same records.
   joined after it. A compromised member could quietly add extra machines before you remove it.
   `agentlink status` lists machines in joining order and shows which member added each one:
   remove any you don't recognise, or start a new network with `agentlink setup --new-network`
-  and re-join your machines.
+  and re-join your machines. One thing it won't show: a member can sign a second key under its own
+  name, which stays hidden until that member is removed and then takes over the name. If you
+  remove a compromised machine, check `agentlink status` again afterwards, and remove the name
+  again if it's still listed.
+- **Messages aren't end-to-end encrypted.** While the recipient's machine is off, copies wait on
+  other members, which can read them. They can't alter them. Don't send anything through
+  agentlink that you wouldn't want your other machines to hold.
 - **The founding machine can't be removed.** Nothing joined before it. If it's lost or
   compromised, start a new network. Likewise, a machine can only be removed from machines that
   joined before it.
@@ -85,7 +96,10 @@ the same membership from the same records.
   use it to recognise the machine during that window (24 hours at most). Run `agentlink invite
   --revoke` once you've added your machines. At other times, a node shows only throwaway keys.
 - **The open port is visible.** Someone scanning a network can see that something is listening on
-  agentlink's port (7777 by default), and can guess it's agentlink.
+  agentlink's port (7777 by default), and the join paths answer in a way that shows it's agentlink.
+- **Looking up `.local` names is visible.** Connections themselves don't reveal a machine's name,
+  but a laptop trying to reach `desk.local` asks for it by name, by multicast, on whatever network
+  it's on. Someone there can see the names of your machines.
 - **A removed machine keeps what it had.** It keeps its copy of the member list (machine names and
   public keys; no secrets) and any messages it already received.
 
