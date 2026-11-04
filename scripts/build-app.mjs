@@ -15,6 +15,12 @@
 // "Apple Development" one (fine for your own Macs; others need Developer ID and notarization).
 // --notarize takes a profile saved with `xcrun notarytool store-credentials`.
 // Output: dist/agentlink-<version>-macos-<arch>.zip (and .sha256), with the app in dist/<arch>/.
+//
+// The icon is edited in Icon Composer (assets/app-icon/agentlink.icon). Its compiled forms are committed,
+// so building needs no particular Xcode; after changing it, rebuild them with:
+//   xcrun actool assets/app-icon/agentlink.icon --compile assets/app-icon --app-icon agentlink \
+//     --include-all-app-icons --platform macosx --target-device mac --minimum-deployment-target 13.5 \
+//     --output-partial-info-plist /tmp/icon.plist
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
@@ -118,7 +124,9 @@ const licenceOf = (/** @type {string} */ dir) => {
 }
 const packages = [...new Set(Object.keys(metafile.inputs).map(f => f.match(/^(.*node_modules\/(?:@[^/]+\/)?[^/]+)\//)?.[1]).filter(d => d !== undefined))].sort()
 const line = '-'.repeat(72)
-fs.mkdirSync(path.join(appDir, 'Contents', 'Resources'))
+const resources = path.join(appDir, 'Contents', 'Resources')
+fs.mkdirSync(resources)
+for (const f of ['Assets.car', 'agentlink.icns']) fs.copyFileSync(path.join(ROOT, 'assets', 'app-icon', f), path.join(resources, f))
 fs.writeFileSync(path.join(appDir, 'Contents', 'Resources', 'THIRD_PARTY_NOTICES.txt'), [
   `agentlink ${PKG.version}\n\n${licenceOf(ROOT)}`,
   `Node.js ${NODE_VERSION}\n\n${fs.readFileSync(path.join(WORK, nodeName, 'LICENSE'), 'utf8').trim()}`,
@@ -141,6 +149,8 @@ fs.writeFileSync(path.join(appDir, 'Contents', 'Info.plist'), plist({
   CFBundleName: 'agentlink',
   CFBundleDisplayName: 'agentlink',
   CFBundleExecutable: 'agentlink',
+  CFBundleIconFile: 'agentlink',           // agentlink.icns, for macOS before Liquid Glass
+  CFBundleIconName: 'agentlink',           // in Assets.car, the layered icon
   CFBundlePackageType: 'APPL',
   CFBundleShortVersionString: PKG.version,
   CFBundleVersion: PKG.version,

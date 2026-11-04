@@ -21,6 +21,7 @@ First release.
   flushed to disk before it replaces the old one.
 - The installer checks the certificate behind the app's signature, not the team it states.
 - The app carries the licence notices of Node.js and the packages it bundles.
+- The app has an icon.
 - Invites offer an IP address where there's no Tailscale name, for machines that can't look up
   `.local` names.
 

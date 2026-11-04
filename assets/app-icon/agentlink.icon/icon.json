@@ -1,0 +1,10 @@
+{
+  "fill": { "linear-gradient": ["display-p3:0.20,0.70,0.71,1.0", "display-p3:0.06,0.33,0.37,1.0"] },
+  "groups": [
+    { "layers": [ { "name": "face", "image-name": "face.png", "glass": false } ], "shadow": { "kind": "layer-color", "opacity": 0.3 }, "specular": false },
+    { "layers": [ { "name": "head", "image-name": "head.png", "glass": true } ], "shadow": { "kind": "layer-color", "opacity": 0.6 }, "translucency": { "enabled": false, "value": 0.5 }, "specular": true },
+    { "layers": [ { "name": "antenna", "image-name": "antenna.png", "glass": true } ], "shadow": { "kind": "layer-color", "opacity": 0.4 }, "specular": true },
+    { "layers": [ { "name": "waves", "image-name": "waves.png", "glass": true } ], "shadow": { "kind": "neutral", "opacity": 0.3 }, "translucency": { "enabled": true, "value": 0.4 }, "specular": true }
+  ],
+  "supported-platforms": { "squares": ["macOS"] }
+}
