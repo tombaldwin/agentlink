@@ -325,7 +325,8 @@ try {
     await bob.close()
     await stopNode('b')
     const stranger = newIdentity()
-    let plain = Buffer.alloc(0)
+    /** @type {Buffer[]} */
+    const hellos = []
     const seen = []
     const SECRET_BODY = 'TOP-SECRET-CAFE-MESSAGE'
     const https = await import('node:https')
@@ -341,7 +342,7 @@ try {
     await stopNode('a'); await startNode('a')            // startup: hello to every member, retry everything
     await sleep(3000)
     await new Promise(r => tlsImp.close(r))
-    const plainImp = net.createServer(s => { s.on('data', c => { plain = Buffer.concat([plain, c]); s.end('HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}') }); s.on('error', () => {}) })
+    const plainImp = net.createServer(s => { s.on('data', c => { hellos.push(c); s.end('HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}') }); s.on('error', () => {}) })
     await new Promise(r => plainImp.listen(NODES.b, '127.0.0.1', r))
     await stopNode('a'); await startNode('a')
     out = await cliAsync('a', 'send', 'bob@b.test', SECRET_BODY)
@@ -353,8 +354,14 @@ try {
       assert.match(r, /^GET \/v1\/auth /, 'only the gate step, never a request')
       for (const x of [SECRET_BODY, 'a.test', 'b.test', 'x-agentlink-auth', IDS.a.fp, IDS.b.fp]) assert.ok(!r.includes(x), `no "${x}" sent to the stranger`)
     }
-    assert.ok(plain.length > 0 && plain[0] === 0x16, 'the plain stranger saw only TLS handshakes')
-    for (const s of [SECRET_BODY, 'POST', 'GET', 'b.test', 'c.test', 'deliver', 'hello']) assert.ok(!plain.includes(s), `no "${s}" in what the stranger received`)
+    // every byte must be a TLS handshake record: nothing readable, and no request. (Don't look for
+    // short strings instead: a ClientHello is mostly random, so "GET" turns up in one now and then.)
+    assert.ok(hellos.length > 0, 'a tried the plain stranger too')
+    for (const c of hellos) {
+      assert.equal(c[5], 1, 'the first thing sent is a ClientHello')
+      for (let i = 0; i < c.length; i += 5 + c.readUInt16BE(i + 3)) assert.equal(c[i], 0x16, 'the plain stranger saw only TLS handshake records')
+      for (const s of [SECRET_BODY, 'POST /', 'GET /', 'b.test', 'c.test', '/v1/']) assert.ok(!c.includes(s), `no "${s}" in what the stranger received`)
+    }
     const st = JSON.parse(cli('a', 'status'))
     assert.ok(st.pending.some(p => p.to_addr === 'bob@b.test'), 'still queued')
     // b returns: everything queued is delivered
