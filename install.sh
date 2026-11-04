@@ -14,6 +14,36 @@ AGENTLINK_ORIG_PATH="$PATH"; export AGENTLINK_ORIG_PATH
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
+# what agentlink needs: found out before anything is changed
+MIN_CLAUDE=2.1.318                 # WAKE_MIN_CLAUDE in src/claude.js
+check_prereqs() {
+  [ -n "${AGENTLINK_SKIP_CHECKS:-}" ] && return 0
+  if [ "$(uname -s)-$(uname -m)" = Darwin-x86_64 ]; then
+    echo "agentlink: Intel Macs aren't supported yet (macOS may stop it reaching your other machines)." >&2
+    echo "To install it anyway: AGENTLINK_SKIP_CHECKS=1" >&2
+    exit 1
+  fi
+  C=$(command -v claude 2>/dev/null || true)
+  for f in "$HOME/.local/bin/claude" "$HOME/.claude/local/claude"; do
+    if [ -z "$C" ] && [ -x "$f" ]; then C=$f; fi
+  done
+  if [ -z "$C" ]; then
+    # run by Claude Code itself: it's there, just not on this shell's PATH
+    [ -n "${CLAUDECODE:-}" ] && return 0
+    echo "agentlink: Claude Code isn't installed. Install it first: https://claude.com/claude-code" >&2
+    echo "(For another MCP agent, set AGENTLINK_SKIP_CHECKS=1.)" >&2
+    exit 1
+  fi
+  V=$("$C" --version 2>/dev/null | sed -n 's/^\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n 1)
+  [ -n "$V" ] || return 0
+  OLD=$(printf '%s\n%s\n' "$V" "$MIN_CLAUDE" | awk -F. 'NR==1 { a=$1; b=$2; c=$3 } NR==2 { print (a<$1 || (a==$1 && (b<$2 || (b==$2 && c<$3)))) ? 1 : 0 }')
+  if [ "$OLD" = 1 ]; then
+    echo "agentlink: needs Claude Code $MIN_CLAUDE or newer, and this is $V. Update it (claude update), then run this again." >&2
+    exit 1
+  fi
+}
+check_prereqs
+
 # agentlink's home holds this machine's private key, messages and logs: private to this user from the start
 AL="$HOME/.agentlink"
 mkdir -p "$AL"

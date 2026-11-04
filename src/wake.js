@@ -9,6 +9,7 @@ import { homeDir, loadConfig } from './config.js'
 import { Local } from './local.js'
 
 const RETRY_MS = 5000
+const GIVE_UP_MS = 60_000      // the node is up but has no session of ours (no adapter, or an old one): nothing to wait for
 
 /** This process's ancestors, nearest first: one of them is the Claude session that started us. */
 function ancestors() {
@@ -62,14 +63,24 @@ export async function runWake() {
   // the Claude that started us, and only it: an enclosing session must not be mistaken for ours
   const mine = claude && !testing ? [claude.pid] : pids
   const owner = mine[0]
+  // one wait per session: each turn starts another, and the newest takes over, even with no node to ask
+  const mark = path.join(homeDir(), `wake-${owner}`)
+  const me = String(process.pid)
+  try { fs.writeFileSync(mark, me) } catch {}
+  const isMine = () => { try { return fs.readFileSync(mark, 'utf8') === me } catch { return true } }
+  const finish = (/** @type {number} */ code) => { if (isMine()) fs.rmSync(mark, { force: true }); return code }
+  let since = Date.now()
   for (;;) {
     /** @type {{ event: string, name?: string, count?: number } | null} */
-    let r = null
-    try { r = await local.wakeWait(mine) } catch {}
-    if (r?.event === 'wake') { process.stderr.write(`${wakeText(r.count || 1, r.name || 'this session')}\n`); return 2 }
-    if (r?.event === 'done') return 0       // a newer wait took over, or this session is woken another way
-    // the node is restarting, or the session hasn't connected yet: keep going for as long as Claude runs
-    try { process.kill(owner, 0) } catch { return 0 }
+    let r = null, reached = true
+    try { r = await local.wakeWait(mine) } catch { reached = false }
+    if (r?.event === 'wake') { process.stderr.write(`${wakeText(r.count || 1, r.name || 'this session')}\n`); return finish(2) }
+    if (r?.event === 'done') return finish(0)       // a newer wait took over, or this session is woken another way
+    if (!isMine()) return 0
+    try { process.kill(owner, 0) } catch { return finish(0) }    // Claude has gone
+    // no node to ask (it may be restarting), or the session was there a moment ago: keep going
+    if (!reached || r?.event === 'closed') since = Date.now()
+    if (Date.now() - since > GIVE_UP_MS) return finish(0)
     await new Promise(res => setTimeout(res, RETRY_MS))
   }
 }

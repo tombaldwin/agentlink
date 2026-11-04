@@ -47,7 +47,7 @@ jobs:
           printf '#!/bin/sh\necho "claude $*" >> "$HOME/claude-calls.log"\n' > "$RUNNER_TEMP/bin/claude"
           chmod +x "$RUNNER_TEMP/bin/claude"
           export PATH="$RUNNER_TEMP/bin:$PATH" NPM_CONFIG_PREFIX="$RUNNER_TEMP/npm"
-          AGENTLINK_APP=0 AGENTLINK_PKG="$TGZ" AGENTLINK_NO_SERVICE=1 AGENTLINK_DISCOVERY=0 sh install.sh | tee out.txt
+          AGENTLINK_SKIP_CHECKS=1 AGENTLINK_APP=0 AGENTLINK_PKG="$TGZ" AGENTLINK_NO_SERVICE=1 AGENTLINK_DISCOVERY=0 sh install.sh | tee out.txt
           grep -q "Join my agentlink network" out.txt
           grep -q "mcp add -s user agentlink" "$HOME/claude-calls.log"
           "$RUNNER_TEMP/npm/bin/agentlink" status
@@ -59,7 +59,7 @@ jobs:
           export HOME="$RUNNER_TEMP/home2" SHELL=/bin/bash AGENTLINK_PORT=7778
           mkdir -p "$HOME" "$RUNNER_TEMP/bin"
           export PATH="$RUNNER_TEMP/bin:$PATH"
-          AGENTLINK_PRIVATE_NODE=1 AGENTLINK_PKG="$TGZ" AGENTLINK_NO_SERVICE=1 AGENTLINK_DISCOVERY=0 sh install.sh | tee out.txt
+          AGENTLINK_SKIP_CHECKS=1 AGENTLINK_PRIVATE_NODE=1 AGENTLINK_PKG="$TGZ" AGENTLINK_NO_SERVICE=1 AGENTLINK_DISCOVERY=0 sh install.sh | tee out.txt
           grep -q "Join my agentlink network" out.txt
           test "$(ls -ld "$HOME/.agentlink" | cut -c1-10)" = drwx------
           "$HOME/.agentlink/bin/agentlink" status

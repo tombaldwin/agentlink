@@ -149,8 +149,8 @@ export async function setup({ host, peers = [], noService, noClaude, noAlias, ne
     if (old) console.log(`  (an earlier npm install of agentlink is still at ${old}; new terminals use the app. Remove the old one with: npm uninstall -g @tombaldwin/agentlink)`)
   }
   console.log(`
-${broken ? 'Done, but see the warning above.' : 'Done.'} Start Claude Code as usual: sessions started from now on are on the network
-(a session that's already running needs restarting: \`claude --continue\` picks up where it left off).
+${broken ? 'Done, but see the warning above.' : 'Done.'} In any Claude Code session that's already running, type /reload-plugins to join
+(or start it again: \`claude --continue\` picks up where it left off). New sessions join by themselves.
 Agents address each other as name@host, e.g. "send the test results to reviewer@laptop.local".
 Name a session with AGENTLINK_NAME=<name> (default: the project folder name).`)
   if (banner) console.log(`\n${banner}`)
@@ -215,7 +215,7 @@ export function invitePrompt(inv) {
   if (inv.tailscale) prompt += `  — if ${inv.host} can't be reached, run  ${installLine(inv, inv.tailscale)}  instead`
   // not every machine can look up .local names (many Linux installs can't); the pinned key makes an IP just as safe
   else if (inv.ip) prompt += `  — if ${inv.host} can't be found, run  ${installLine(inv, inv.ip)}  instead`
-  prompt += ` — then tell me how to start Claude with agentlink enabled. (The -k is safe here: --pinnedpubkey makes curl accept only the key this invite names. If curl fails (a key mismatch or a 404), this invite was already used, expired or was revoked: ask me for a new one.)`
+  prompt += ` — then tell me to type /reload-plugins. (The -k is safe here: --pinnedpubkey makes curl accept only the key this invite names. If curl fails (a key mismatch or a 404), this invite was already used, expired or was revoked: ask me for a new one.)`
   return `To add another machine, paste this into Claude Code on it (or just run the command):
 
   ${prompt}

@@ -158,3 +158,8 @@ test('only an interactive session waits: a script must never hang on the hook', 
   assert.match(wakeText(3, 'bob'), /3 new messages have/)
   assert.match(wakeText(1, 'bob'), /mcp__agentlink__inbox/)
 })
+
+test('the installer and the program agree on the oldest Claude Code', () => {
+  const sh = fs.readFileSync(new URL('../../install.sh', import.meta.url), 'utf8')
+  assert.equal(sh.match(/^MIN_CLAUDE=(\S+)/m)?.[1], c.WAKE_MIN_CLAUDE)
+})

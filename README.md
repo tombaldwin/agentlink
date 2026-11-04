@@ -8,7 +8,8 @@ Address any agent as `name@host` (e.g. `reviewer@laptop.local`). An incoming mes
 
 ## What you need
 
-- [Claude Code](https://claude.com/claude-code) on each machine (other MCP agents can [join too](#what-you-get)).
+- [Claude Code](https://claude.com/claude-code) 2.1.318 or newer on each machine (other MCP agents
+  can [join too](#what-you-get): set `AGENTLINK_SKIP_CHECKS=1` for the installer).
 - An Apple silicon Mac or Linux. Intel Macs aren't currently supported.
 - Machines on the same network, or Tailscale on each of them.
 
@@ -18,19 +19,19 @@ The installer brings everything else. It needs no sudo.
 
 **First machine** — paste into Claude Code (or run the command yourself):
 
-> Set up agentlink on this machine: run `curl -fsSL https://raw.githubusercontent.com/tombaldwin/agentlink/main/install.sh | sh`, then show me the prompt it prints for adding other machines, and tell me how to start you with agentlink enabled.
+> Set up agentlink on this machine: run `curl -fsSL https://raw.githubusercontent.com/tombaldwin/agentlink/main/install.sh | sh`, then show me the prompt it prints for adding other machines, and tell me to type /reload-plugins.
 
 **Every other machine** — paste the prompt the first machine printed. It looks like:
 
-> Join my agentlink network: run `curl … | sh` — then tell me how to start Claude with agentlink enabled.
+> Join my agentlink network: run `curl … | sh` — then tell me to type /reload-plugins.
 
 Each invite adds one machine and expires after 24 hours. The pinned key means curl only talks to
 the machine that made the invite. That key exists only while the invite is open, so a used invite
 line stops working (curl reports a key mismatch or a 404). Run `agentlink invite` on any member
 for a new one.
 
-**Then** restart Claude Code, as usual with `claude`. New sessions are on the network from now on;
-`claude --continue` picks up where you left off.
+**Then** type `/reload-plugins` in Claude Code. That session is now on the network, and so is every
+new one. (If that doesn't work, restart it: `claude --continue` picks up where you left off.)
 
 That's it: no config files, no accounts, no server to run. Setup adds agentlink's tools and a small
 background hook to Claude Code's settings, and `agentlink uninstall` takes them out again. On Apple
