@@ -1,8 +1,18 @@
+<p align="center"><img src="assets/agentlink-320.png" width="160" height="160" alt="agentlink: a red tin toy robot head with a radio antenna"></p>
+
 # agentlink
 
 Let AI agents on different machines — and different Claude accounts — message each other.
 Address any agent as `name@host` (e.g. `reviewer@laptop.local`). An incoming message
 **wakes an idle Claude Code session**, just like agents talking on a single machine.
+
+## What you need
+
+- [Claude Code](https://claude.com/claude-code) on each machine (other MCP agents can [join too](#what-you-get)).
+- An Apple silicon Mac or Linux. Intel Macs aren't currently supported.
+- Machines on the same network, or Tailscale on each of them.
+
+The installer brings everything else. It needs no sudo.
 
 ## Setup
 
@@ -12,7 +22,7 @@ Address any agent as `name@host` (e.g. `reviewer@laptop.local`). An incoming mes
 
 **Every other machine** — paste the prompt the first machine printed. It looks like:
 
-> Join my agentlink network: run `curl -fsSL -k --pinnedpubkey "sha256//…" "https://desk.local:7777/join/install?t=…" | sh` — then tell me how to start Claude with agentlink enabled.
+> Join my agentlink network: run `curl … | sh` — then tell me how to start Claude with agentlink enabled.
 
 Each invite adds one machine and expires after 24 hours. The pinned key means curl only talks to
 the machine that made the invite. That key exists only while the invite is open, so a used invite
@@ -20,33 +30,27 @@ line stops working (curl reports a key mismatch or a 404). Run `agentlink invite
 for a new one.
 
 **Then** open a new terminal and start Claude with `claude-link` (each extra account gets its
-own alias, e.g. `claude2-link`). Claude Code shows a warning first: see
-[below](#the-channels-warning). Ask it to message another agent, who's online, to show your
-agentlink network, or to add another machine (it makes the invite for you to paste).
+own alias, e.g. `claude2-link`). Claude Code shows a warning before it starts, which you should
+[read before accepting](#the-channels-warning).
 
-That's it: no config files, no accounts, no server to run. The installer needs no sudo. On Apple
-silicon Macs it installs agentlink as a signed app (`~/Applications/agentlink.app`, from the
-inviting machine or the latest release, refused unless Apple's certificate for agentlink's team
-signed it); macOS asks once
-to let **agentlink** find devices on your local network: click Allow. Elsewhere it uses npm, and
+That's it: no config files, no accounts, no server to run. On Apple silicon Macs it installs
+agentlink as a signed app (`~/Applications/agentlink.app`, from the inviting machine or the latest
+release, refused unless Apple's certificate for agentlink's team signed it); macOS asks once to
+let **agentlink** find devices on your local network: click Allow. Elsewhere it uses npm, and
 brings its own Node.js if the machine doesn't have a recent one. For the next machine, ask Claude
 on any member to add one (or run `agentlink invite`).
 
-### The channels warning
+## Your first message
 
-Waking an idle session uses Claude Code channels, a research preview. Only channels on Claude
-Code's approved list load normally, and agentlink isn't on it, so `claude-link` passes
-`--dangerously-load-development-channels=server:agentlink`. Claude Code then stops at a full-screen
-warning, "WARNING: Loading development channels":
+Agents are named after their project folder, so a session in `~/code/reviewer` on the machine
+`desk` is `reviewer@desk.local`. Ask Claude who's online, then ask it to message someone:
 
-> --dangerously-load-development-channels is for local channel development only. Do not use this
-> option to run channels you have downloaded off the internet.
+> **You, to Claude on your laptop:** Ask reviewer@desk.local why the build is failing.
+>
+> **Claude:** Sent. `pushed to reviewer@desk.local's live session`
 
-That describes agentlink, so it's your decision, and you should make it knowingly. A channel can put
-messages into your session, and agentlink's come from your other machines. To go on, choose **I am
-using this for local development**. If you'd rather not, choose **Exit**: agentlink still works
-without channels, just without waking idle sessions. Start sessions with plain `claude`, and
-Claude reads messages with the `inbox` tool.
+The session on `desk` wakes, even if it was idle, and works on it. Its answer wakes the session on
+your laptop in the same way.
 
 ## What you get
 
@@ -115,6 +119,22 @@ members. Any member can invite machines, and a machine can remove the ones that 
   anything destructive or sensitive.
 
 See [SECURITY.md](SECURITY.md) for details and known limitations.
+
+## The channels warning
+
+Waking an idle session uses Claude Code channels, a research preview. Only channels on Claude
+Code's approved list load normally, and agentlink isn't on it, so `claude-link` passes
+`--dangerously-load-development-channels=server:agentlink`. Claude Code then stops at a full-screen
+warning, "WARNING: Loading development channels":
+
+> --dangerously-load-development-channels is for local channel development only. Do not use this
+> option to run channels you have downloaded off the internet.
+
+That describes agentlink, so it's your decision, and you should make it knowingly. A channel can put
+messages into your session, and agentlink's come from your other machines. To go on, choose **I am
+using this for local development**. If you'd rather not, choose **Exit**: agentlink still works
+without channels, just without waking idle sessions. Start sessions with plain `claude`, and
+Claude reads messages with the `inbox` tool.
 
 ## Caveats
 
