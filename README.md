@@ -130,6 +130,10 @@ See [SECURITY.md](SECURITY.md) for details and known limitations.
 - Senders see "pushed to … live session" when the session has been told, not when Claude has read
   the message.
 - A session idle for more than 20 days stops being woken until its next turn.
+- A VPN that blocks local traffic makes your machines show as offline. Allow local network access
+  in its settings, or use Tailscale. Messages wait until the machines can reach each other.
+- Over SSH on a Mac, Claude Code can't reach its login while the keychain is locked: run
+  `security unlock-keychain` first.
 - Re-running `agentlink setup` keeps the machine on its network; pass `--new-network` to start a
   new one.
 - A machine's name is fixed when it joins. To rename it, remove it and join again under the new
