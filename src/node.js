@@ -402,7 +402,9 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       else if (pe.addr !== peerRow(h)?.addr) {
         if (!heard.has(h)) heard.set(h, new Set())
         const known = /** @type {Set<string>} */ (heard.get(h))
-        if (known.size < 8) known.add(pe.addr)
+        known.delete(pe.addr)
+        known.add(pe.addr)                                    // newest last; the oldest makes way
+        if (known.size > 8) known.delete(/** @type {string} */ (known.values().next().value))
       }
     }
   }
@@ -415,7 +417,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       if (q.wake.run(host).changes) kick()   // it's reachable: retry anything waiting for it now
     } catch {
       // nothing answers where we think it is: look for it. Each address must prove it holds the key.
-      if (!cfg.routes[host]) for (const addr of otherAddrs(host)) await probe(host, addr)
+      if (!cfg.routes[host]) await Promise.all(otherAddrs(host).slice(-4).map(addr => probe(host, addr)))
     }
   }
   let helloing = false
@@ -990,7 +992,7 @@ export async function runNode(cfg, log = (...a) => console.error(new Date().toIS
       case 'POST /local/invite': {
         if (!roster.members.has(me.fp)) throw httpErr(409, 'this machine is not a member of its network, so it cannot invite others')
         const { token, fp } = newInvite()
-        return reply(res, 200, { token, fp, host: cfg.host, port: cfg.port, tailscale: ts, ip: localIPv4s()[0], expires_at: now() + INVITE_TTL_MS })
+        return reply(res, 200, { token, fp, host: cfg.host, port: cfg.port, tailscale: ts, ip: localIPv4s().find(a => !a.startsWith('127.')), expires_at: now() + INVITE_TTL_MS })
       }
       case 'GET /local/invites':                // open invites (their tokens are stored hashed, so only times)
         return reply(res, 200, { invites: q.openInvites.all(now()) })

@@ -11,8 +11,9 @@ First release.
   claimed a member signer were also kept and passed on.
 - Discovery keys come only from the founder and from removals that stand, and malformed ones are
   refused. Local clients read them through the roster's rules.
-- A machine can add at most 100 machines, and a full roster still takes removals. `remove` reports
-  an error instead of success if the removal wasn't recorded.
+- Records are identified by content, so a re-encoded signature can't pass as a new record.
+- A full roster still takes removals, and loading never drops records. `remove` reports an error
+  instead of success if the removal wasn't recorded.
 - Timeouts cover connecting, so an address that silently drops packets fails in seconds, not after
   more than a minute (which also made `peers` and `send` fail when one machine was away).
 - A machine whose stored address stops answering is found again at its other addresses.

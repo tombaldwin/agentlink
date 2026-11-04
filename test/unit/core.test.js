@@ -230,19 +230,6 @@ test('roster: a removed machine cannot fill the roster with records that never c
   assert.ok(ro.members.has(c.fp), 'members can still add machines')
 })
 
-test('roster: one machine can only add so many, and says so', () => {
-  const a = newIdentity(), b = newIdentity(), r = Roster.genesis(a, 'a.local')
-  r.add(a, 'b.local', b.cert)
-  for (let i = 0; i < 99; i++) r.add(a, `h${i}.local`, newIdentity().cert)
-  assert.equal(r.members.size, 101)
-  assert.throws(() => r.add(a, 'late.local', newIdentity().cert), /limit/)
-  const c = newIdentity()
-  r.add(b, 'c.local', c.cert)
-  assert.ok(r.members.has(c.fp), 'it uses up only its own allowance')
-  r.remove(a, c.fp)
-  assert.ok(r.removed.has(c.fp))
-})
-
 /** @param {any} id @param {any} o */
 const signed = (id, o) => ({ ...o, sig: signRecord(id.key, o) })
 const reload = (/** @type {any} */ r) => new Roster({ net: r.net, records: JSON.parse(JSON.stringify(r.records)) })
@@ -257,7 +244,7 @@ test('roster: a signature that was good for one record proves nothing about anot
   const used = signed(x, { type: 'add', host: 'q.local', fp: t.fp, cert: certDer(t.cert), at: r.nextAt(), by: x.fp })
   r.merge([used])
   r.merge([signed(m, { type: 'remove', fp: x.fp, at: r.nextAt(), by: m.fp, dk: newDiscoveryKey(), seen: [] })])
-  assert.ok(!r.sigs.has(used.sig))
+  assert.ok(!r.records.some(x => x.sig === used.sig))
   const dk = newDiscoveryKey()
   r.merge([{ type: 'remove', fp: t.fp, at: r.nextAt(), by: f.fp, dk, seen: [], sig: used.sig }])
   assert.ok(r.members.has(t.fp), 'a removal claiming the founder, with a reused signature, does nothing')
@@ -316,17 +303,82 @@ test('roster: a malformed discovery key is refused', () => {
   assert.ok(r.members.has(m.fp))
 })
 
-test('roster: a member cannot fill the roster, and a full roster still takes removals', () => {
+/** Fill `r` with adds signed by `by` until it refuses more. @param {any} r @param {any} by */
+function flood(r, by) {
+  const t = r.nextAt(), z = newIdentity(), cert = certDer(z.cert), pad = `${'h'.repeat(60)}.${'h'.repeat(60)}.${'h'.repeat(60)}`
+  r.merge(Array.from({ length: 2500 }, (_, i) => signed(by, { type: 'add', host: `${pad}.${i}.local`, fp: z.fp, cert, at: t + i, by: by.fp })))
+}
+
+test('roster: a copy of a record with its signature re-encoded is the same record', () => {
+  const f = newIdentity(), b = newIdentity(), c = newIdentity(), z = newIdentity()
+  const r = Roster.genesis(f, 'f.local')
+  r.add(f, 'b.local', b.cert)
+  r.add(f, 'c.local', c.cert)
+  r.add(f, 'z.local', z.cert)
+  const n = r.records.length, first = /** @type {any} */ (r.records[1])
+  r.merge(Array.from({ length: 120 }, (_, i) => ({ ...first, sig: first.sig.slice(0, 10) + '!'.repeat(i + 1) + first.sig.slice(10) })))
+  assert.equal(r.records.length, n, 'no copies are kept')
+  assert.equal(r.members.size, 4, 'and nobody is pushed out')
+  r.add(f, 'next.local', newIdentity().cert)
+  assert.equal(r.members.size, 5, 'and the signer can still add machines')
+})
+
+test('roster: a removal lists a re-encoded record as the same record', () => {
+  const f = newIdentity(), m = newIdentity(), x = newIdentity(), r = Roster.genesis(f, 'f.local')
+  r.add(f, 'm.local', m.cert)
+  const add = signed(m, { type: 'add', host: 'x.local', fp: x.fp, cert: certDer(x.cert), at: r.nextAt(), by: m.fp })
+  r.merge([add])
+  const removal = r.remove(f, m.fp)
+  const other = Roster.genesis(f, 'f.local')
+  other.merge(r.records.filter(x => x.sig !== add.sig && x.sig !== removal.sig))
+  other.merge([{ ...add, sig: add.sig.slice(0, 10) + '!' + add.sig.slice(10) }, removal])
+  assert.ok(other.members.has(x.fp), 'x stays on a node that only got the re-encoded copy')
+})
+
+test('roster: a full roster refuses adds with an error, and still takes removals', () => {
   const f = newIdentity(), c = newIdentity(), r = Roster.genesis(f, 'f.local')
   r.add(f, 'c.local', c.cert)
-  const t = r.nextAt()
-  r.merge(Array.from({ length: 300 }, (_, i) => { const z = newIdentity(); return signed(c, { type: 'add', host: `z${i}.local`, fp: z.fp, cert: certDer(z.cert), at: t + i, by: c.fp }) }))
-  assert.ok(r.records.filter(x => x.by === c.fp).length <= 100)
-  // however the roster got full: the same check with only the global limit left in the way
-  const full = new Roster({ net: r.net, records: r.records })
-  full.records.push(...Array.from({ length: 1000 }, () => /** @type {any} */ ({ type: 'add', by: 'filler', sig: 'filler', at: 0 })))
-  full.remove(f, c.fp)
-  assert.ok(full.removed.has(c.fp), 'the removal goes in')
+  flood(r, c)
+  assert.ok(JSON.stringify(r.records).length > 1200 << 10, 'it filled up')
+  assert.ok(JSON.stringify({ peers: [], records: r.records }).length < 2 << 20, 'and still fits in a hello')
+  assert.throws(() => r.add(f, 'late.local', newIdentity().cert), /size limit/)
+  r.remove(f, c.fp)
+  assert.ok(r.removed.has(c.fp), 'the removal goes in')
+  assert.ok(JSON.stringify(r.records).length < 10_000, 'and what the flooder signed goes with it')
+  r.add(f, 'late.local', newIdentity().cert)
+})
+
+test('roster: a machine that added more than a roster should hold can still be removed', () => {
+  const f = newIdentity(), c = newIdentity(), r = Roster.genesis(f, 'f.local')
+  r.add(f, 'c.local', c.cert)
+  const t = r.nextAt(), ids = Array.from({ length: 1200 }, () => newIdentity())
+  r.merge(ids.map((z, i) => signed(c, { type: 'add', host: `z${i}.local`, fp: z.fp, cert: certDer(z.cert), at: t + i, by: c.fp })))
+  assert.equal(r.members.size, 1202)
+  r.remove(f, c.fp)
+  assert.ok(r.removed.has(c.fp))
+  assert.equal(r.members.size, 1201, 'and the machines it added stay')
+})
+
+test('roster: loading never drops what is held, however full', () => {
+  const f = newIdentity(), m = newIdentity(), r = Roster.genesis(f, 'f.local')
+  r.add(f, 'm.local', m.cert)
+  flood(r, m)
+  // a late, early-dated removal that doesn't apply to anything sorts ahead of the genesis
+  const dk = r.dk
+  r.merge([signed(m, { type: 'remove', fp: 'f'.repeat(64), at: 1, by: m.fp, dk: newDiscoveryKey(), seen: [] })])
+  const again = reload(r)
+  assert.equal(again.records.length, r.records.length)
+  assert.equal(again.members.size, r.members.size)
+  assert.equal(again.dk, dk)
+})
+
+test('roster: a removal the same signer repeats changes nothing', () => {
+  const f = newIdentity(), c = newIdentity(), r = Roster.genesis(f, 'f.local')
+  r.add(f, 'c.local', c.cert)
+  r.remove(f, c.fp)
+  const dk = r.dk
+  assert.equal(r.merge([signed(f, { type: 'remove', fp: c.fp, at: r.nextAt(), by: f.fp, dk: newDiscoveryKey(), seen: [] })]), false)
+  assert.equal(r.dk, dk, 'the discovery key stays the one every member has')
 })
 
 test('roster: removing throws rather than report a removal that was not recorded', () => {
@@ -334,23 +386,6 @@ test('roster: removing throws rather than report a removal that was not recorded
   r.add(f, 'c.local', c.cert)
   r.merge = () => false
   assert.throws(() => r.remove(f, c.fp), /could not be recorded/)
-})
-
-test('roster: the largest full roster fits in one hello request', () => {
-  const rec = { type: 'add', host: 'h'.repeat(253), fp: 'f'.repeat(64), cert: 'c'.repeat(1024), at: Date.now(), by: 'b'.repeat(64), sig: 's'.repeat(200) }
-  assert.ok(JSON.stringify({ peers: [], records: Array(1000).fill(rec) }).length < 2 << 20)
-})
-
-test('roster: which of a machine\'s records are kept does not depend on arrival order', () => {
-  const f = newIdentity(), c = newIdentity(), r = Roster.genesis(f, 'f.local')
-  r.add(f, 'c.local', c.cert)
-  const t = r.nextAt()
-  const recs = Array.from({ length: 150 }, (_, i) => { const z = newIdentity(); return signed(c, { type: 'add', host: `z${i}.local`, fp: z.fp, cert: certDer(z.cert), at: t + i, by: c.fp }) })
-  const one = reload(r), two = reload(r)
-  one.merge(recs)
-  for (const x of [...recs].reverse()) two.merge([x])
-  assert.deepEqual([...one.members.keys()].sort(), [...two.members.keys()].sort())
-  assert.deepEqual(one.records.map(x => x.sig).sort(), two.records.map(x => x.sig).sort())
 })
 
 test('roster: same records in any order give the same membership; junk is not kept', () => {

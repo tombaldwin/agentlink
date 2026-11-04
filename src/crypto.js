@@ -32,8 +32,13 @@ export const verifyEnvelope = (pub, m) => verify(pub, envPayload(m), m.sig)
 /** @param {Omit<import('./types.js').RosterRecord, 'sig'>} r */
 const recPayload = r => JSON.stringify(['agentlink-roster-1', r.type, r.host ?? '', r.fp, r.cert ?? '', r.at, r.by, r.dk ?? '',
   ...(r.type === 'remove' ? [(r.seen ?? []).join(',')] : [])])
-/** A short id for a roster record (what a remove record lists in `seen`). @param {string} sig */
-export const recId = sig => sha256(sig).slice(0, 22)
+/**
+ * A short id for a roster record (what a remove record lists in `seen`): of its content, not its
+ * signature. A signature can be re-encoded by anyone and still verify, so it can't say which record
+ * this is, and a copy with a different signature is the same record.
+ * @param {Omit<import('./types.js').RosterRecord, 'sig'>} r
+ */
+export const recId = r => sha256(recPayload(r)).slice(0, 22)
 /**
  * What a check of a record is remembered under: its whole content and signature. Never the signature
  * alone, or a signature that was good for one record would pass for any other record carrying it.

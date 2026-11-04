@@ -25,9 +25,8 @@ the same membership from the same records.
 - **Membership.** A node accepts machine-to-machine requests only from current members' keys.
   Before a machine has proved its key, the only membership records it can submit are the ones that
   add it. Any member can add a machine by inviting it. A record counts, and is kept and passed on,
-  only if its signature checks out against the signer it names. One machine can add at most 100
-  machines, and a network holds about 1000 records; removals are always accepted, so nothing can
-  fill the roster to stop a removal.
+  only if its signature checks out against the signer it names. A roster stops taking new records
+  at about 1.5 MB, except removals of known machines, so nothing can fill it to stop a removal.
 - **Removal.** Machines are ranked in the order they joined, and a machine can remove only machines
   that joined after it. The founding machine can remove anyone, and two machines can never remove
   each other. A removal can't be undone: removing the remover doesn't bring a machine back, and
@@ -86,6 +85,9 @@ the same membership from the same records.
 - **A removed machine can still tell which member it is talking to, for 14 days.** It can pass the
   gate with an old discovery key during the grace period, and learn which member is at an address
   (which it knew already). It still can't send, receive or change the member list.
+- **A member can flood the roster.** Until you remove it, a compromised member can fill the roster
+  so that no new machine can join, and machines may disagree about the last records to arrive.
+  Removing it clears what it signed, apart from machines it really added.
 - **Agents on a machine aren't separately authenticated.** Any process running as your user can
   send as any session name on that machine.
 - **Invites are credentials until used.** Anyone who gets an unused invite line within 24 hours can
