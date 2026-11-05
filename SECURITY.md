@@ -29,10 +29,10 @@ the same membership from the same records.
   Before a machine has proved its key, the only membership records it can submit are the ones that
   add it. Any member can add a machine by inviting it. A record counts, and is kept and passed on,
   only if its signature checks out against the signer it names. A roster stops taking new records
-  at about 1.5 MB, so it always fits in the one request (4 MB) that carries it between machines. The
-  exception is a removal of a current member by a machine that joined before it, unless it's
-  padded with more ids than the removed machine has records. So nothing can fill a roster to stop a
-  removal, or stop one leaving a machine.
+  at 1 MB, apart from removals of a current member by a machine that joined before it, of up to 3 KB
+  and one per machine. So a roster always fits in the one request (8 MB) that carries it between
+  machines, and a full roster can't stop a removal or keep one from leaving a machine, unless the
+  removed machine added over about 100 machines: see *Known limitations*.
 - **Removal.** Machines are ranked in the order they joined, and a machine can remove only machines
   that joined after it. The founding machine can remove anyone, and two machines can never remove
   each other. A removal can't be undone: removing the remover doesn't bring a machine back, and
@@ -102,8 +102,9 @@ the same membership from the same records.
 - **A member can flood the roster.** Until you remove it, a compromised member can fill the roster
   so that no new machine can join, and machines may disagree about the last records to arrive.
   Removing it clears what it signed, apart from machines it really added and removals it made. While
-  a roster is full, a second removal of a machine already removed can wait until there's room, so
-  machines can disagree about it until then.
+  a roster is full, two kinds of removal wait until there's room, so machines can disagree until
+  then: a second removal of a machine already removed, and one that lists over about 100 machines
+  (a member that added that many). Remove the machines it added, or start a new network.
 - **Agents on a machine aren't separately authenticated.** Any process running as your user can
   send as any session name on that machine.
 - **Invites are credentials until used.** Anyone who gets an unused invite line within 24 hours can

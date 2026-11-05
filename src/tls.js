@@ -40,7 +40,7 @@ export class ProtoError extends Error {
  */
 export const PROTO = 1
 /** The largest request or response between machines. A roster always fits (see roster.js). */
-export const MAX_BODY = 4 << 20
+export const MAX_BODY = 8 << 20
 /** The slowest link we wait for, in bytes per ms (about 200 kbit/s). */
 export const MIN_RATE = 25
 const notExpected = () => new PinError('not the expected machine (key mismatch)')
@@ -163,7 +163,9 @@ export async function authedRequest(o, max = MAX_BODY) {
   const limit = setTimeout(() => whole.abort(), 3 * (o.timeout || 4000) + max / MIN_RATE)
   try {
     const { res, peerFp } = await authedRaw({ ...o, signal: o.signal ? AbortSignal.any([o.signal, whole.signal]) : whole.signal })
-    return { status: res.statusCode || 0, text: await readAll(res, max), peerFp }
+    const text = await readAll(res, max)
+    if (whole.signal.aborted) throw new Error('timed out')     // a body with no length just stops: that isn't its end
+    return { status: res.statusCode || 0, text, peerFp }
   } catch (e) {
     throw whole.signal.aborted ? new Error('timed out') : e
   } finally { clearTimeout(limit) }

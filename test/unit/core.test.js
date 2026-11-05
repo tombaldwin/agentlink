@@ -341,7 +341,7 @@ test('roster: a full roster refuses adds with an error, and still takes removals
   const f = newIdentity(), c = newIdentity(), r = Roster.genesis(f, 'f.local')
   r.add(f, 'c.local', c.cert)
   flood(r, c)
-  assert.ok(JSON.stringify(r.records).length > 1200 << 10, 'it filled up')
+  assert.ok(JSON.stringify(r.records).length > 900 << 10, 'it filled up')
   assert.ok(JSON.stringify({ peers: [], records: r.records }).length < 2 << 20, 'and still fits in a hello')
   assert.throws(() => r.add(f, 'late.local', newIdentity().cert), /size limit/)
   r.remove(f, c.fp)
@@ -489,6 +489,35 @@ test('roster: padded removals can\'t push it past what a hello can carry, and it
   assert.ok(!r.members.has(m.fp), 'and the flooder can always be removed')
 })
 
+test('roster: a removal can\'t carry anything else, so no record can push a roster past a hello', () => {
+  const f = newIdentity(), c = newIdentity(), p = newIdentity(), r = Roster.genesis(f, 'f.local')
+  r.add(f, 'c.local', c.cert)
+  const t = r.nextAt()
+  r.merge([signed(c, { type: 'add', host: 'p.local', fp: p.fp, cert: certDer(p.cert), at: t, by: c.fp })])
+  for (const extra of [{ host: 'h'.repeat(3 << 20) }, { cert: 'A'.repeat(3 << 20) }, { host: 'p.local' }]) {
+    r.merge([signed(c, { type: 'remove', fp: p.fp, at: t + 1, by: c.fp, ...extra })])
+    assert.ok(r.members.has(p.fp), 'refused')
+  }
+  assert.ok(Buffer.byteLength(JSON.stringify(r.records)) < 10_000)
+})
+
+test('roster: whether a full roster takes a removal doesn\'t depend on what it was shown', () => {
+  const s = newIdentity(), c = newIdentity(), p = newIdentity()
+  const a = Roster.genesis(s, 's.local')
+  a.add(s, 'c.local', c.cert)
+  let t = a.nextAt()
+  a.merge([signed(c, { type: 'add', host: 'p.local', fp: p.fp, cert: certDer(p.cert), at: t++, by: c.fp })])
+  const v = new Roster({ net: a.net, records: a.records })        // v holds what a holds so far...
+  const others = Array.from({ length: 12 }, () => newIdentity())
+  a.merge(others.map((x, i) => signed(c, { type: 'add', host: `o${i}.local`, fp: x.fp, cert: certDer(x.cert), at: t++, by: c.fp })))
+  flood(v, p)                                                     // ...and is filled by p; c's other adds are only shown to a
+  const removal = a.remove(s, c.fp)
+  assert.equal(removal.seen.length, 13)
+  v.merge([removal])
+  assert.ok(!v.members.has(c.fp), 'a real removal gets in, listing machines v never heard of')
+  assert.equal(v.dk, a.dk)
+})
+
 test('roster: nothing can be hidden in a record\'s text, and the limit counts bytes', () => {
   const f = newIdentity(), x = newIdentity(), r = Roster.genesis(f, 'f.local'), t = r.nextAt()
   const base = { type: 'add', host: 'x.local', fp: x.fp, at: t, by: f.fp }
@@ -547,8 +576,17 @@ test('a message\'s text can\'t pass for the end of it and the start of another',
   assert.notEqual(tag, /\[([0-9a-f]{12})\]/.exec(fmtMsgs([{ id: 'a', from: 'x@b.local', body: 'y', sent_at: 0 }]))?.[1], 'and a new tag each read')
 })
 
+test('a name that has been cleaned stays the same when cleaned again', () => {
+  for (const n of ['a'.repeat(47) + '-bbbb', 'a'.repeat(47) + '--b', 'a'.repeat(47) + '.x', '-.x.-']) {
+    const once = sanitizeName(n)
+    assert.equal(sanitizeName(once), once)
+    assert.doesNotMatch(once, /[-.]$/)
+  }
+})
+
 test('the channel is only considered enabled for interactive sessions that load it', async () => {
   const { channelArgs } = await import('../../src/mcp.js')
+  assert.ok(!channelArgs('claude --dangerously-load-development-channels=server:agentlink --model opus -p hi'), 'an option after another\'s value still counts')
   assert.ok(channelArgs('claude --dangerously-load-development-channels=server:agentlink mkdir -p src'), 'a prompt with -p in it is a prompt')
   assert.ok(!channelArgs('claude what does server:agentlink mean'), 'and one that mentions the channel doesn\'t enable it')
   assert.ok(channelArgs('claude --dangerously-load-development-channels=server:agentlink'))

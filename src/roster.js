@@ -22,15 +22,16 @@ import { signRecord, verifyRecord, newDiscoveryKey, recId, recKey } from './cryp
 import { fingerprint, certDer } from './cert.js'
 import { normHost, writeAtomic } from './config.js'
 
-// New records stop being taken in at this size, so that a roster always fits in one hello (4 MB):
+// New records stop being taken in at this size, so that a roster always fits in one hello (8 MB):
 // if it didn't, this node's removals would never reach anyone. The limit doesn't apply to loading our
 // own file, so nothing already held is lost, or to a removal that must get in (see mustTake), so a
-// full roster can always be cleaned up. Those are small and there is at most one per machine, so a
-// roster at its very worst (some 2000 machines, each removed) comes to about 2.5 MB.
-const MAX_ROSTER_BYTES = 1500 << 10
+// full roster can always be cleaned up. Those are at most MAX_TAKEN each, and there is at most one per
+// machine. A machine's add takes at least about 500 bytes, so that's some 2000 machines at the very
+// most: 1 MB + 2000 * 3 KB = 7 MB, whatever a member signs.
+const MAX_ROSTER_BYTES = 1 << 20
+const MAX_TAKEN = 3 << 10              // room for a removal listing about 100 machines
 const MAX_FUTURE_MS = 3600_000     // a record stamped further ahead than this is refused (bad clock)
 const MAX_SEEN = 4000                  // more than a full roster's adds, so no machine can make itself impossible to remove
-const SEEN_SLACK = 8                   // ids a removal may list beyond the adds we hold, and still count as small
 const MAX_DROPPED = 50                 // adds that didn't count, kept per removed machine (so their keys stay known as dropped)
 // a replaced discovery key still opens other members' gates for this long, so a machine that was
 // offline during a removal can catch up; after that it needs a new invite
@@ -48,6 +49,7 @@ function wellFormed(r) {
   if (typeof r.fp !== 'string' || !ASCII_KEY.test(r.fp) || r.fp.length > 64 || typeof r.by !== 'string' || !ASCII_KEY.test(r.by) || r.by.length > 64) return false
   if (typeof r.sig !== 'string' || !ASCII_KEY.test(r.sig) || r.sig.length > 200 || !Number.isSafeInteger(r.at) || r.at < 0) return false
   if (r.dk !== undefined && (typeof r.dk !== 'string' || r.dk.length !== 44 || Buffer.from(r.dk, 'base64').length !== 32)) return false
+  if (r.type === 'remove' && (r.host !== undefined || r.cert !== undefined)) return false
   if (r.seen !== undefined && (r.type !== 'remove' || !Array.isArray(r.seen) || r.seen.length > MAX_SEEN || !r.seen.every((/** @type {unknown} */ x) => typeof x === 'string' && /^[\w-]{22}$/.test(x)))) return false
   // strict base64: the decoder skips anything else, so a good certificate could carry padding
   if (r.type === 'add' && (typeof r.host !== 'string' || r.host.length > 253 || typeof r.cert !== 'string' || r.cert.length > 1024 || !/^[A-Za-z0-9+/]+={0,2}$/.test(r.cert))) return false
@@ -116,14 +118,13 @@ export class Roster {
   /**
    * Must this removal get in even when the roster is full? It takes a current member off the network,
    * by a machine that joined before it, so refusing it would leave the machine on here and off
-   * elsewhere, and a flooder could keep itself on. It must also be small: a real removal lists only
-   * adds its target signed, while one padded with made-up ids would fill the roster past the limit.
-   * @param {RosterRecord} r
+   * elsewhere, and a flooder could keep itself on. The size limit is fixed: anything worked out from
+   * what this node holds could be steered by whoever decides what it holds.
+   * @param {RosterRecord} r @param {number} size its size in bytes
    */
-  mustTake(r) {
+  mustTake(r, size) {
     const s = this.ranked.get(r.by), t = this.ranked.get(r.fp)
-    if (r.type !== 'remove' || !s || !t || s.rank >= t.rank || !this.members.has(r.fp)) return false
-    return (r.seen?.length ?? 0) <= this.records.filter(x => x.type === 'add' && x.by === r.fp).length + SEEN_SLACK
+    return r.type === 'remove' && size <= MAX_TAKEN && !!s && !!t && s.rank < t.rank && this.members.has(r.fp)
   }
 
   /**
@@ -143,7 +144,7 @@ export class Roster {
       const clean = /** @type {RosterRecord} */ (/** @type {unknown} */ (Object.fromEntries(['type', 'host', 'fp', 'cert', 'at', 'by', 'dk', 'seen', 'sig'].filter(k => o[k] !== undefined).map(k => [k, o[k]]))))
       const size = Buffer.byteLength(JSON.stringify(clean))
       if (!trustClock && bytes + size > MAX_ROSTER_BYTES) {
-        if (over.has(clean.fp) || !this.mustTake(clean)) continue
+        if (over.has(clean.fp) || !this.mustTake(clean, size)) continue
         over.add(clean.fp)
       }
       bytes += size

@@ -503,11 +503,12 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
   /**
    * @param {unknown} e
    * @param {Set<string>} [toPump] collect local recipients here instead of pumping each one now
-   * @param {boolean} [mine] the sender worked out that its name for the recipient's machine (a nickname
-   *   of its own, which we may not know) means us
+   * @param {string} [mine] the machine delivering this says its name for the recipient's machine (a
+   *   nickname of its own, which we may not know) means us. Believed only from the message's own
+   *   sender: a holder could otherwise turn a copy addressed elsewhere into a message for a session here.
    * @returns {import('./types.js').AcceptResult}
    */
-  function accept(e, toPump, mine = false) {
+  function accept(e, toPump, mine) {
     let to
     /** @type {Envelope} */
     let env
@@ -522,7 +523,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
       return null
     }
     if (env.expires_at <= now()) return 'expired'
-    if (isSelf(to.host) || (mine && !member(to.host))) {
+    if (isSelf(to.host) || (mine && mine === parseAddr(env.from, '').host && !member(to.host) && !removedHost(to.host))) {
       if (!store(env, cfg.host, to.name, 'inbox', 'queued')) return null
       const s = sessions.get(to.name)
       const live = s?.live || s?.waiter               // before pumping: a wait ends once it has woken the session
@@ -589,7 +590,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     for (const batch of batches(rows)) {
       try {
         // addressed under a name only we use for this machine: tell it they're for it
-        const res = await call(host, 'POST', '/v1/deliver', { messages: batch.map(envOf), mine: batch.filter(r => r.to_host !== host).map(r => r.id) })
+        const res = await call(host, 'POST', '/v1/deliver', { messages: batch.map(envOf), mine: batch.filter(r => r.role === 'outbox' && r.to_host !== host).map(r => r.id) })
         const results = res.results || {}
         const unknown = new Set(Array.isArray(res.unknown) ? res.unknown : [])
         let tell = false
@@ -996,7 +997,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
         const mine = new Set(Array.isArray(d.mine) ? d.mine.slice(0, 2000) : [])
         for (const e of Array.isArray(d.messages) ? d.messages.slice(0, 2000) : []) {
           let st
-          try { st = accept(e, toPump, mine.has(e?.id)) } catch (err) {
+          try { st = accept(e, toPump, mine.has(e?.id) ? peer.host : undefined) } catch (err) {
             for (const n of toPump) pump(n)
             // temporary storage failure: 503 makes the sender back off and retry the whole batch
             // (already-stored ids are deduplicated), instead of marking messages permanently failed

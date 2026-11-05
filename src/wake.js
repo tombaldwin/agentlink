@@ -46,9 +46,16 @@ function findClaude(pids) {
 export function launchFlags(cmdline) {
   const words = cmdline.trim().split(/\s+/).slice(1)
   if (/[\\/]claude-code[\\/]/.test(words[0] || '')) words.shift()    // node .../claude-code/cli.js
-  const end = words.findIndex(w => !w.startsWith('-') && !w.startsWith('server:'))
-  return end < 0 ? words : words.slice(0, end)
+  const out = []
+  for (let i = 0; i < words.length; i++) {
+    if (!words[i].startsWith('-') && !words[i].startsWith('server:')) break
+    out.push(words[i])
+    if (TAKES_VALUE.test(words[i])) i++
+  }
+  return out
 }
+// the options people put before others, whose value would otherwise look like the start of a prompt
+const TAKES_VALUE = /^(--model|--fallback-model|--agent|--permission-mode|--settings|--mcp-config|--session-id|--add-dir)$/
 
 /**
  * Is this an interactive session? Only those can be woken, and a script must never wait on this

@@ -51,10 +51,10 @@ export async function setup({ host, peers = [], noService, noClaude, noAlias, ne
   /** @type {import('./types.js').Identity | null} */
   let identity = null
   try { identity = readIdentity() } catch (e) { if (!leaving) throw e }     // a key and certificate that don't match
+  if (!identity && !newNetwork) identity = restoreCert(roster)
   if (!identity && !leaving) {
-    identity = restoreCert(roster)
     // part of a machine's identity is missing: making a new one here would silently abandon the network
-    if (!identity && (roster || fs.existsSync(keyPath()) || fs.existsSync(certPath()))) {
+    if (roster || fs.existsSync(keyPath()) || fs.existsSync(certPath())) {
       throw new Error(`this machine's key files are incomplete (${keyPath()}, ${certPath()}). Restore them, join again with an invite, or start a new network with --new-network`)
     }
   }
@@ -206,12 +206,15 @@ function leaveNetwork() {
   fs.rmSync(path.join(homeDir(), 'invite.key'), { force: true })
   const file = path.join(homeDir(), 'agentlink.db')
   if (!fs.existsSync(file)) return
-  const db = openStore(file)
+  // the join has already happened: this must not stop the new key being saved
   try {
-    const left = Number(db.prepare(`DELETE FROM messages WHERE state='pending'`).run().changes)
-    if (left) warn(`dropped ${left} undelivered message(s) for the old network`)
-    db.exec('DELETE FROM invites; DELETE FROM peers')
-  } finally { db.close() }
+    const db = openStore(file)
+    try {
+      const left = Number(db.prepare(`DELETE FROM messages WHERE state='pending'`).run().changes)
+      if (left) warn(`dropped ${left} undelivered message(s) for the old network`)
+      db.exec('DELETE FROM invites; DELETE FROM peers')
+    } finally { db.close() }
+  } catch (e) { warn(`could not clear ${file} (${errMsg(e)}); delete it before the node starts, or it may hold the old network's invites and messages`) }
 }
 
 /** Stop the node on this machine (it only accepts the key it was started with). */

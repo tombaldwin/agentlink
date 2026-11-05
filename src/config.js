@@ -61,7 +61,7 @@ export function validAddr(a) {
 
 /** @param {unknown} n */
 export function sanitizeName(n) {
-  const s = String(n || '').toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 48)
+  const s = String(n || '').toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[-.]+/, '').slice(0, 48).replace(/[-.]+$/, '')
   return s || 'agent'
 }
 

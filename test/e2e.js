@@ -308,6 +308,9 @@ try {
     const r3 = await memberPost('b', '/v1/deliver', { messages: disguised })
     assert.deepEqual(r3.data.results, {}, 'a sender address that is not exactly a node\'s is refused')
     assert.deepEqual(r3.data.unknown, [])
+    // a holder can't turn a copy addressed elsewhere into a message for a session here
+    const elsewhere = envelope('bob@nick.test', 'replayed', { from: 'alice@a.test' }, IDS.a.key)
+    assert.deepEqual((await memberPost('b', '/v1/deliver', { messages: [elsewhere], mine: [elsewhere.id] })).data.results, { [elsewhere.id]: 'held' })
     const nul = envelope('bob@b.test', 'cut \u0000 short')
     assert.deepEqual((await memberPost('b', '/v1/deliver', { messages: [nul] })).data.results, {}, 'and so is text the store would change')
     // a message reusing the id of one already delivered is refused, not reported as delivered

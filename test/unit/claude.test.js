@@ -155,8 +155,10 @@ test('only an interactive session waits: a script must never hang on the hook', 
   assert.ok(interactive('claude --continue why does docker run -p 8080:80 fail', 'ttys003', env))
   assert.ok(interactive('/usr/bin/node /x/claude-code/cli.js fix --print', 'ttys003', env))
   assert.ok(!interactive('/usr/bin/node /x/claude-code/cli.js -p hello', 'ttys003', env))
-  // an option after a value isn't seen here: Claude Code's own marker catches those
-  assert.ok(!interactive('claude --model opus -p hello', 'ttys003', { CLAUDE_CODE_ENTRYPOINT: 'sdk-cli' }))
+  // options this doesn't know the values of: Claude Code's own marker catches those
+  assert.ok(!interactive('claude --strange value -p hello', 'ttys003', { CLAUDE_CODE_ENTRYPOINT: 'sdk-cli' }))
+  assert.ok(!interactive('claude --model opus -p hello', 'ttys003', env))
+  assert.ok(interactive('claude --model opus mkdir -p src', 'ttys003', env))
   assert.ok(!interactive('claude', '??', env), 'no terminal')
   assert.ok(!interactive('claude', '?', env))
   assert.ok(!interactive('claude', '', env))
