@@ -3,29 +3,40 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { execFileSync } from 'node:child_process'
+import { fingerprint } from './cert.js'
 
 export const VERSION = '0.1.0'
 
 export function homeDir() {
   return process.env.AGENTLINK_HOME || path.join(os.homedir(), '.agentlink')
 }
-export const configPath = () => path.join(homeDir(), 'config.json')
+const configPath = () => path.join(homeDir(), 'config.json')
 /** This machine's key, certificate and the network's membership records. */
 export const keyPath = (dir = homeDir()) => path.join(dir, 'node.key')
 export const certPath = (dir = homeDir()) => path.join(dir, 'node.crt')
 export const rosterPath = (dir = homeDir()) => path.join(dir, 'roster.json')
 
+export const sleep = (/** @type {number} */ ms) => new Promise(r => setTimeout(r, ms))
+/** Single-quote for sh. @param {unknown} v */
+export const shQuote = v => `'${String(v).replace(/'/g, `'\\''`)}'`
+/** Compare dotted versions numerically. @param {string} a @param {string} b */
+export function cmpVersion(a, b) {
+  const x = String(a).split(/[.-]/).map(Number), y = String(b).split(/[.-]/).map(Number)
+  for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0)
+  return 0
+}
+
 /**
  * Replace `file` in one step, on disk before the rename: a crash or a full disk leaves the old file
  * or the new one, never part of one.
- * @param {string} file @param {string} data @param {number} mode
+ * @param {string} file @param {string | Buffer} data @param {number} mode
  */
 export function writeAtomic(file, data, mode) {
   const tmp = `${file}.${process.pid}.tmp`
   try {
     const fd = fs.openSync(tmp, 'w', mode)
     // writeFileSync, not writeSync: writeSync can write part of the data and report no error
-    try { fs.writeFileSync(fd, data); fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
+    try { fs.fchmodSync(fd, mode); fs.writeFileSync(fd, data); fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
     fs.renameSync(tmp, file)
   } catch (e) { fs.rmSync(tmp, { force: true }); throw e }
 }
@@ -84,7 +95,11 @@ export function parseAddr(input, selfHost) {
  * @returns {import('./types.js').PeerSpec | null}
  */
 export function parsePeer(p) {
-  const m = String(p || '').trim().toLowerCase().match(/^([^:\s]+)(?::(\d+))?$/)
+  const s = String(p || '').trim().toLowerCase()
+  // an IPv6 address has no name: this one stands for it until the machine there says who it is
+  const v6 = s.match(/^\[([0-9a-f:.]+)\]:\d+$/)
+  if (v6) return validAddr(s) ? { host: `ipv6-${v6[1].replace(/[:.]/g, '-').replace(/^-+|-+$/g, '')}.local`, addr: s } : null
+  const m = s.match(/^([^:\s]+)(?::(\d+))?$/)
   if (!m) return null
   let host
   try { host = normHost(m[1]) } catch { return null }
@@ -128,6 +143,12 @@ export function detectHost() {
   return h
 }
 const isLocalhost = (/** @type {string} */ h) => h === 'localhost' || h.startsWith('localhost.')
+/**
+ * Can this (normalised) name identify a machine? Every node takes "localhost" for itself, and an IP
+ * address says where a machine is, not which one it is.
+ * @param {string} h
+ */
+export const machineName = h => !isLocalhost(h) && !/^\d+(\.\d+){3}$/.test(h)
 
 /**
  * This machine's identity, or null if setup hasn't created one.
@@ -142,7 +163,7 @@ export function readIdentity(dir = homeDir()) {
   const pub = crypto.createPublicKey(key)
   const x = new crypto.X509Certificate(cert)
   if (!x.publicKey.equals(pub)) throw new Error(`${certPath(dir)} does not match ${keyPath(dir)}: restore the right file, or run agentlink setup --new-network to start over`)
-  return { key, cert, fp: crypto.createHash('sha256').update(pub.export({ type: 'spki', format: 'der' })).digest('base64') }
+  return { key, cert, fp: fingerprint(key) }
 }
 
 /** @param {import('./types.js').Identity} id */
@@ -153,7 +174,7 @@ export function writeIdentity(id, dir = homeDir()) {
 }
 
 /** The network this machine belongs to (the founding machine's fingerprint), or null. */
-export function readNet(dir = homeDir()) {
+function readNet(dir = homeDir()) {
   try { return String(JSON.parse(fs.readFileSync(rosterPath(dir), 'utf8')).net) } catch { return null }
 }
 

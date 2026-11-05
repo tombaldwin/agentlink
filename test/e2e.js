@@ -89,14 +89,16 @@ async function adapter(n, name, poll = false) {
   const transport = new StdioClientTransport({
     command: EXE,
     args: [...PRE, 'mcp', '--name', name, ...(poll === 'plain' ? [] : poll ? ['--poll'] : ['--channel'])],
-    env: envFor(n), stderr: 'ignore',
+    env: { ...envFor(n), AGENTLINK_LISTEN_GRACE_MS: '100' }, stderr: 'ignore',
   })
   const client = new Client({ name: 'test', version: '0' }, { capabilities: {} })
   const got = []
+  await client.connect(transport)
+  // as Claude Code does: it starts listening once it has the tool list, and what comes sooner is lost
+  await client.listTools()
   client.fallbackNotificationHandler = async notif => {
     if (notif.method === 'notifications/claude/channel') got.push(notif.params)
   }
-  await client.connect(transport)
   const call = async (tool, args = {}) => (await client.callTool({ name: tool, arguments: args })).content[0].text
   return { client, got, call, close: () => client.close(), instructions: client.getInstructions() }
 }
@@ -695,7 +697,7 @@ try {
     assert.match(scli('i', 'send', 'x@k2.test', 'NET1-SECRET').stdout, /queued/)
     const r = setup('i', ['--new-network'])
     assert.equal(r.status, 0, r.stdout + r.stderr)
-    assert.match(r.stdout, /dropped 1 undelivered message/)
+    assert.match(r.stdout, /dropped \d+ undelivered message/)
     assert.deepEqual(JSON.parse(scli('i', 'status').stdout).pending, [])
     scli('i', 'invite', '--revoke')
   })
@@ -770,9 +772,16 @@ try {
     assert.match(r.stderr, /key files are incomplete/)
     assert.equal(fs.readFileSync(path.join(dir, 'roster.json'), 'utf8'), roster)
     fs.writeFileSync(path.join(dir, 'node.key'), id.key, { mode: 0o600 })
-    // a certificate that isn't this key's: --new-network, which the error suggests, works
+    // a certificate that isn't this key's, or a damaged one: the member list holds the right one
+    for (const bad of [newIdentity().cert, '-----BEGIN CERT']) {
+      fs.writeFileSync(path.join(dir, 'node.crt'), bad)
+      r = setup('i')
+      assert.equal(r.status, 0, r.stdout + r.stderr)
+      assert.match(r.stdout, /restored .*node\.crt/)
+      assert.equal(readIdentity(dir).fp, id.fp)
+    }
+    // and --new-network still works with one
     fs.writeFileSync(path.join(dir, 'node.crt'), newIdentity().cert)
-    assert.match(setup('i').stderr, /does not match/)
     assert.equal(setup('i', ['--new-network']).status, 0)
     scli('i', 'invite', '--revoke')
   })
@@ -934,6 +943,186 @@ try {
     await assert.rejects(local.req('POST', '/local/send', { to: 'x', body: 'y' }), /not answered by this machine's agentlink node/)
     await assert.rejects(local.stream('x', 't', () => {}), /not answered by this machine's agentlink node/)
     tlsSq.close()
+  })
+
+  await step('messages waiting when a channel session starts wait until it is listening', async () => {
+    await ensureNode('b')
+    const name = 'starter', queued = () => JSON.parse(cli('b', 'status')).counts.filter(c => c.role === 'inbox' && c.state === 'pushed').reduce((n, c) => n + c.n, 0)
+    for (let i = 0; i < 5; i++) await memberPost('b', '/v1/deliver', { messages: [envelope(`${name}@b.test`, `early ${i}`)] })
+    const before = queued()
+    const client = new Client({ name: 'test', version: '0' }, { capabilities: {} })
+    await client.connect(new StdioClientTransport({ command: EXE, args: [...PRE, 'mcp', '--name', name, '--channel'], env: { ...envFor('b'), AGENTLINK_LISTEN_GRACE_MS: '100' }, stderr: 'ignore' }))
+    await sleep(800)
+    assert.equal(queued(), before, 'nothing is pushed, or marked pushed, before it has asked for its tools')
+    await client.listTools()
+    const got = []
+    client.fallbackNotificationHandler = async n => { if (n.method === 'notifications/claude/channel') got.push(n.params.content) }
+    await waitFor(() => got.length === 5, 8000, 'all five')
+    assert.deepEqual(got.sort(), [0, 1, 2, 3, 4].map(i => `early ${i}`))
+    await client.close()
+  })
+
+  await step('an inbox read that is cancelled loses nothing, and a long queue is read in parts', async () => {
+    await ensureNode('b')
+    const s = await adapter('b', 'reader', true)
+    await memberPost('b', '/v1/deliver', { messages: [envelope('reader@b.test', 'cancelled read')] })
+    await waitFor(async () => (await localOf('b').req('GET', '/local/peers')).local.includes('reader'), 5000, 'reader connected')
+    await sleep(300)
+    const ac = new AbortController()
+    const call = s.client.callTool({ name: 'inbox', arguments: {} }, undefined, { signal: ac.signal })
+    ac.abort()
+    await assert.rejects(call)
+    await sleep(300)
+    assert.match(await s.call('inbox'), /cancelled read/, 'still there')
+    assert.match(await s.call('inbox'), /No new messages/)
+    // more than a session is given at once, and more than one read returns
+    const total = 300, big = 'x'.repeat(4000)
+    for (let i = 0; i < total; i += 50) await memberPost('b', '/v1/deliver', { messages: Array.from({ length: 50 }, (_, k) => envelope('reader@b.test', `n${i + k}. ${big}`)) })
+    await sleep(500)
+    const seen = new Set()
+    let reads = 0
+    for (; reads < 60 && seen.size < total; reads++) {
+      const out = await s.call('inbox')
+      for (const m of out.matchAll(/^n(\d+)\. /gm)) { assert.ok(!seen.has(m[1]), 'read once'); seen.add(m[1]) }
+      await sleep(150)
+    }
+    assert.equal(seen.size, total)
+    assert.ok(reads > 1, 'in parts')
+    await s.close()
+  })
+
+  await step('reading a message is not news, and one given back by a cancelled read is', async () => {
+    await ensureNode('c')
+    const s = await adapter('c', 'heard', true)
+    await memberPost('c', '/v1/deliver', { messages: [envelope('heard@c.test', 'one')] })
+    await sleep(300)
+    assert.match(await s.call('inbox'), /one/)
+    const wait = localOf('c').wakeWait([process.pid])
+    assert.equal(await Promise.race([wait, sleep(600).then(() => null)]), null, 'a wait started straight after a read isn\'t woken for what was read')
+    await memberPost('c', '/v1/deliver', { messages: [envelope('heard@c.test', 'two')] })
+    assert.equal((await wait).event, 'wake', 'news is news')
+    const ac = new AbortController()
+    const call = s.client.callTool({ name: 'inbox', arguments: {} }, undefined, { signal: ac.signal })
+    ac.abort()
+    await call.catch(() => {})
+    await sleep(300)
+    assert.equal((await Promise.race([localOf('c').wakeWait([process.pid]), sleep(2000).then(() => null)]))?.event, 'wake', 'told again')
+    assert.match(await s.call('inbox'), /two/)
+    await s.close()
+  })
+
+  await step('copies of a message: another encoding of its signature, and one held under a name that turns out to be here', async () => {
+    await ensureNode('b')
+    const e = envelope('x@b.test', 're-encoded')
+    assert.ok((await memberPost('b', '/v1/deliver', { messages: [{ ...e, sig: `${e.sig}=` }] })).data.results[e.id])
+    assert.ok((await memberPost('b', '/v1/deliver', { messages: [e] })).data.results[e.id], 'the real one isn\'t turned away')
+    const h = envelope('nicky@nick.test', 'for a nickname')
+    assert.equal((await memberPost('b', '/v1/deliver', { messages: [h] })).data.results[h.id], 'held')
+    assert.ok((await memberPost('b', '/v1/deliver', { messages: [h], mine: [h.id] })).data.results[h.id])
+    const s = await adapter('b', 'nicky', true)
+    await waitFor(async () => /for a nickname/.test(await s.call('inbox')), 5000, 'the session gets it')
+    await s.close()
+  })
+
+  await step('a date from the future hides nothing, and a sender\'s clock ahead of ours is no reason to fail', async () => {
+    await ensureNode('b')
+    await memberPost('b', '/v1/deliver', { messages: [envelope('dated@b.test', 'from the future', { sent_at: Date.now() + 20 * 86400_000, expires_at: Date.now() + 86400_000 })] })
+    await memberPost('b', '/v1/deliver', { messages: [envelope('dated@b.test', 'just now')] })
+    const { messages } = await localOf('b').req('GET', '/local/history', undefined, '?name=dated&limit=1')
+    assert.equal(messages[0].body, 'just now')
+    const late = envelope('dated@b.test', 'long life', { expires_at: Date.now() + 30 * 86400_000 + 60_000 })
+    assert.ok((await memberPost('b', '/v1/deliver', { messages: [late] })).data.results[late.id])
+  })
+
+  await step('names nothing has heard of don\'t hold up messages for machines we know', async () => {
+    await ensureNode('a'); await ensureNode('b')
+    await memberPost('a', '/v1/deliver', { messages: Array.from({ length: 40 }, (_, i) => envelope(`x@made-up-${i}.invalid`, 'junk')) })
+    const e = envelope('afterjunk@b.test', 'still gets through')
+    assert.equal((await memberPost('a', '/v1/deliver', { messages: [e] })).data.results[e.id], 'held')
+    await waitFor(async () => (await localOf('b').req('GET', '/local/history', undefined, '?name=afterjunk&limit=1')).messages.length === 1, 6000, 'delivery')
+    const st = JSON.parse(cli('a', 'status'))
+    assert.ok(st.pending.filter(p => /made-up/.test(p.to_addr)).some(p => p.attempts > 0), 'and they are tried in turn')
+  })
+
+  await step('send keeps every word of the message, -- included', async () => {
+    await ensureNode('b')
+    cli('b', 'send', 'words', 'fix', 'the', '--', 'flag', 'parser')
+    const { messages } = await localOf('b').req('GET', '/local/history', undefined, '?name=words&limit=1')
+    assert.equal(messages[0].body, 'fix the -- flag parser')
+  })
+
+  await step('re-joining the same network keeps a removal the inviter has not heard of', async () => {
+    assert.equal(setup('i', ['--new-network']).status, 0)
+    scli('i', 'invite', '--revoke')
+    assert.equal(setup('k', joinArgs(parseInvite(scli('i', 'invite').stdout)), { AGENTLINK_HOST: 'k.test' }).status, 0, 'k joins')
+    fs.rmSync(path.join(ROOT, 's-l'), { recursive: true, force: true })
+    assert.equal(setup('l', joinArgs(parseInvite(scli('i', 'invite').stdout))).status, 0, 'l joins')
+    await sLocal('l').req('POST', '/local/shutdown').catch(() => {})
+    await sLocal('k').req('POST', '/local/shutdown').catch(() => {})     // a node starting up says hello
+    await waitFor(async () => !await sLocal('k').health(), 5000, 'k to stop')
+    await waitFor(async () => JSON.parse(scli('k', 'status').stdout).members.some(m => m.host === 'l.test'), 8000, 'k hears of l')
+    const again = parseInvite(scli('i', 'invite').stdout)
+    await sLocal('i').req('POST', '/local/shutdown').catch(() => {})
+    await waitFor(async () => !await sLocal('i').health(), 5000, 'i to stop')
+    assert.match(scli('k', 'remove', 'l.test').stdout, /removed l\.test/)
+    await sLocal('k').req('POST', '/local/shutdown').catch(() => {})
+    await waitFor(async () => !await sLocal('k').health(), 5000, 'k to stop')
+    scli('i', 'status')                                        // i comes back, knowing nothing of it
+    assert.ok(JSON.parse(scli('i', 'status').stdout).members.some(m => m.host === 'l.test'))
+    const net = JSON.parse(fs.readFileSync(path.join(ROOT, 's-i', 'roster.json'), 'utf8')).net
+    const r = setup('k', [...joinArgs(again), '--net', net])
+    assert.equal(r.status, 0, r.stdout + r.stderr)
+    assert.match(r.stdout, /Already a member/)
+    assert.ok(!JSON.parse(scli('k', 'status').stdout).members.some(m => m.host === 'l.test'), 'still gone here')
+    await waitFor(() => !JSON.parse(scli('i', 'status').stdout).members.some(m => m.host === 'l.test'), 8000, 'and i learns of it')
+  })
+
+  await step('the install preset keeps the name that worked, and setup finds a node on its old port', async () => {
+    const inv2 = parseInvite(scli('i', 'invite').stdout)
+    const script = host => spawnSync(curlBin, ['-fsSL', '-k', '-H', `Host: ${host}`, `https://127.0.0.1:${NODES.i}/join/install?t=${inv2.token}`], { encoding: 'utf8' }).stdout
+    assert.match(script(`127.0.0.1:${NODES.i}`), /--peer 'i\.test/)
+    assert.match(script(`[::1]:${NODES.i}`), new RegExp(`--join '\\[::1\\]:${NODES.i}'`))
+    assert.match(script('box:99999'), new RegExp(`--join 'i\\.test:${NODES.i}'`), 'no such port: our own address')
+    scli('i', 'invite', '--revoke')
+    const k = sLocal('k')
+    assert.ok(await k.health(), 'k runs on its port')
+    assert.equal(setup('k', [], { AGENTLINK_PORT: String(NODES.m) }).status, 0)
+    await waitFor(async () => !await k.health(), 3000, 'the old node gone')
+    await new Local({ identity: readIdentity(path.join(ROOT, 's-k')), port: NODES.m, dir: path.join(ROOT, 's-k') }).req('POST', '/local/shutdown').catch(() => {})
+  })
+
+  await step('a name the roster would refuse stops setup, however it was given', async () => {
+    for (const name of ['10.0.0.5', 'localhost']) {
+      fs.rmSync(path.join(ROOT, 's-n'), { recursive: true, force: true })
+      const r = setup('n', [], { AGENTLINK_HOST: name })
+      assert.notEqual(r.status, 0)
+      assert.match(r.stderr, /can't identify a machine/)
+      assert.ok(!fs.existsSync(path.join(ROOT, 's-n', 'roster.json')))
+    }
+  })
+
+  await step('leaving a network leaves nothing of it behind, even with its database locked', async () => {
+    const dir = path.join(ROOT, 's-i')
+    assert.match(scli('i', 'send', 'nobody', 'OLD-NETWORK').stdout, /queued/)
+    parseInvite(scli('i', 'invite').stdout)
+    const db = openStore(path.join(dir, 'agentlink.db'))
+    await sLocal('i').req('POST', '/local/shutdown').catch(() => {})
+    await waitFor(async () => !await sLocal('i').health(), 5000, 'i to stop')
+    db.exec('BEGIN IMMEDIATE')
+    const r = setup('i', ['--new-network'])
+    db.exec('ROLLBACK')
+    db.close()
+    assert.equal(r.status, 0, r.stdout + r.stderr)
+    assert.match(r.stdout, /removing it/)
+    assert.equal(scli('i', 'invite', '--list').stdout.includes('made'), true, 'a new network\'s own invite, and no other')
+    assert.equal((JSON.parse(scli('i', 'status').stdout).counts.find(c => c.state === 'queued')), undefined)
+    scli('i', 'invite', '--revoke')
+    // and without the lock, queued messages go too
+    assert.match(scli('i', 'send', 'nobody', 'OLD-NETWORK').stdout, /queued/)
+    const r2 = setup('i', ['--new-network'])
+    assert.match(r2.stdout, /dropped 1 undelivered message/)
+    assert.equal(JSON.parse(scli('i', 'status').stdout).counts.find(c => c.state === 'queued'), undefined)
+    scli('i', 'invite', '--revoke')
   })
 
   await bob.close()

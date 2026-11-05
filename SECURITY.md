@@ -29,16 +29,16 @@ the same membership from the same records.
   Before a machine has proved its key, the only membership records it can submit are the ones that
   add it. Any member can add a machine by inviting it. A record counts, and is kept and passed on,
   only if its signature checks out against the signer it names. A roster stops taking new records
-  at 1 MB, apart from removals of a current member by a machine that joined before it, of up to 3 KB
-  and one per machine. So a roster always fits in the one request (8 MB) that carries it between
-  machines, and a full roster can't stop a removal or keep one from leaving a machine, unless the
-  removed machine added over about 100 machines: see *Known limitations*.
+  at 1 MB, apart from removals of a current member by a machine that joined before it, one per
+  machine, which may be as big as a removal has any reason to be: an entry for each machine the
+  target really added, and otherwise no bigger than what it clears. So a roster always fits in the
+  one request (8 MB) that carries it between machines, and a member can't stay on by filling one.
 - **Removal.** Machines are ranked in the order they joined, and a machine can remove only machines
   that joined after it. The founding machine can remove anyone, and two machines can never remove
-  each other. A removal can't be undone: removing the remover doesn't bring a machine back, and
-  removals made at the same time all stand. A removed key is gone for good (the machine isn't told,
-  and re-joins with an invite and a new key), and a key made by a removed machine never becomes the
-  discovery key.
+  each other. Removing the remover doesn't bring a machine back, and removals made at the same time
+  all stand. A removed key is gone for good (the machine isn't told, and re-joins with an invite and
+  a new key), with one exception: see *Known limitations*. A key made by a removed machine never
+  becomes the discovery key.
 - **A removed machine can't add machines.** A removal lists the removed machine's records the
   remover had. Machines it added stay if every remover had seen the add. An add the remover hadn't
   seen doesn't count, whatever date it carries, and that machine needs a new invite. Every member
@@ -55,12 +55,12 @@ the same membership from the same records.
   installer, the package and the token can't be intercepted or replaced. The joining machine checks
   the same key again before it sends its join request. The token is consumed by the join.
   `agentlink invite --revoke` cancels unused tokens. Starting or joining another network deletes the
-  old network's invites and its undelivered messages.
+  old network's invites and all its messages, and setup stops rather than start the node if it can't.
 - **Discovery.** LAN beacons are encrypted under a discovery key that members share only over
   their TLS connections, so other people on the network can't read machine names from them. The
   discovery key is replaced whenever a machine is removed. A replaced key still opens other
-  members' gates for 14 days, so a machine that was offline during a removal can catch up. After
-  that, it needs a new invite.
+  members' gates, and gets beacons answered, for 14 days, so a machine that was offline during a
+  removal can catch up. After that, it needs a new invite.
 - **Local API.** Sessions on the same machine talk to their node over TLS on 127.0.0.1, with the
   same check: the node must prove it holds this machine's key, and so must the client. Only
   processes that can read this machine's private key (your user) get in, and a program squatting
@@ -68,8 +68,9 @@ the same membership from the same records.
 - **Prompt injection.** Messages come from other AI agents. The MCP adapter instructs Claude to
   treat them as requests from a colleague — never as instructions from its user — and not to
   take destructive or security-sensitive actions solely because a peer asked. Each message is framed
-  with a tag made for that read, so its text can't pass for another message from someone else. Only
-  invite machines and agents you trust.
+  with a tag made for that read, so its text can't pass for another message from someone else. Nothing
+  else another machine writes reaches a session: a session name must be one a node could have made, and
+  a machine's error text is dropped for its status code. Only invite machines and agents you trust.
 - **Waking a session.** Setup adds a Claude Code hook that waits in the background and wakes an idle
   session when a message arrives. What it shows Claude is fixed text saying a message is waiting:
   nothing another agent wrote comes through the hook. Claude reads the message with the `inbox` tool,
@@ -85,10 +86,15 @@ the same membership from the same records.
   `agentlink status` lists machines in joining order and shows which member added each one:
   remove any you don't recognise, or start a new network with `agentlink setup --new-network`
   and re-join your machines. One thing it won't show: a member can sign a second key under its own
-  name. That key never becomes a member, and it's dropped when the member is removed.
+  name. That key never becomes a member, and it's dropped when the member is removed. Nothing limits
+  how much a member can queue for a session here, beyond messages expiring: it can use up disk space.
+- **A member can undo a removal made by a machine that joined after it.** It signs a backdated add of
+  the removed key, dated before the remover joined, so that the remover no longer ranks above it, and
+  the machine is back under its old key. A removal by a machine that joined before that member stands.
+  If you suspect a member, remove it first, from the earliest machine you can.
 - **Messages aren't end-to-end encrypted.** While the recipient's machine is off, copies wait on
-  other members, which can read them. They can't alter them. Don't send anything through
-  agentlink that you wouldn't want your other machines to hold.
+  other members, which can read them until they're handed over. They can't alter them. Don't send
+  anything through agentlink that you wouldn't want your other machines to hold.
 - **The founding machine can't be removed.** Nothing joined before it. If it's lost or
   compromised, start a new network. Likewise, a machine can only be removed from machines that
   joined before it.
@@ -99,12 +105,17 @@ the same membership from the same records.
 - **A removed machine can still tell which member it is talking to, for 14 days.** It can pass the
   gate with an old discovery key during the grace period, and learn which member is at an address
   (which it knew already). It still can't send, receive or change the member list.
+- **Two removals at the same moment can leave a removed machine holding the current discovery key.**
+  If one machine removes another that has already heard of a third's removal, the removed machine has
+  the key that removal brought in, until the next removal by a current member replaces it. It can pass
+  the gate as above, for that long.
 - **A member can flood the roster.** Until you remove it, a compromised member can fill the roster
   so that no new machine can join, and machines may disagree about the last records to arrive.
   Removing it clears what it signed, apart from machines it really added and removals it made. While
   a roster is full, two kinds of removal wait until there's room, so machines can disagree until
-  then: a second removal of a machine already removed, and one that lists over about 100 machines
-  (a member that added that many). Remove the machines it added, or start a new network.
+  then: a second removal of a machine already removed, and one listing dozens of machines a full node
+  has never heard of, if what fills that node was signed by someone else. Remove that machine first.
+  `agentlink remove` says so if it's this machine's own roster that has no room.
 - **Agents on a machine aren't separately authenticated.** Any process running as your user can
   send as any session name on that machine.
 - **Invites are credentials until used.** Anyone who gets an unused invite line within 24 hours can

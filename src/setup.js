@@ -5,7 +5,7 @@ import path from 'node:path'
 import { execFileSync, spawnSync } from 'node:child_process'
 import crypto from 'node:crypto'
 import net from 'node:net'
-import { writeConfig, readConfigFile, loadConfig, homeDir, ensureHomeDir, normHost, detectHost, validAddr, readIdentity, writeIdentity, keyPath, certPath, rosterPath, errMsg } from './config.js'
+import { writeConfig, readConfigFile, loadConfig, homeDir, ensureHomeDir, normHost, machineName, detectHost, validAddr, readIdentity, writeIdentity, keyPath, certPath, rosterPath, errMsg, sleep, writeAtomic } from './config.js'
 import { newIdentity, certDer, shortFp, fingerprint } from './cert.js'
 import { Roster } from './roster.js'
 import { peerCertificate, pinnedRequest } from './tls.js'
@@ -25,8 +25,9 @@ function serviceNames() {
   const suffix = dir === usual ? '' : '-' + crypto.createHash('sha256').update(dir).digest('hex').slice(0, 8)
   return { label: `com.agentlink.node${suffix}`, unit: `agentlink${suffix}` }
 }
+/** The agentlink home if it isn't this user's usual one: the Claude accounts and shell files here aren't its own. */
+const homeElsewhere = () => !!process.env.AGENTLINK_HOME && path.resolve(homeDir()) !== path.join(os.homedir(), '.agentlink')
 const uid = () => process.getuid?.() ?? 0   // launchd domain (macOS only, where getuid exists)
-const sleep = (/** @type {number} */ ms) => new Promise(r => setTimeout(r, ms))
 const sleepSync = (/** @type {number} */ ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 const ok = (/** @type {string} */ m) => console.log(`  ✓ ${m}`)
 const warn = (/** @type {string} */ m) => console.log(`  ! ${m}`)
@@ -37,6 +38,11 @@ const warn = (/** @type {string} */ m) => console.log(`  ! ${m}`)
  */
 export async function setup({ host, peers = [], noService, noClaude, noAlias, newNetwork, join, pin, net: netFp, token }) {
   noService ||= process.env.AGENTLINK_NO_SERVICE === '1'
+  // what's registered with Claude Code doesn't carry a home with it: it would be this user's usual one
+  if (homeElsewhere() && !(noClaude && noAlias)) {
+    warn(`AGENTLINK_HOME is ${homeDir()}, so the Claude accounts and shell files of ${os.homedir()} are left alone`)
+    noClaude = noAlias = true
+  }
   if (host) host = normHost(host)   // throws before anything is written
   delete process.env.AGENTLINK_TOKEN            // spent by the join: not for the processes setup starts
   if (join && (!pin || !token)) throw new Error('--join needs --pin and --token (use the line printed by `agentlink invite`)')
@@ -50,8 +56,11 @@ export async function setup({ host, peers = [], noService, noClaude, noAlias, ne
   const leaving = newNetwork || !!join        // this machine's key is being replaced or checked by a join
   /** @type {import('./types.js').Identity | null} */
   let identity = null
-  try { identity = readIdentity() } catch (e) { if (!leaving) throw e }     // a key and certificate that don't match
+  /** @type {unknown} */
+  let unreadable = null
+  try { identity = readIdentity() } catch (e) { unreadable = e }     // a key and certificate that don't match, or a damaged one
   if (!identity && !newNetwork) identity = restoreCert(roster)
+  if (!identity && unreadable && !leaving) throw unreadable
   if (!identity && !leaving) {
     // part of a machine's identity is missing: making a new one here would silently abandon the network
     if (roster || fs.existsSync(keyPath()) || fs.existsSync(certPath())) {
@@ -67,6 +76,8 @@ export async function setup({ host, peers = [], noService, noClaude, noAlias, ne
   const asked = host || (process.env.AGENTLINK_HOST ? normHost(process.env.AGENTLINK_HOST) : undefined)
   // the name this machine has on its network is fixed by the roster; a new network can pick a new one
   const myHost = asked || memberName || normHost(existing.host || detectHost())
+  // wherever it came from: the roster won't take it, and that's no state to find out in
+  if (!machineName(myHost)) throw new Error(`"${myHost}" can't identify a machine on the network: run agentlink setup --host <name>`)
   /** @type {string[]} */
   let allPeers = []
   let banner = ''
@@ -105,8 +116,13 @@ export async function setup({ host, peers = [], noService, noClaude, noAlias, ne
     await stopRunningNode(prev ? [prev] : [])
     if (!same) leaveNetwork()
     writeIdentity(id)
-    joined.save()
-    if (myHost !== joined.members.get(id.fp)?.host) throw new Error('internal: name mismatch')
+    if (same) {
+      // what we know and the inviter doesn't (a removal it hasn't heard of) must survive this. Read now:
+      // the node may have added to it since setup started
+      const mine = Roster.load(rosterPath())
+      mine.merge(data.records)
+      mine.save()
+    } else joined.save()
     allPeers = [...new Set([...(same ? existing.peers || [] : []), join, ...peers])]
     banner = same ? `Already a member of this network (via ${data.host}).` : `Joined the network via ${data.host}.`
   } else if (!member || newNetwork) {
@@ -190,8 +206,8 @@ Name a session with AGENTLINK_NAME=<name> (default: the project folder name).`)
 function restoreCert(roster) {
   try {
     const m = roster?.members.get(fingerprint(fs.readFileSync(keyPath(), 'utf8')))
-    if (!m || fs.existsSync(certPath())) return null
-    fs.writeFileSync(certPath(), m.pem, { mode: 0o644 })
+    if (!m) return null
+    writeAtomic(certPath(), m.pem, 0o644)
     ok(`restored ${certPath()} from the member list`)
     return readIdentity()
   } catch { return null }
@@ -199,35 +215,51 @@ function restoreCert(roster) {
 
 /**
  * What belonged to the network this machine is leaving. Its invites must not let anyone into the new
- * one, and what's still waiting to go was signed with the old key, for machines of the old network:
- * another network's machine with the same name must not be handed it.
+ * one, and its messages are from and for machines of the old network: another network's machine with
+ * the same name must not be handed them, and nobody on the new one should be shown them. This can't
+ * be left half done, because setup starts the node next. If the database can't be cleared (someone
+ * has it open, say) it goes; and if that can't be done either, setup stops here.
  */
 function leaveNetwork() {
   fs.rmSync(path.join(homeDir(), 'invite.key'), { force: true })
   const file = path.join(homeDir(), 'agentlink.db')
   if (!fs.existsSync(file)) return
-  // the join has already happened: this must not stop the new key being saved
   try {
     const db = openStore(file)
     try {
-      const left = Number(db.prepare(`DELETE FROM messages WHERE state='pending'`).run().changes)
+      const left = Number(/** @type {any} */ (db.prepare(`SELECT count(*) n FROM messages WHERE state IN ('pending','queued')`).get()).n)
+      db.exec('BEGIN IMMEDIATE; DELETE FROM messages; DELETE FROM invites; DELETE FROM peers; COMMIT')
       if (left) warn(`dropped ${left} undelivered message(s) for the old network`)
-      db.exec('DELETE FROM invites; DELETE FROM peers')
     } finally { db.close() }
-  } catch (e) { warn(`could not clear ${file} (${errMsg(e)}); delete it before the node starts, or it may hold the old network's invites and messages`) }
+  } catch (e) {
+    warn(`could not clear ${file} (${errMsg(e)}): removing it, with its messages`)
+    for (const f of [file, `${file}-wal`, `${file}-shm`]) fs.rmSync(f, { force: true })
+  }
 }
 
-/** Stop the node on this machine (it only accepts the key it was started with). */
-/** @param {Pick<import('./types.js').Config, 'identity' | 'port' | 'dir'>[]} cfgs */
+/** The port this machine's config says its node is on, if that's known. (A home of its own defaults to nothing: 7777 is another node's.) */
+function configuredPort() {
+  try { return readConfigFile()?.port || (process.env.AGENTLINK_HOME ? 0 : 7777) } catch { return 0 }
+}
+
+/**
+ * Stop the node on this machine (it only accepts the key it was started with). It may be on the port
+ * in the config while this run has been told another.
+ * @param {Pick<import('./types.js').Config, 'identity' | 'port' | 'dir'>[]} cfgs
+ */
 async function stopRunningNode(cfgs) {
-  for (const c of cfgs.length ? cfgs : keyOnly()) {
+  const list = cfgs.length ? cfgs : keyOnly()
+  const port0 = configuredPort()
+  let stopped = false
+  for (const c of [...list, ...list.filter(x => port0 && x.port !== port0).map(x => ({ ...x, port: port0 }))]) {
     const l = new Local(c)
     const h = await l.health()
     if (!h || 'foreign' in h) continue
     try { await l.req('POST', '/local/shutdown') } catch (e) { warn(`could not stop the running node: ${errMsg(e)}`); continue }
     for (let i = 0; i < 30 && await l.health(); i++) await sleep(100)
-    return
+    stopped = true
   }
+  if (stopped) return
   const port = cfgs[0]?.port || Number(process.env.AGENTLINK_PORT || readConfigFile()?.port || 7777)
   if (await portInUse(port)) warn(`something else is using port ${port} (another network's node, or another program); stop it so this machine's node can start`)
 }
@@ -263,8 +295,7 @@ export function formatInvites(invites) {
     ...invites.map(i => `  made ${t(i.created_at)}, expires ${t(i.expires_at)}`)].join('\n')
 }
 
-/** Ready-to-paste instructions (for a person, or for Claude) to add another machine. */
-/** @param {{ token: string, fp: string, host: string, port: number, tailscale?: string | null, ip?: string }} inv */
+/** Ready-to-paste instructions (for a person, or for Claude) to add another machine. @param {{ token: string, fp: string, host: string, port: number, tailscale?: string | null, ip?: string }} inv */
 export function invitePrompt(inv) {
   let prompt = `Join my agentlink network: run  ${installLine(inv, inv.host)}`
   if (inv.tailscale) prompt += `  — if ${inv.host} can't be reached, run  ${installLine(inv, inv.tailscale)}  instead`
@@ -284,22 +315,26 @@ Once it's used, expired or revoked, curl rejects the line (a key mismatch or a 4
 /** Enable agentlink for every Claude account here. Returns what's wrong, if it couldn't be done at all. */
 function registerClaude() {
   if (!claudeBin()) return 'claude was not found on PATH, in ~/.local/bin or in ~/.claude/local. Run `agentlink setup` from a terminal where `claude` works'
+  /** @type {string | null} */
+  let failed = null
   for (const acct of claudeAccounts()) {
     const label = acct.dir ? `${acct.alias} (${acct.dir})` : 'default account'
     try { register(acct.dir); ok(`enabled for Claude account: ${label}`) }
-    catch (e) { warn(`could not enable for ${label}: ${errMsg(e)}`) }
+    catch (e) { warn(`could not enable for ${label}: ${errMsg(e)}`); failed ||= `could not enable for ${label}` }
   }
   const { ok: wakes, version } = wakeSupport()
-  if (!wakes) warn(`Claude Code ${version || '(unknown version)'} is older than ${WAKE_MIN_CLAUDE}, so sessions won't wake by themselves; they read messages with the inbox tool. Update Claude Code, then run agentlink setup again`)
-  return null
+  const then = `so sessions won't wake by themselves; they read messages with the inbox tool`
+  if (!wakes) warn(version ? `Claude Code ${version} is older than ${WAKE_MIN_CLAUDE}, ${then}. Update Claude Code, then run agentlink setup again` : `couldn't tell which version of Claude Code this is (it needs ${WAKE_MIN_CLAUDE}), ${then}`)
+  return failed
 }
 
 // ---------- services ----------
-export function installService() {
+function installService() {
   const cfgDir = ensureHomeDir()
   const { label: LABEL, unit: UNIT } = serviceNames()
   const logFile = path.join(cfgDir, 'node.log')
-  const env = { PATH: process.env.PATH, ...(process.env.AGENTLINK_HOME ? { AGENTLINK_HOME: cfgDir } : {}) }
+  // the service starts with this user's real home, whatever this run's is
+  const env = { PATH: process.env.PATH, ...(path.resolve(cfgDir) !== path.join(os.userInfo().homedir, '.agentlink') ? { AGENTLINK_HOME: cfgDir } : {}) }
   if (process.platform === 'darwin') {
     const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', `${LABEL}.plist`)
     const args = [...selfCmd(), 'node']
@@ -340,6 +375,8 @@ ExecStart=${[...selfCmd(), 'node'].map(sdQuote).join(' ')}
 ${Object.entries(env).map(([k, v]) => `Environment=${sdQuote(`${k}=${v}`)}`).join('\n')}
 Restart=always
 RestartSec=5
+StandardOutput=append:${logFile.replace(/%/g, '%%')}
+StandardError=append:${logFile.replace(/%/g, '%%')}
 
 [Install]
 WantedBy=default.target
@@ -367,10 +404,13 @@ export async function uninstall() {
     spawnSync('systemctl', ['--user', 'disable', '--now', UNIT], { stdio: 'ignore' })
     fs.rmSync(path.join(os.homedir(), '.config', 'systemd', 'user', `${UNIT}.service`), { force: true })
   }
-  for (const acct of claudeAccounts()) {
-    try { unregister(acct.dir) } catch (e) { warn(errMsg(e)) }     // one account's settings mustn't stop the rest
+  if (homeElsewhere()) warn(`AGENTLINK_HOME is ${homeDir()}, so the Claude accounts and shell files of ${os.homedir()} were left alone`)
+  else {
+    for (const acct of claudeAccounts()) {
+      try { unregister(acct.dir) } catch (e) { warn(errMsg(e)) }     // one account's settings mustn't stop the rest
+    }
+    removeShellBlock().forEach(warn)
   }
-  removeShellBlock()
   let host = ''
   try { host = loadConfig().host } catch {}
   console.log(`Stopped agentlink and removed its service and Claude Code registrations.

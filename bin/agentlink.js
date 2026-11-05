@@ -1,5 +1,8 @@
-#!/usr/bin/env -S node --no-warnings
+#!/usr/bin/env node
 import { loadConfig, VERSION } from '../src/config.js'
+
+// (not --no-warnings on the line above: env -S isn't everywhere.) node:sqlite warns when it's loaded
+process.removeAllListeners('warning')
 
 const [cmd, ...rest] = process.argv.slice(2)
 // Only these are flags; anything else (a message that happens to start with "--") is an argument,
@@ -12,8 +15,8 @@ const flags = {}
 const pos = []
 for (let i = 0; i < rest.length; i++) {
   const a = rest[i]
-  if (a === '--') { pos.push(...rest.slice(i + 1)); break }
   if (cmd === 'send' && pos.length) { pos.push(a); continue }    // past the address it's the message, whatever it looks like
+  if (a === '--') { pos.push(...rest.slice(i + 1)); break }
   const eq = a.indexOf('=')
   const k = a.startsWith('--') ? a.slice(2, eq < 0 ? undefined : eq) : ''
   if (VALUE_FLAGS.includes(k)) {

@@ -9,11 +9,10 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import { authedRequest, authedRaw, PinError, PROTO } from './tls.js'
-import { ensureHomeDir, errMsg, rosterPath, VERSION } from './config.js'
+import { cmpVersion, ensureHomeDir, errMsg, rosterPath, sleep, VERSION } from './config.js'
 import { Roster } from './roster.js'
 import { selfCmd } from './claude.js'
 
-const sleep = (/** @type {number} */ ms) => new Promise(r => setTimeout(r, ms))
 const MAX_LOCAL_REPLY = 64 << 20   // the most an inbox read can come to: 100 messages of 64 KB, escaped
 
 /**
@@ -22,12 +21,6 @@ const MAX_LOCAL_REPLY = 64 << 20   // the most an inbox read can come to: 100 me
  */
 export class StaleError extends Error {}
 
-/** Compare dotted versions numerically. @param {string} a @param {string} b */
-function cmpVersion(a, b) {
-  const x = String(a).split(/[.-]/).map(Number), y = String(b).split(/[.-]/).map(Number)
-  for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0)
-  return 0
-}
 /** Is the node behind `h` a different version from this process, and is it newer? @param {import('./types.js').Health} h */
 export function versionOf(h) {
   const proto = h.proto ?? 0     // nodes from before the protocol number count as older
@@ -101,10 +94,7 @@ export class Local {
       const r = await authedRequest(this.opts({ path: '/health', timeout: 1000 }))
       return r.status === 200 ? JSON.parse(r.text) : { foreign: true }
     } catch (e) {
-      const code = /** @type {any} */ (e)?.code
-      if (code === 'ECONNREFUSED' || code === 'ECONNRESET') return null
-      if (e instanceof PinError || code === 'EPROTO') return { foreign: true }
-      return null
+      return e instanceof PinError || /** @type {any} */ (e)?.code === 'EPROTO' ? { foreign: true } : null
     }
   }
 
@@ -146,7 +136,6 @@ export class Local {
     throw new Error(`could not start agentlink node${spawnErr ? ` (${spawnErr})` : ''} (see ${path.join(this.cfg.dir, 'node.log')})`)
   }
 
-  /** Long-lived SSE stream of messages for session `name`; `token` lets a reconnect reclaim the same name. Resolves when the stream ends. */
   /**
    * Wait for news for the session owned by one of `pids`. null: there's no such session (yet).
    * @param {number[]} pids @returns {Promise<{ event: string, name?: string, count?: number } | null>}
@@ -154,16 +143,13 @@ export class Local {
   async wakeWait(pids) {
     const { res } = await authedRaw(this.opts({ timeout: 0, path: `/local/wake?pids=${pids.join(',')}` }))
     if (res.statusCode !== 200) { res.destroy(); return null }
-    let buf = ''
-    for await (const chunk of res) {
-      buf += chunk
-      const m = buf.match(/event: (\w+)\ndata: (.*)\n\n/)
-      if (m) { res.destroy(); return { event: m[1], ...JSON.parse(m[2]) } }
-    }
+    for await (const { event, data } of sseEvents(res)) { res.destroy(); return { event, ...data } }
     return { event: 'closed' }
   }
 
   /**
+   * Long-lived stream of messages for session `name`; `token` lets a reconnect reclaim the same name.
+   * Resolves when the stream ends.
    * @param {string} name
    * @param {string} token
    * @param {(event: string, data: any) => Promise<void> | void} onEvent
@@ -179,21 +165,26 @@ export class Local {
       })))
     } catch (e) { throw /** @type {any} */ (e)?.name === 'AbortError' ? e : this.wrap(e) }
     if (res.statusCode !== 200) { res.destroy(); throw new Error(`stream HTTP ${res.statusCode}`) }
-    const dec = new TextDecoder()
-    let buf = ''
-    for await (const chunk of res) {
-      buf += dec.decode(chunk, { stream: true })
-      let i
-      while ((i = buf.indexOf('\n\n')) >= 0) {
-        const raw = buf.slice(0, i)
-        buf = buf.slice(i + 2)
-        let event = 'message', data = ''
-        for (const line of raw.split('\n')) {
-          if (line.startsWith('event: ')) event = line.slice(7)
-          else if (line.startsWith('data: ')) data += line.slice(6)
-        }
-        if (data) await onEvent(event, JSON.parse(data))
+    for await (const { event, data } of sseEvents(res)) await onEvent(event, data)
+  }
+}
+
+/** The events of a server-sent stream, as they arrive. @param {import('node:http').IncomingMessage} res */
+async function* sseEvents(res) {
+  const dec = new TextDecoder()
+  let buf = ''
+  for await (const chunk of res) {
+    buf += dec.decode(chunk, { stream: true })
+    let i
+    while ((i = buf.indexOf('\n\n')) >= 0) {
+      const raw = buf.slice(0, i)
+      buf = buf.slice(i + 2)
+      let event = 'message', data = ''
+      for (const line of raw.split('\n')) {
+        if (line.startsWith('event: ')) event = line.slice(7)
+        else if (line.startsWith('data: ')) data += line.slice(6)
       }
+      if (data) yield { event, data: JSON.parse(data) }
     }
   }
 }

@@ -1,7 +1,7 @@
 import crypto from 'node:crypto'
 
 /** Constant-time string comparison; false unless both are strings. @param {unknown} a @param {unknown} b */
-export function safeEq(a, b) {
+function safeEq(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false
   const x = Buffer.from(a), y = Buffer.from(b)
   return x.length === y.length && crypto.timingSafeEqual(x, y)
@@ -38,7 +38,10 @@ const recPayload = r => JSON.stringify(['agentlink-roster-1', r.type, r.host ?? 
  * this is, and a copy with a different signature is the same record.
  * @param {Omit<import('./types.js').RosterRecord, 'sig'>} r
  */
-export const recId = r => sha256(recPayload(r)).slice(0, 22)
+export const recId = r => { let id = ids.get(r); if (!id) ids.set(r, id = sha256(recPayload(r)).slice(0, 22)); return id }
+// records aren't changed once made, and replaying a roster asks for each one's id several times
+/** @type {WeakMap<object, string>} */
+const ids = new WeakMap()
 /**
  * What a check of a record is remembered under: its whole content and signature. Never the signature
  * alone, or a signature that was good for one record would pass for any other record carrying it.

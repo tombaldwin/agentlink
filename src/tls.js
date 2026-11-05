@@ -17,7 +17,7 @@ import { fingerprint } from './cert.js'
 import { gateTags, proveAuth, checkAuth } from './crypto.js'
 
 /** Split "host:port" / "[v6]:port". @param {string} addr */
-export function splitAddr(addr) {
+function splitAddr(addr) {
   const m = addr.match(/^\[([0-9a-f:.]+)\]:(\d+)$/i) || addr.match(/^([^:]+):(\d+)$/)
   if (!m) throw new Error(`invalid address ${addr}`)
   return { host: m[1], port: Number(m[2]) }
@@ -29,7 +29,6 @@ export class ProtoError extends Error {
   /** @param {number} theirs */
   constructor(theirs) {
     super(`it runs ${theirs > PROTO ? 'a newer' : 'an older'} version of agentlink (protocol ${theirs}; this machine: ${PROTO}). Upgrade the older machine: re-run the installer, or \`npm install -g @tombaldwin/agentlink\` and \`agentlink setup\``)
-    this.theirs = theirs
   }
 }
 
@@ -75,12 +74,13 @@ async function readAll(res, max) {
  *   addr: string, method?: 'GET' | 'POST', path: string, body?: string, headers?: Record<string, string>,
  *   identity: import('./types.js').Identity,
  *   accept: Map<string, crypto.KeyObject>, dks: string[], timeout?: number, signal?: AbortSignal,
- *   anyProto?: boolean,
+ *   anyProto?: boolean, deadline?: number,
  * }} AuthOpts
  * accept: the machines we are willing to be talking to (fingerprint -> public key)
  * dks: the network's discovery keys (oldest first), which open the gate
  * anyProto: talk to a node with a different protocol version (the local node after an upgrade, to
  *   stop it); otherwise that fails with ProtoError
+ * deadline: ms the whole exchange may take (authedRequest), when the caller can't wait for the usual limit
  */
 
 /**
@@ -160,7 +160,7 @@ export async function authedRaw(o) {
 export async function authedRequest(o, max = MAX_BODY) {
   // the whole exchange has an end, however slowly the other side trickles it out
   const whole = new AbortController()
-  const limit = setTimeout(() => whole.abort(), 3 * (o.timeout || 4000) + max / MIN_RATE)
+  const limit = setTimeout(() => whole.abort(), o.deadline ?? 3 * (o.timeout || 4000) + max / MIN_RATE)
   try {
     const { res, peerFp } = await authedRaw({ ...o, signal: o.signal ? AbortSignal.any([o.signal, whole.signal]) : whole.signal })
     const text = await readAll(res, max)
@@ -190,6 +190,7 @@ export async function pinnedRequest(o, max = MAX_BODY) {
       timeout: o.timeout ?? 4000,                // covers connecting too (see authedRaw)
       ca: o.trust.map(t => t.pem),               // only these certificates can validate
       minVersion: 'TLSv1.2',
+      rejectUnauthorized: true,                  // said outright: left out, NODE_TLS_REJECT_UNAUTHORIZED=0 turns the pin off
       checkServerIdentity: (_h, c) => {
         if (allowed.has(fingerprint(new crypto.X509Certificate(c.raw)))) return undefined
         pinFailed = true

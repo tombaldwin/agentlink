@@ -7,6 +7,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { homeDir, loadConfig } from './config.js'
 import { Local } from './local.js'
+import { isPrintFlag } from './claude.js'
 
 const RETRY_MS = 5000
 const SLOW_RETRY_MS = 30_000
@@ -41,32 +42,44 @@ function findClaude(pids) {
 /**
  * The options at the front of a claude command line as ps prints it. ps loses the quoting, so whatever
  * follows the first plain word may be a prompt: "mkdir -p src" has a -p in it, and that's not an option.
+ * Nor is a word that looks like a channel unless a channel option comes before it.
  * @param {string} cmdline
  */
 export function launchFlags(cmdline) {
   const words = cmdline.trim().split(/\s+/).slice(1)
   if (/[\\/]claude-code[\\/]/.test(words[0] || '')) words.shift()    // node .../claude-code/cli.js
   const out = []
-  for (let i = 0; i < words.length; i++) {
-    if (!words[i].startsWith('-') && !words[i].startsWith('server:')) break
-    out.push(words[i])
-    if (TAKES_VALUE.test(words[i])) i++
+  const plain = (/** @type {number} */ i) => i < words.length && !words[i].startsWith('-')
+  for (let i = 0; i < words.length && words[i].startsWith('-'); i++) {
+    const w = words[i]
+    out.push(w)
+    if (CHANNELS.test(w)) while (plain(i + 1)) out.push(words[++i])
+    else if (TAKES_VALUES.test(w)) while (plain(i + 1)) i++
+    else if (TAKES_VALUE.test(w) && plain(i + 1)) i++
   }
   return out
 }
-// the options people put before others, whose value would otherwise look like the start of a prompt
-const TAKES_VALUE = /^(--model|--fallback-model|--agent|--permission-mode|--settings|--mcp-config|--session-id|--add-dir)$/
+// Claude Code's options that take a value (`claude --help`), which would otherwise look like the
+// start of a prompt, and hide what follows
+const TAKES_VALUE = /^(--agent|--agents|--append-system-prompt|--autocompact|--cloud|-d|--debug|--debug-file|--effort|--environment|--fallback-model|--from-pr|--input-format|--json-schema|--max-budget-usd|--model|-n|--name|--output-format|--permission-mode|--permission-prompts|--plugin-dir|--plugin-url|--prompt-suggestions|--remote-control|--remote-control-session-name-prefix|-r|--resume|--session-id|--setting-sources|--settings|--system-prompt|--system-prompt-snapshot|--teleport|-w|--worktree)$/
+const TAKES_VALUES = /^(--add-dir|--allowedTools|--allowed-tools|--betas|--disallowedTools|--disallowed-tools|--file|--mcp-config|--tools)$/
+const CHANNELS = /^--(channels|dangerously-load-development-channels)$/
 
 /**
  * Is this an interactive session? Only those can be woken, and a script must never wait on this
  * hook: a `claude -p` run doesn't finish until its hooks do. Claude Code says which it is in
- * CLAUDE_CODE_ENTRYPOINT (sdk-cli for -p, however the options are ordered); the flags are a second check.
+ * CLAUDE_CODE_ENTRYPOINT (sdk-cli for -p, however the options are ordered); the flags are a second
+ * check. It also tells its hooks whether someone is attending the session, which covers one with no
+ * terminal (an IDE's); a Claude Code that doesn't say is judged by its terminal.
  * @param {string} args an ancestor's command line @param {string} tty its terminal, as ps prints it
  * @param {NodeJS.ProcessEnv} [env]
  */
 export function interactive(args, tty, env = process.env) {
   if (/^sdk/.test(env.CLAUDE_CODE_ENTRYPOINT || '')) return false
-  if (launchFlags(args).some(f => /^(-p|--print|--input-format|--output-format)(=|$)/.test(f))) return false
+  const flags = launchFlags(args)
+  if (flags.some(isPrintFlag)) return false
+  if (env.CLAUDE_CODE_SESSION_ATTENDED) return env.CLAUDE_CODE_SESSION_ATTENDED === '1'
+  if (flags.some(f => /^--(input|output)-format(=|$)/.test(f))) return false
   return !!tty && !/^[?-]+$/.test(tty.trim())
 }
 
@@ -80,10 +93,15 @@ export async function runWake() {
     if (fs.existsSync(path.join(homeDir(), 'disabled'))) return 0
     local = new Local(loadConfig())
   } catch { return 0 }                      // not set up: stay out of the session's way
-  const pids = ancestors()
+  const testing = !!process.env.AGENTLINK_WAKE_ANY       // (the end-to-end tests have no Claude and no terminal)
+  // Claude Code tells its hooks who it is: going by ps is for one that doesn't (and can't see a
+  // renamed claude, or work where ps has no -p)
+  const told = testing ? 0 : Number(process.env.CLAUDE_PID) || 0
+  const pids = told ? [told] : ancestors()
+  /** @type {{ pid: number, tty: string, args: string } | null} */
   let claude = null
   try { claude = findClaude(pids) } catch {}
-  const testing = !!process.env.AGENTLINK_WAKE_ANY       // (the end-to-end tests have no Claude and no terminal)
+  if (told) claude ||= { pid: told, tty: '', args: '' }
   if (!testing && !(claude && interactive(claude.args, claude.tty))) return 0
   // the Claude that started us, and only it: an enclosing session must not be mistaken for ours
   const mine = claude && !testing ? [claude.pid] : pids

@@ -26,13 +26,13 @@ export function openStore(file) {
       replicated INTEGER NOT NULL DEFAULT 0, last_error TEXT, updated_at INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS ix_due ON messages(state, next_attempt);
     CREATE INDEX IF NOT EXISTS ix_inbox ON messages(role, to_name, state);
+    CREATE INDEX IF NOT EXISTS ix_expiry ON messages(state, expires_at);
     CREATE TABLE IF NOT EXISTS peers(
       host TEXT PRIMARY KEY, addr TEXT, last_seen INTEGER NOT NULL, configured INTEGER NOT NULL DEFAULT 0,
-      alias_of TEXT, verified INTEGER NOT NULL DEFAULT 0);
+      alias_of TEXT);
     CREATE TABLE IF NOT EXISTS invites(
       hash TEXT PRIMARY KEY, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER);
   `)
   try { db.exec(`ALTER TABLE peers ADD COLUMN alias_of TEXT`) } catch {}  // older databases
-  try { db.exec(`ALTER TABLE peers ADD COLUMN verified INTEGER NOT NULL DEFAULT 0`) } catch {}
   return db
 }

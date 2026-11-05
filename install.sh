@@ -13,12 +13,19 @@ PKG="${AGENTLINK_PKG:-@tombaldwin/agentlink}"
 AGENTLINK_ORIG_PATH="$PATH"; export AGENTLINK_ORIG_PATH
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+trap 'exit 1' HUP INT TERM          # dash doesn't run the EXIT trap for these by itself
+
+# Rosetta's shells call an Apple silicon Mac x86_64
+PLATFORM="$(uname -s)-$(uname -m)"
+if [ "$PLATFORM" = Darwin-x86_64 ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = 1 ]; then
+  PLATFORM=Darwin-arm64
+fi
 
 # what agentlink needs: found out before anything is changed
 MIN_CLAUDE=2.1.318                 # WAKE_MIN_CLAUDE in src/claude.js
 check_prereqs() {
   [ -n "${AGENTLINK_SKIP_CHECKS:-}" ] && return 0
-  if [ "$(uname -s)-$(uname -m)" = Darwin-x86_64 ]; then
+  if [ "$PLATFORM" = Darwin-x86_64 ]; then
     echo "agentlink: Intel Macs aren't supported yet (macOS may stop it reaching your other machines)." >&2
     echo "To install it anyway: AGENTLINK_SKIP_CHECKS=1" >&2
     exit 1
@@ -45,7 +52,7 @@ check_prereqs() {
 check_prereqs
 
 # agentlink's home holds this machine's private key, messages and logs: private to this user from the start
-AL="$HOME/.agentlink"
+AL="${AGENTLINK_HOME:-$HOME/.agentlink}"
 mkdir -p "$AL"
 chmod 700 "$AL"
 
@@ -69,37 +76,67 @@ fetch_invite() {
 # agentlink.app (Apple silicon): as a signed app, macOS asks for Local Network access by name and
 # the permission covers agentlink only. From the inviting machine when it runs the app, else from
 # the latest GitHub release. Returns 1 if no app is available (the npm install is used instead).
+# This function runs as an if condition, where set -e is off, so each step says what happens if it fails.
+APP_EXE="$APPS/agentlink.app/Contents/MacOS/agentlink"
+no_app() {
+  echo "agentlink: could not download agentlink.app ($1)."
+  if [ -x "$APP_EXE" ]; then
+    echo "Keeping the one already in $APPS."
+    return 0
+  fi
+  echo "Installing with npm instead: macOS may stop that reaching your other machines. Run this again later for the app."
+  return 1
+}
+link_app() {
+  mkdir -p "$AL/bin"
+  ln -sf "$APP_EXE" "$AL/bin/agentlink"
+}
 install_app() {
-  [ "$(uname -s)-$(uname -m)" = Darwin-arm64 ] && [ "${AGENTLINK_APP:-1}" != 0 ] || return 1
+  [ "$PLATFORM" = Darwin-arm64 ] && [ "${AGENTLINK_APP:-1}" != 0 ] || return 1
   if [ -n "${AGENTLINK_APP_ZIP:-}" ]; then
     # a local build: asked for by name, so failing to read it is an error, not a reason to use npm
     cp "$AGENTLINK_APP_ZIP" "$TMP/app.zip" ||
       { echo "agentlink: cannot read $AGENTLINK_APP_ZIP (on macOS, the terminal may not be allowed into that folder: move the file elsewhere, e.g. your home folder) — aborting"; exit 1; }
   elif [ -n "${AGENTLINK_APP_URL:-}" ]; then
     echo "Fetching agentlink.app from the inviting machine..."
-    fetch_invite "$AGENTLINK_APP_URL" "$TMP/app.zip" || return 1
+    if ! fetch_invite "$AGENTLINK_APP_URL" "$TMP/app.zip"; then
+      no_app "the inviting machine didn't send it" && link_app && return 0
+      return 1
+    fi
   else
-    curl -fsSL "$RELEASES/agentlink-macos-arm64.zip" -o "$TMP/app.zip" 2>/dev/null || return 1
-    curl -fsSL "$RELEASES/agentlink-macos-arm64.zip.sha256" -o "$TMP/app.sha256" 2>/dev/null || return 1
+    if ! curl -fsSL "$RELEASES/agentlink-macos-arm64.zip" -o "$TMP/app.zip" ||
+       ! curl -fsSL "$RELEASES/agentlink-macos-arm64.zip.sha256" -o "$TMP/app.sha256"; then
+      no_app "from the latest release" && link_app && return 0
+      return 1
+    fi
     [ "$(awk '{print $1}' "$TMP/app.sha256")" = "$(shasum -a 256 "$TMP/app.zip" | awk '{print $1}')" ] ||
       { echo "agentlink: the app download failed its checksum — aborting"; exit 1; }
   fi
-  mkdir -p "$TMP/app" && ditto -x -k "$TMP/app.zip" "$TMP/app" || return 1
-  A="$TMP/app/agentlink.app"
   # a damaged or foreign app is an error, not a reason to fall back
+  mkdir -p "$TMP/app"
+  ditto -x -k "$TMP/app.zip" "$TMP/app" || { echo "agentlink: the app archive is damaged — aborting"; exit 1; }
+  A="$TMP/app/agentlink.app"
   # the requirement checks the certificate Apple issued: the team a signature merely states can be anything
   codesign --verify --strict -R="anchor apple generic and certificate leaf[subject.OU] = \"$TEAM\"" "$A" 2>/dev/null ||
     { echo "agentlink: the app isn't validly signed by agentlink's team ($TEAM) — aborting"; exit 1; }
   mkdir -p "$APPS"
-  # copied beside the old app first: a copy that fails leaves the old one in place. (This function
-  # runs as an if condition, where set -e is off, so each step says what happens if it fails.)
+  # beside the old app first, then swapped by renaming: whatever fails, a whole app is left in place.
+  # (mv into a directory that's still there would put it inside, so nothing here may be left over.)
   NEW="$APPS/.agentlink.app.new"
-  rm -rf "$NEW"
+  OLD="$APPS/.agentlink.app.old"
+  rm -rf "$NEW" "$OLD"
+  if [ -e "$NEW" ] || [ -e "$OLD" ]; then echo "agentlink: could not clear $NEW and $OLD — aborting"; exit 1; fi
   ditto "$A" "$NEW" || { echo "agentlink: could not copy the app to $APPS — aborting"; exit 1; }
-  rm -rf "$APPS/agentlink.app"
-  mv "$NEW" "$APPS/agentlink.app" || { echo "agentlink: could not put the app in $APPS — aborting"; exit 1; }
-  mkdir -p "$AL/bin"
-  ln -sf "$APPS/agentlink.app/Contents/MacOS/agentlink" "$AL/bin/agentlink"
+  if [ -e "$APPS/agentlink.app" ]; then
+    mv "$APPS/agentlink.app" "$OLD" || { echo "agentlink: could not replace the app in $APPS — aborting"; exit 1; }
+  fi
+  if ! mv "$NEW" "$APPS/agentlink.app"; then
+    [ ! -e "$OLD" ] || mv "$OLD" "$APPS/agentlink.app"
+    echo "agentlink: could not put the app in $APPS — aborting"
+    exit 1
+  fi
+  rm -rf "$OLD" || true
+  link_app
   echo "Installed agentlink.app in $APPS"
 }
 
@@ -111,20 +148,26 @@ fi
 node_ok() {
   [ "${AGENTLINK_PRIVATE_NODE:-}" != 1 ] &&
   command -v node >/dev/null 2>&1 &&
-  node -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||(a===22&&b>=13)?0:1)' 2>/dev/null
+  node -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>23||(a===23&&b>=4)||(a===22&&b>=13)?0:1)' 2>/dev/null
 }
 
 PRIV="$AL/node"
 USE_PRIV=0
-if ! node_ok && [ -x "$PRIV/bin/node" ] && "$PRIV/bin/node" -e 0 2>/dev/null; then
+if node_ok; then
+  :
+elif [ -x "$PRIV/bin/node" ] && "$PRIV/bin/node" -e 0 2>/dev/null; then
   export PATH="$PRIV/bin:$PATH"; USE_PRIV=1
-fi
-if [ "$USE_PRIV" = 0 ] && ! node_ok; then
-  case "$(uname -s)-$(uname -m)" in
+else
+  case "$PLATFORM" in
     Darwin-arm64) P=darwin-arm64 ;; Darwin-x86_64) P=darwin-x64 ;;
     Linux-x86_64) P=linux-x64 ;; Linux-aarch64|Linux-arm64) P=linux-arm64 ;;
     *) echo "agentlink: no prebuilt Node.js for $(uname -sm); install Node 22.13+ and run this again."; exit 1 ;;
   esac
+  # nodejs.org's Linux builds need glibc
+  if [ "$(uname -s)" = Linux ] && ls /lib/ld-musl-* >/dev/null 2>&1; then
+    echo "agentlink: no prebuilt Node.js for this Linux (it uses musl): install Node 22.13+ with your package manager (on Alpine: apk add nodejs npm) and run this again."
+    exit 1
+  fi
   echo "Installing a private Node.js runtime in $PRIV (your system Node, if any, is untouched)..."
   DIST=https://nodejs.org/dist/latest-v24.x
   curl -fsSL "$DIST/SHASUMS256.txt" -o "$TMP/SUMS"

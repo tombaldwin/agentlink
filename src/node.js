@@ -20,10 +20,11 @@ import { fingerprint, shortFp, newIdentity, selfSignedCert } from './cert.js'
 import { Roster } from './roster.js'
 import { authedRequest, exporterOf, PinError, ProtoError, PROTO, MAX_BODY as MAX_REQ, MIN_RATE } from './tls.js'
 import { SEA, PKG_ROOT, readAsset, appBundle } from './self.js'
-import { parseAddr, normHost, sanitizeName, validAddr, tailscaleName, localIPv4s, errMsg, netHint, ensureHomeDir, rosterPath, MAX_TTL_MS, VERSION } from './config.js'
+import { parseAddr, parsePeer, normHost, machineName, sanitizeName, shQuote, validAddr, tailscaleName, localIPv4s, errMsg, netHint, ensureHomeDir, rosterPath, MAX_TTL_MS, VERSION } from './config.js'
 
 const MAX_JOIN_REQ = 16 << 10          // a join request (before any identity check) is small
 const MAX_JOIN_CHAIN = 4               // add records an unknown client may submit (it, whoever added it, ...)
+const MAX_REPLY = 1 << 20              // a reply to anything but a hello: only a hello carries a roster
 const MAX_BATCH = 256 << 10            // bytes of envelopes per request (well under MAX_REQ)
 const MAX_MSG = 64 * 1024
 const BACKOFF_MAX = 60_000
@@ -33,6 +34,11 @@ const PEER_FORGET_MS = 30 * 86400_000
 const IN_FLIGHT_MS = 30_000            // a send being delivered directly is hidden from the flush loop
 const PROBE_RETRY_MS = 10 * 60_000     // don't re-probe an address that just failed verification
 const HELLO_CONCURRENCY = 2            // offline .local names tie up a DNS (libuv) thread each for seconds
+const FLUSH_HOSTS = 8                  // machines being delivered to at once
+const PUMP_WINDOW = 256                // messages a session may hold unacknowledged: the rest wait here
+const PUMP_BUFFER = 1 << 20            // bytes waiting for a session to read before we stop writing
+const PEERS_WAIT_MS = 5000             // `peers` answers by then: a machine that slow counts as offline
+const CLOCK_SLACK_MS = 86400_000       // how far ahead of us a sender's clock can put a message's expiry
 const INVITE_TTL_MS = 24 * 3600_000
 const SEND_WAIT_MS = 10_000            // a send answers by then: it's stored, and clients stop waiting at 15 s
 const MAX_LOG = 10 << 20               // node.log is cut back to its last MB past this
@@ -43,10 +49,13 @@ const LOG_ERRORS_PER_MIN = 10          // failed requests logged: anyone can cau
 /** @typedef {import('./types.js').MessageRow} MessageRow */
 /** @typedef {import('./types.js').PeerRow} PeerRow */
 /** @typedef {http.ServerResponse} Res */
+/** What the forwarding loop needs of a row: the text is read only when it's being sent. */
+/** @typedef {Pick<MessageRow, 'id' | 'to_host' | 'role' | 'attempts' | 'replicated'>} DueRow */
 
 const execFileP = promisify(execFile)
 const now = () => Date.now()
 const backoff = (/** @type {number} */ n) => Math.min(BACKOFF_MAX, 2000 * 2 ** Math.min(n, 5))
+const ignore = () => {}
 
 /**
  * @param {Config} cfg
@@ -54,7 +63,8 @@ const backoff = (/** @type {number} */ n) => Math.min(BACKOFF_MAX, 2000 * 2 ** M
  */
 export async function runNode(cfg, log = (...a) => { try { console.error(new Date().toISOString(), ...a) } catch {} }) {
   ensureHomeDir(cfg.dir)
-  process.stderr.on('error', () => {})   // a full disk mustn't take the node down with its log
+  // a full disk mustn't take the node down with its log. (Once: a standby service gets here on every retry)
+  if (!process.stderr.listeners('error').includes(ignore)) process.stderr.on('error', ignore)
   const me = cfg.identity
   // Bind the port before touching the shared database: a node that loses the race for the port
   // (a standby service, a second session-started node) must not reset retry state or leak handles.
@@ -89,7 +99,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     cfg.host = rosterName
   }
   if (!roster.members.has(me.fp)) log(roster.removed.has(me.fp) ? 'this machine has been removed from the network' : 'this machine is not (yet) a member of its network')
-  /** @type {Map<string, { res: Res, sent: Set<string>, token: string, live: boolean, owner: number, notified: Set<string>, waiter: Res | null }>} name -> session stream (live: woken by channel pushes) */
+  /** @type {Map<string, { res: Res, sent: Set<string>, token: string, live: boolean, owner: number, notified: Set<string>, waiter: Res | null, more: boolean, draining: boolean }>} name -> session stream (live: woken by channel pushes; sent: offered, not yet acknowledged) */
   const sessions = new Map()
 
   const q = {
@@ -97,18 +107,26 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
       (id,from_addr,to_addr,to_host,to_name,body,sent_at,expires_at,sig,role,state,next_attempt,updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`),
     get: db.prepare(`SELECT * FROM messages WHERE id=?`),
-    due: db.prepare(`SELECT * FROM messages WHERE state='pending' AND next_attempt<=? AND expires_at>? ORDER BY sent_at LIMIT 2000`),
-    forwarded: db.prepare(`UPDATE messages SET state='forwarded', updated_at=? WHERE id=? AND state='pending'`),
+    // what's due for these names, the oldest first; for one name; and the names nothing has identified,
+    // those tried least first, so a crowd of made-up names can't keep a real one waiting
+    due: db.prepare(`SELECT id,to_host,role,attempts,replicated FROM messages WHERE state='pending' AND next_attempt<=? AND expires_at>? AND to_host IN (SELECT value FROM json_each(?)) ORDER BY sent_at LIMIT 2000`),
+    dueFor: db.prepare(`SELECT id,to_host,role,attempts,replicated FROM messages WHERE state='pending' AND next_attempt<=? AND expires_at>? AND to_host=? ORDER BY sent_at LIMIT 2000`),
+    dueNames: db.prepare(`SELECT to_host FROM messages WHERE state='pending' AND next_attempt<=? AND expires_at>? AND to_host NOT IN (SELECT value FROM json_each(?)) GROUP BY to_host ORDER BY MIN(attempts) LIMIT ?`),
+    // handed over: the text has no more use here, and shouldn't sit on a holder until the message expires
+    forwarded: db.prepare(`UPDATE messages SET state='forwarded', body='', updated_at=? WHERE id=? AND state='pending'`),
     failed: db.prepare(`UPDATE messages SET state='failed', last_error=?, updated_at=? WHERE id=?`),
     retry: db.prepare(`UPDATE messages SET attempts=attempts+1, next_attempt=?, last_error=?, updated_at=? WHERE id=? AND state='pending'`),
     replicated: db.prepare(`UPDATE messages SET replicated=1 WHERE id=?`),
     wake: db.prepare(`UPDATE messages SET next_attempt=0 WHERE state='pending' AND to_host=?`),
     toInbox: db.prepare(`UPDATE messages SET role='inbox', state='queued', to_host=?, updated_at=? WHERE to_host=? AND state='pending' RETURNING to_name`),
-    inboxQueued: db.prepare(`SELECT id FROM messages WHERE role='inbox' AND to_name=? AND state='queued' AND expires_at>? ORDER BY sent_at`),
+    inboxQueued: db.prepare(`SELECT id FROM messages WHERE role='inbox' AND to_name=? AND state='queued' AND expires_at>? ORDER BY sent_at LIMIT ?`),
+    // the machine's own copy of something it was holding as a copy for a name it didn't know was its own
+    claim: db.prepare(`UPDATE messages SET role='inbox', state='queued', to_host=?, to_name=?, updated_at=? WHERE id=? AND role='held' AND state='pending'`),
     delivered: db.prepare(`UPDATE messages SET state='delivered', updated_at=? WHERE id=? AND role='inbox'`),
     // pushed into a channel session: Claude Code gives no receipt, so this means "shown", not "read"
     pushed: db.prepare(`UPDATE messages SET state='pushed', updated_at=? WHERE id=? AND role='inbox' AND state='queued'`),
-    history: db.prepare(`SELECT * FROM messages WHERE role='inbox' AND to_name=? ORDER BY sent_at DESC LIMIT ?`),
+    // newest to arrive: sent_at is whatever the sender says
+    history: db.prepare(`SELECT * FROM messages WHERE role='inbox' AND to_name=? ORDER BY rowid DESC LIMIT ?`),
     expire: db.prepare(`UPDATE messages SET state='expired', updated_at=? WHERE state IN ('pending','queued') AND expires_at<=?`),
     gc: db.prepare(`DELETE FROM messages WHERE expires_at < ?`),
     counts: db.prepare(`SELECT role, state, count(*) n FROM messages GROUP BY role, state`),
@@ -192,8 +210,8 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
   const peerRow = (/** @type {string} */ host) => /** @type {PeerRow | undefined} */ (q.peer.get(host))
   const allPeers = () => /** @type {PeerRow[]} */ (/** @type {unknown} */ (q.peers.all()))
   const msgRow = (/** @type {string} */ id) => /** @type {MessageRow | undefined} */ (q.get.get(id))
-  /** @type {(...a: import('node:sqlite').SQLInputValue[]) => MessageRow[]} */
-  const dueRows = (...a) => /** @type {MessageRow[]} */ (/** @type {unknown} */ (q.due.all(...a)))
+  /** @type {(rows: unknown) => DueRow[]} */
+  const dueRows = rows => /** @type {DueRow[]} */ (rows)
   /** One commit for many row updates. @param {() => void} fn */
   function tx(fn) {
     db.exec('BEGIN IMMEDIATE')
@@ -263,10 +281,10 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
    * @param {'GET'|'POST'} method
    * @param {string} p
    * @param {object} [obj]
-   * @param {{ timeout?: number, addr?: string, retried?: boolean }} [opts]
+   * @param {{ timeout?: number, addr?: string, retried?: boolean, deadline?: number }} [opts]
    * @returns {Promise<any>}
    */
-  async function call(host, method, p, obj, { timeout = 4000, addr, retried = false } = {}) {
+  async function call(host, method, p, obj, { timeout = 4000, addr, retried = false, deadline } = {}) {
     const m = member(host)
     if (!m) throw new Error(notMember(host))
     const body = obj === undefined ? '' : JSON.stringify(obj)
@@ -275,7 +293,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     if (!validAddr(target)) throw new Error(`invalid address for ${host}: ${target}`)
     let r
     try {
-      r = await authedRequest({ addr: target, method, path: p, body, headers: { 'x-agentlink-port': String(cfg.port) }, identity: me, accept: new Map([[m.fp, m.publicKey]]), dks: roster.dks, timeout }, MAX_REQ)
+      r = await authedRequest({ addr: target, method, path: p, body, headers: { 'x-agentlink-port': String(cfg.port) }, identity: me, accept: new Map([[m.fp, m.publicKey]]), dks: roster.dks, timeout, deadline }, p === '/v1/hello' ? MAX_REQ : MAX_REPLY)
     } catch (e) {
       // reason: why the machine can't be reached, without its name (peers shows it next to the name)
       const reason = e instanceof PinError ? `${target} is answered by a different machine (not ${host}'s key)`
@@ -288,12 +306,13 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     // a member that hasn't heard we joined yet: tell it (hello carries the records that add us), then retry
     if (r.status === 403 && p !== '/v1/hello' && !retried) {
       await call(host, 'POST', '/v1/hello', helloBody(), { timeout: 2500, addr })
-      return call(host, method, p, obj, { timeout, addr, retried: true })
+      return call(host, method, p, obj, { timeout, addr, retried: true, deadline })
     }
     /** @type {any} */
     let data = {}
     try { data = r.text ? JSON.parse(r.text) : {} } catch { throw new Error(`${host}: bad reply`) }
-    if (r.status < 200 || r.status >= 300) throw new Error(`${host} HTTP ${r.status}: ${data.error || r.text.slice(0, 200)}`)
+    // only the status: what another machine writes here would reach sessions and terminals as our own words
+    if (r.status < 200 || r.status >= 300) throw new Error(`${host} answered HTTP ${r.status}`)
     q.upsertPeer.run(host, null, now(), 0)
     if (data.records) mergeRoster(data.records)
     return data
@@ -338,14 +357,14 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     return m.host
   }
 
+  const probing = new Set()
+  /** @type {Map<string, number>} "host addr" -> when verification last failed */
+  const probeFailed = new Map()
   /**
    * Start routing member `host` to `addr`, but only once the machine there proves it holds its key.
    * @param {string} host @param {string} addr @param {{ refresh?: boolean }} [opts] refresh: a fresh sighting (beacon, request)
    */
-  const probing = new Set()
-  /** @type {Map<string, number>} "host addr" -> when verification last failed */
-  const probeFailed = new Map()
-  async function probe(/** @type {string} */ host, /** @type {string} */ addr, { refresh = true } = {}) {
+  async function probe(host, addr, { refresh = true } = {}) {
     if (!validAddr(addr) || isSelf(host) || !member(host)) return
     const key = `${host} ${addr}`
     try {   // nothing awaits this, so a failed write here (a full disk) must stop here too
@@ -362,15 +381,14 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
         const data = await call(host, 'POST', '/v1/hello', helloBody(), { addr, timeout: 2500 })
         if (!cfg.routes[host]) q.upsertPeer.run(host, addr, now(), 0)
         learnPeers(data.peers)
-        if (cur?.addr !== addr) log(`${host} is at ${addr}`)
+        log(`${host} is at ${addr}`)
         if (q.wake.run(host).changes) kick()
       } catch { probeFailed.set(key, now()) } finally { probing.delete(key) }
       if (probeFailed.size > 1000) probeFailed.clear()
     } catch (e) { log('probe error', errMsg(e)) }
   }
 
-  /** Track a member that sent us a request from `remoteIp` (its listening port in the header). */
-  /** @param {string} host @param {string | undefined} remoteIp @param {unknown} portHdr */
+  /** Track a member that sent us a request from `remoteIp` (its listening port in the header). @param {string} host @param {string | undefined} remoteIp @param {unknown} portHdr */
   function notePeer(host, remoteIp, portHdr) {
     q.upsertPeer.run(host, null, now(), 0)
     const ip = String(remoteIp || '').replace(/^::ffff:/, '')
@@ -468,7 +486,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
       e.body.isWellFormed() && !e.body.includes('\0') &&
       // safe, bounded integers: anything else can't be stored and read back reliably
       Number.isSafeInteger(e.sent_at) && Number.isSafeInteger(e.expires_at) && e.sent_at >= 0 &&
-      e.expires_at - now() <= MAX_TTL_MS && e.sent_at - now() <= MAX_TTL_MS &&
+      e.expires_at - now() <= MAX_TTL_MS + CLOCK_SLACK_MS && e.sent_at - now() <= MAX_TTL_MS &&
       Buffer.byteLength(e.body) <= MAX_MSG)) return 'bad'
     // addresses exactly as a node writes them: only the host is proved below, so whatever else `from`
     // held (a line break, a NUL) could otherwise pass for another sender when it's shown to a session
@@ -486,12 +504,15 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
   }
   /**
    * Store a row unless one with that id exists. An existing id is only fine for the same message:
-   * a different message reusing an id someone has seen is refused, not reported as delivered.
+   * a different message reusing an id someone has seen is refused, not reported as delivered. (The
+   * same message, not the same signature: a copy can carry another encoding of it, and the envelope
+   * has been verified by now. Nothing keeps the text of what it has passed on.)
    * @param {Envelope} e @param {string} toHost @param {string} toName @param {'inbox' | 'held'} role @param {'queued' | 'pending'} state
    */
   function store(e, toHost, toName, role, state) {
     if (q.insert.run(e.id, e.from, e.to, toHost, toName, e.body, e.sent_at, e.expires_at, e.sig, role, state, 0, now()).changes) return true
-    return msgRow(e.id)?.sig === e.sig
+    const r = msgRow(e.id)
+    return !!r && r.from_addr === e.from && r.to_addr === e.to && r.sent_at === e.sent_at && r.expires_at === e.expires_at && (r.body === e.body || r.state === 'forwarded')
   }
 
   /**
@@ -499,8 +520,6 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
    * 'unknown-sender' (not stored: the sender should tell us its membership records, then retry) |
    * null (rejected: the envelope itself is bad, and the sender must not retry it). Storage errors (disk full,
    * database busy) throw, so callers can report a temporary failure and the sender retries.
-   */
-  /**
    * @param {unknown} e
    * @param {Set<string>} [toPump] collect local recipients here instead of pumping each one now
    * @param {string} [mine] the machine delivering this says its name for the recipient's machine (a
@@ -525,6 +544,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     if (env.expires_at <= now()) return 'expired'
     if (isSelf(to.host) || (mine && mine === parseAddr(env.from, '').host && !member(to.host) && !removedHost(to.host))) {
       if (!store(env, cfg.host, to.name, 'inbox', 'queued')) return null
+      q.claim.run(cfg.host, to.name, now(), env.id)
       const s = sessions.get(to.name)
       const live = s?.live || s?.waiter               // before pumping: a wait ends once it has woken the session
       if (toPump) toPump.add(to.name)
@@ -536,17 +556,28 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     return 'held'
   }
 
-  /** Offer `name`'s queued messages to its live session, if it has one. @param {string} name */
+  /**
+   * Offer `name`'s queued messages to its live session, if it has one. A few at a time: the session's
+   * acknowledgements bring the next ones, so a big queue is never in memory here or in the session.
+   * @param {string} name
+   */
   function pump(name) {
     const s = sessions.get(name)
     if (!s) return
-    for (const { id } of q.inboxQueued.all(name, now())) {     // ids first: most may have been offered already
+    let more = false
+    for (const { id } of q.inboxQueued.all(name, now(), 2 * PUMP_WINDOW)) {     // ids first: most may have been offered already
       if (s.sent.has(String(id))) continue
+      if (s.sent.size >= PUMP_WINDOW || s.res.writableLength > PUMP_BUFFER) { more = true; break }
       const r = msgRow(String(id))
       if (!r) continue
       s.sent.add(r.id)
       sse(s.res, 'message', { id: r.id, from: r.from_addr, to: r.to_addr, body: r.body, sent_at: r.sent_at })
     }
+    if (s.res.writableLength > PUMP_BUFFER && !s.draining) {
+      s.draining = true
+      s.res.once('drain', () => { s.draining = false; pump(name) })
+    }
+    if (more !== s.more) { s.more = more; sse(s.res, 'queue', { more }) }
     nudge(name)
   }
 
@@ -562,29 +593,31 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     s.waiter = null
   }
 
-  /** Split rows into request-sized batches. */
-  /** @param {MessageRow[]} rows */
-  function batches(rows) {
-    /** @type {MessageRow[][]} */
-    const out = []
+  /**
+   * Rows still to hand over, in request-sized batches, read as they're needed: a machine that doesn't
+   * answer costs one batch, however much is waiting for it.
+   * @param {DueRow[]} rows @returns {Generator<MessageRow[]>}
+   */
+  function* batches(rows) {
     /** @type {MessageRow[]} */
     let cur = []
     let size = 0
-    for (const r of rows) {
+    for (const { id } of rows) {
+      const r = msgRow(id)
+      if (r?.state !== 'pending') continue
       const n = Buffer.byteLength(JSON.stringify(envOf(r))) + 1
-      if (cur.length && size + n > MAX_BATCH) { out.push(cur); cur = []; size = 0 }
+      if (cur.length && size + n > MAX_BATCH) { yield cur; cur = []; size = 0 }
       cur.push(r)
       size += n
     }
-    if (cur.length) out.push(cur)
-    return out
+    if (cur.length) yield cur
   }
 
-  /** Hand rows to member `host`'s node. Returns null on success, else the error. */
   /**
+   * Hand rows to member `host`'s node. Returns null on success, else the error.
    * @param {string} host
-   * @param {MessageRow[]} rows
-   * @returns {Promise<null | { err: unknown, rest: MessageRow[] }>}
+   * @param {DueRow[]} rows
+   * @returns {Promise<null | { err: unknown, rest: DueRow[] }>}
    */
   async function handOver(host, rows) {
     for (const batch of batches(rows)) {
@@ -604,7 +637,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
         })
         if (tell) setImmediate(() => hello(host))
       } catch (err) {
-        const rest = rows.slice(rows.indexOf(batch[0]))
+        const rest = rows.slice(rows.findIndex(r => r.id === batch[0].id))
         tx(() => { for (const r of rest) q.retry.run(now() + backoff(r.attempts), errMsg(err), now(), r.id) })
         return { err, rest }
       }
@@ -629,41 +662,54 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
   // ---------- forwarding loop ----------
   /** @type {Set<string>} sends being handed over directly: not for the flush loop too */
   const inFlight = new Set()
-  /** @type {Promise<void> | null} */
-  let flushing = null
-  let again = false
-  function flush() {
-    if (flushing) { again = true; return flushing }
-    flushing = (async () => {
-      try {
-        do { again = false; await flushOnce() } while (again)
-      } catch (e) { log('flush error', e) } finally { flushing = null }
-    })()
-    return flushing
-  }
+  /** @type {Set<string>} names being delivered to now: a machine that's slow to answer holds up only itself */
+  const busy = new Set()
+  let delivering = 0, lookingUp = 0
   const kick = () => setImmediate(flush)
 
-  async function flushOnce() {
-    const t = now()
-    q.expire.run(t, t)
-    const byHost = new Map()
-    for (const r of dueRows(t, t)) {
-      if (inFlight.has(r.id)) continue
-      if (!byHost.has(r.to_host)) byHost.set(r.to_host, [])
-      byHost.get(r.to_host).push(r)
-    }
-    await Promise.all([...byHost].map(async ([host, rows]) => {
-      const dest = await routeFor(host)
-      if (dest === 'self') { if (isSelf(host)) adoptSelfAlias(host); return }
-      if (!dest) {
-        const why = notMember(host)
-        tx(() => { for (const r of rows) q.retry.run(now() + backoff(r.attempts), why, now(), r.id) })
-        return
+  function flush() {
+    try {
+      const t = now()
+      q.expire.run(t, t)
+      // every name we can put a machine to
+      const known = [cfg.host, ...selfAliases, ...knownPeers(), ...allPeers().filter(p => member(p.alias_of || '')).map(p => p.host)]
+      /** @type {Map<string, DueRow[]>} */
+      const byHost = new Map()
+      for (const r of dueRows(q.due.all(t, t, JSON.stringify(known.filter(h => !busy.has(h)))))) {
+        if (inFlight.has(r.id)) continue
+        if (!byHost.has(r.to_host)) byHost.set(r.to_host, [])
+        byHost.get(r.to_host)?.push(r)
       }
-      const failure = await handOver(dest, rows)
-      // in the background: trying several (possibly offline) holders must not stall deliveries
-      if (failure) replicate(dest, failure.rest.filter(r => r.role === 'outbox' && !r.replicated))
-    }))
+      for (const [host, rows] of byHost) {
+        if (delivering >= FLUSH_HOSTS) break
+        delivering++
+        busy.add(host)
+        deliver(host, rows).catch(e => log('flush error', errMsg(e))).finally(() => { busy.delete(host); delivering-- })
+      }
+      // A name nothing has identified yet costs a hello and a name lookup, and any member can queue
+      // thousands of them: a few at a time, off to the side of what's going to machines we know
+      if (lookingUp >= HELLO_CONCURRENCY) return
+      for (const row of q.dueNames.all(t, t, JSON.stringify([...known, ...busy]), HELLO_CONCURRENCY - lookingUp)) {
+        const host = String(row.to_host)
+        lookingUp++
+        busy.add(host)
+        deliver(host, dueRows(q.dueFor.all(t, t, host)).filter(r => !inFlight.has(r.id))).catch(e => log('flush error', errMsg(e))).finally(() => { busy.delete(host); lookingUp-- })
+      }
+    } catch (e) { log('flush error', errMsg(e)) }
+  }
+
+  /** @param {string} host @param {DueRow[]} rows */
+  async function deliver(host, rows) {
+    const dest = await routeFor(host)
+    if (dest === 'self') { if (isSelf(host)) adoptSelfAlias(host); return }
+    if (!dest) {
+      const why = notMember(host)
+      tx(() => { for (const r of rows) q.retry.run(now() + backoff(r.attempts), why, now(), r.id) })
+      return
+    }
+    const failure = await handOver(dest, rows)
+    // in the background: trying several (possibly offline) holders must not stall deliveries
+    if (failure) replicate(dest, failure.rest.filter(r => r.role === 'outbox' && !r.replicated))
   }
 
   /** Other recently seen members that could hold copies for `host` while it is offline. @param {string} host */
@@ -674,16 +720,15 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
       .sort((a, b) => b.last_seen - a.last_seen)
   }
 
-  /** Hand copies to other reachable members so they can deliver when `host` comes back. */
   /** @type {Set<string>} hosts with a replication in progress */
   const replicating = new Set()
-  /** @param {string} host @param {MessageRow[]} rows */
+  /** Hand copies to other reachable members so they can deliver when `host` comes back. @param {string} host @param {DueRow[]} rows */
   async function replicate(host, rows) {
     if (!rows.length || replicating.has(host)) return
     replicating.add(host)
     try { await replicateInner(host, rows) } catch (e) { log('replicate error', errMsg(e)) } finally { replicating.delete(host) }
   }
-  /** @param {string} host @param {MessageRow[]} rows */
+  /** @param {string} host @param {DueRow[]} rows */
   async function replicateInner(host, rows) {
     /** @type {Map<string, number>} message -> how many holders stored it */
     const copies = new Map()
@@ -825,8 +870,8 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
   async function localPeers() {
     const remote = await Promise.all(knownPeers().map(async h => {
       try {
-        const r = await call(h, 'GET', '/v1/sessions', undefined, { timeout: 1500 })
-        return { host: h, online: true, sessions: Array.isArray(r.sessions) ? r.sessions.map(String) : [] }
+        const r = await call(h, 'GET', '/v1/sessions', undefined, { timeout: 1500, deadline: PEERS_WAIT_MS })
+        return { host: h, online: true, sessions: sessionNames(r.sessions) }
       } catch (e) { return { host: h, online: false, sessions: [], error: /** @type {any} */ (e).reason || errMsg(e) } }
     }))
     return { self: cfg.host, local: [...sessions.keys()], remote }
@@ -855,6 +900,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     if (typeof d.token !== 'string' || !inviteValid(d.token)) throw httpErr(403, 'this invite is not valid (already used, expired or revoked): run `agentlink invite` on a member for a new one')
     let pem, host
     try { pem = new crypto.X509Certificate(Buffer.from(String(d.cert), 'base64')).toString(); host = normHost(d.host) } catch { throw httpErr(400, 'bad join request') }
+    if (!machineName(host)) throw httpErr(400, `"${host}" can't identify a machine: join under a name, by ending the invite line with \`| sh -s -- --host <name>\``)
     const fp = fingerprint(pem)
     const cur = roster.members.get(fp)
     if (cur && cur.host !== host) throw httpErr(409, `this machine is already a member as ${cur.host}. To rename it, run \`agentlink remove ${cur.host}\` on a machine that joined before it, then run a new invite line with \`| sh -s -- --host ${host}\` at the end`)
@@ -879,11 +925,13 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
    * @param {unknown} records @param {string} fp
    */
   function joinChain(records, fp) {
-    const adds = Array.isArray(records) ? records.filter(r => r?.type === 'add').slice(0, MAX_JOIN_CHAIN * 50) : []
+    /** @type {Map<unknown, any>} */
+    const adds = new Map()
+    for (const r of Array.isArray(records) ? records : []) if (r?.type === 'add' && !adds.has(r.fp)) adds.set(r.fp, r)
     const out = []
     for (let want = fp; out.length < MAX_JOIN_CHAIN && !roster.members.has(want);) {
       if (roster.removed.has(want) || roster.dropped.has(want)) return []   // a chain through a removed machine counts for nothing
-      const r = adds.find(x => x.fp === want)
+      const r = adds.get(want)
       if (!r || typeof r.by !== 'string' || r.by === want) break
       out.push(r)
       want = r.by
@@ -995,17 +1043,19 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
         /** @type {Set<string>} */
         const toPump = new Set()    // offer each local recipient its new messages once, not per envelope
         const mine = new Set(Array.isArray(d.mine) ? d.mine.slice(0, 2000) : [])
-        for (const e of Array.isArray(d.messages) ? d.messages.slice(0, 2000) : []) {
-          let st
-          try { st = accept(e, toPump, mine.has(e?.id) ? peer.host : undefined) } catch (err) {
-            for (const n of toPump) pump(n)
-            // temporary storage failure: 503 makes the sender back off and retry the whole batch
-            // (already-stored ids are deduplicated), instead of marking messages permanently failed
-            log('could not store delivered messages:', errMsg(err))
-            throw httpErr(503, 'temporarily unable to store messages; retry later')
-          }
-          if (st === 'unknown-sender') unknown.push(e.id)
-          else if (st) results[e.id] = st
+        try {
+          tx(() => {
+            for (const e of Array.isArray(d.messages) ? d.messages.slice(0, 2000) : []) {
+              const st = accept(e, toPump, mine.has(e?.id) ? peer.host : undefined)
+              if (st === 'unknown-sender') unknown.push(e.id)
+              else if (st) results[e.id] = st
+            }
+          })
+        } catch (err) {
+          // temporary storage failure: 503 makes the sender back off and retry the whole batch,
+          // instead of marking messages permanently failed
+          log('could not store delivered messages:', errMsg(err))
+          throw httpErr(503, 'temporarily unable to store messages; retry later')
         }
         for (const n of toPump) pump(n)
         return reply(res, 200, { results, unknown })
@@ -1040,7 +1090,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
         const s = {
           res, sent: new Set(), token, live: u.searchParams.get('mode') !== 'poll', owner: Number(u.searchParams.get('owner')) || 0,
           // told about already, so a session that doesn't read a message isn't woken for it again and again
-          notified: reconnecting?.notified ?? new Set(), waiter: /** @type {Res | null} */ (null),
+          notified: reconnecting?.notified ?? new Set(), waiter: /** @type {Res | null} */ (null), more: false, draining: false,
         }
         sessions.set(name, s)
         sse(res, 'hello', { name, address: `${name}@${cfg.host}`, host: cfg.host })
@@ -1069,11 +1119,16 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
         const s = sessions.get(d.name)
         const mark = d.state === 'pushed' ? q.pushed : q.delivered
         // a message the session has now is done with: nothing need remember it for the session's life
-        for (const id of Array.isArray(d.ids) ? d.ids : []) { mark.run(now(), String(id)); s?.sent.delete(String(id)); s?.notified.delete(String(id)) }
+        tx(() => { for (const id of Array.isArray(d.ids) ? d.ids : []) { mark.run(now(), String(id)); s?.sent.delete(String(id)); s?.notified.delete(String(id)) } })
+        if (s) pump(d.name)
         return reply(res, 200, { ok: true })
       }
-      case 'GET /local/whoami':
-        return reply(res, 200, { host: cfg.host, net: cfg.net, fp: me.fp, pid: process.pid })
+      case 'POST /local/told': {               // a session has read these; or not (a cancelled read), and it should hear of them again
+        const s = sessions.get(d.name)
+        for (const id of Array.isArray(d.ids) ? d.ids : []) { if (d.told) s?.notified.add(String(id)); else s?.notified.delete(String(id)) }
+        if (s) nudge(d.name)
+        return reply(res, 200, { ok: true })
+      }
       case 'POST /local/nack': {               // the session couldn't take these: offer them again
         const s = sessions.get(d.name)
         for (const id of Array.isArray(d.ids) ? d.ids : []) s?.sent.delete(String(id))
@@ -1119,7 +1174,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
           const earlier = [...roster.members.values()].filter(x => x.rank < m.rank).map(x => x.host)
           throw httpErr(403, `${m.host} joined the network before this machine, so only an earlier machine can remove it: ${earlier.join(', ')}`)
         }
-        roster.remove(me, m.fp)
+        try { roster.remove(me, m.fp) } catch (e) { throw httpErr(507, `could not remove ${m.host}: ${errMsg(e)}`) }
         roster.save()
         log(`removed ${m.host} (key ${shortFp(m.fp)}) from the network`)
         discovery?.announce()
@@ -1136,7 +1191,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
   log(`agentlink node ${VERSION} up: ${cfg.host}:${cfg.port} (network ${shortFp(cfg.net)}, key ${shortFp(me.fp)}, pid ${process.pid})`)
 
   // ---------- discovery ----------
-  const discovery = cfg.discovery ? startDiscovery(cfg, () => roster.dks, ({ host, fp, addr }) => {
+  const discovery = cfg.discovery ? startDiscovery(cfg, () => roster.gateDks(), ({ host, fp, addr }) => {
     const m = roster.members.get(fp)
     if (m && m.host === host && m.fp !== me.fp) probe(m.host, addr)   // beacons are only hints: the handshake verifies
   }, log) : null
@@ -1168,6 +1223,13 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
   return { server, shutdown }
 }
 
+/**
+ * What another machine says its sessions are called, keeping only names as a node makes them: these
+ * go straight to a session, so nothing else may ride along.
+ * @param {unknown} list
+ */
+export const sessionNames = list => Array.isArray(list) ? list.filter(s => typeof s === 'string' && sanitizeName(s) === s).slice(0, 200) : []
+
 /** @type {Promise<string> | null} */
 let packingApp = null
 /** Zip the app this node runs from, for a Mac joining through us. @param {string} dir @param {string} bundle */
@@ -1184,8 +1246,7 @@ function packApp(dir, bundle) {
 
 /** @type {Promise<string> | null} */
 let packing = null
-/** npm-pack this installation so another machine can install it from us. */
-/** @param {string} dir @returns {Promise<string>} path of the tarball */
+/** npm-pack this installation so another machine can install it from us. @param {string} dir @returns {Promise<string>} path of the tarball */
 function packTarball(dir) {
   return packing ||= (async () => {
     const out = path.join(dir, 'dist', 'pkg')       // its own folder: the app's zip may be in use
@@ -1207,14 +1268,15 @@ function packTarball(dir) {
 /**
  * install.sh preset to join this network through us: where to fetch the package, the key to pin
  * (the invite key), the invite token, and the network (so a member re-joining keeps its key).
- * @param {string | undefined} hostHeader @param {Config} cfg @param {string} token @param {string} pin
+ * @param {string | undefined} hostHeader @param {Pick<Config, 'host' | 'port' | 'net'>} cfg @param {string} token @param {string} pin
  */
-function installScript(hostHeader, cfg, token, pin) {
-  const sh = (/** @type {unknown} */ v) => `'${String(v).replace(/'/g, `'\\''`)}'`
+export function installScript(hostHeader, cfg, token, pin) {
+  const sh = shQuote
   // the name the joining machine used to reach us is, by definition, one that works for it
   const hh = String(hostHeader || '')
-  let used = /^[a-z0-9.-]+(:\d{1,5})?$/i.test(hh) ? hh : `${cfg.host}:${cfg.port}`
-  if (!/:\d+$/.test(used)) used += `:${cfg.port}`
+  const used = validAddr(hh) ? hh : validAddr(`${hh}:${cfg.port}`) ? `${hh}:${cfg.port}` : `${cfg.host}:${cfg.port}`
+  // our own name too, unless that's the same machine name: its address would replace the one that worked
+  const peer = parsePeer(used)?.host === cfg.host ? '' : ` --peer ${sh(`${cfg.host}:${cfg.port}`)}`
   const preset = [
     `AGENTLINK_PKG=${sh(`https://${used}/join/pkg.tgz?t=${token}`)}`,
     // a Mac joining a machine that runs the app gets the same app (Apple silicon only)
@@ -1223,7 +1285,7 @@ function installScript(hostHeader, cfg, token, pin) {
     // the token is passed in the environment: setup's command line is visible to other users (ps)
     `AGENTLINK_TOKEN=${sh(token)}; export AGENTLINK_TOKEN`,
     // what the user added (`| sh -s -- --host <name>`) comes after: it's theirs, and it stays
-    `set -- --join ${sh(used)} --pin ${sh(pin)} --net ${sh(cfg.net)}${used !== `${cfg.host}:${cfg.port}` ? ` --peer ${sh(`${cfg.host}:${cfg.port}`)}` : ''} "$@"`,
+    `set -- --join ${sh(used)} --pin ${sh(pin)} --net ${sh(cfg.net)}${peer} "$@"`,
   ].join('\n')
   return readAsset('install.sh').toString('utf8').replace('#@@PRESET@@', () => preset)   // no $-patterns
 }

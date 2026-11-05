@@ -113,7 +113,7 @@ members. Any member can invite machines, and a machine can remove the ones that 
   worthless.
 - **Machines can't impersonate each other.** Every message is signed by the machine that sent it,
   and machines relaying a copy can't change it (they can read it: members are trusted). `agentlink remove <host>` takes a machine off the
-  network for good; members that were offline learn about it when they come back.
+  network; members that were offline learn about it when they come back.
 - **Members are trusted.** Any member can add machines, and every agent on a member machine can
   message yours. Only add machines you control.
 - **Prompt injection.** Messages come from other AI agents. agentlink tells Claude to treat them
@@ -130,7 +130,8 @@ See [SECURITY.md](SECURITY.md) for details and known limitations.
   may wait for you. Setup allows only the `inbox` and `peers` tools to run unattended.
 - Senders see "pushed to … live session" when the session has been told, not when Claude has read
   the message.
-- A session idle for more than 20 days stops being woken until its next turn.
+- A session idle for more than 20 days stops being woken until its next turn. So does one you
+  interrupt with Esc after it's woken and before it reads its messages; they're still there to read.
 - A VPN that blocks local traffic makes your machines show as offline. Allow local network access
   in its settings, or use Tailscale. Messages wait until the machines can reach each other.
 - Over SSH on a Mac, Claude Code can't reach its login while the keychain is locked: run
@@ -140,8 +141,8 @@ See [SECURITY.md](SECURITY.md) for details and known limitations.
 - A machine's name is fixed when it joins. To rename it, run `agentlink remove <old name>` on a
   machine that joined before it, then run a new invite line with `| sh -s -- --host <new name>` in
   place of `| sh`. Messages already queued for its old name wait until they expire.
-- A removed machine comes back with a new invite: it gets a new key, and anything it still had
-  queued is dropped. Joining another network drops queued messages too.
+- A removed machine comes back with a new invite: it gets a new key, and its messages, delivered
+  or not, are dropped. Joining another network drops them too.
 - Apple silicon Macs and Linux. Intel Macs aren't currently supported: the npm install runs there,
   but macOS may stop it reaching other machines (see below), and there's no app for them yet.
 - On Linux, `.local` names need mDNS (`avahi-daemon` and `libnss-mdns`); without it, use the IP

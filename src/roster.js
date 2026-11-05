@@ -20,16 +20,20 @@ import fs from 'node:fs'
 import crypto from 'node:crypto'
 import { signRecord, verifyRecord, newDiscoveryKey, recId, recKey } from './crypto.js'
 import { fingerprint, certDer } from './cert.js'
-import { normHost, writeAtomic } from './config.js'
+import { normHost, machineName, writeAtomic } from './config.js'
 
 // New records stop being taken in at this size, so that a roster always fits in one hello (8 MB):
 // if it didn't, this node's removals would never reach anyone. The limit doesn't apply to loading our
 // own file, so nothing already held is lost, or to a removal that must get in (see mustTake), so a
-// full roster can always be cleaned up. Those are at most MAX_TAKEN each, and there is at most one per
-// machine. A machine's add takes at least about 500 bytes, so that's some 2000 machines at the very
-// most: 1 MB + 2000 * 3 KB = 7 MB, whatever a member signs.
+// full roster can always be cleaned up. There is at most one of those per machine, of at most
+// MAX_TAKEN, plus a list entry for each machine its target added, plus what it clears. A machine's add
+// takes at least about 500 bytes, so that's some 2000 machines at the very most, each with one adder,
+// and what's cleared is at most what was held: 1 MB + 2000 * 2 KB + 2000 * 25 B + 1 MB is about
+// 6 MB, whatever a member signs.
 const MAX_ROSTER_BYTES = 1 << 20
-const MAX_TAKEN = 3 << 10              // room for a removal listing about 100 machines
+const MAX_TAKEN = 2 << 10              // a removal listing no one, with room for some 70 adds not held here
+const SEEN_ENTRY = 25                  // what listing one record in `seen` takes
+const MAX_FORGED = 20_000              // bad signatures remembered, so a resent one costs nothing
 const MAX_FUTURE_MS = 3600_000     // a record stamped further ahead than this is refused (bad clock)
 const MAX_SEEN = 4000                  // more than a full roster's adds, so no machine can make itself impossible to remove
 const MAX_DROPPED = 50                 // adds that didn't count, kept per removed machine (so their keys stay known as dropped)
@@ -70,6 +74,8 @@ export class Roster {
     this.ids = new Set()
     /** @type {Set<string>} records whose signature checked out (see recKey) */
     this.verified = new Set()
+    /** @type {Set<string>} records whose signature didn't: that can't change, so they aren't checked twice */
+    this.forged = new Set()
     /** @type {Map<string, Member>} fp -> member */
     this.members = new Map()
     /** @type {Map<string, Member>} host -> member */
@@ -118,13 +124,32 @@ export class Roster {
   /**
    * Must this removal get in even when the roster is full? It takes a current member off the network,
    * by a machine that joined before it, so refusing it would leave the machine on here and off
-   * elsewhere, and a flooder could keep itself on. The size limit is fixed: anything worked out from
-   * what this node holds could be steered by whoever decides what it holds.
+   * elsewhere, and a flooder could keep itself on. It may be as big as a removal has any reason to be:
+   * a list entry for each machine its target really added, and otherwise no bigger than what it clears
+   * (the target's adds it doesn't list stop counting). So a list padded with made-up ids gets nothing
+   * for them, and a member can't stop its own removal by filling one node with adds no one else has.
    * @param {RosterRecord} r @param {number} size its size in bytes
+   * @param {() => Map<string, { id: string, size: number, made: boolean }[]>} adds what each machine has added
    */
-  mustTake(r, size) {
+  mustTake(r, size, adds) {
     const s = this.ranked.get(r.by), t = this.ranked.get(r.fp)
-    return r.type === 'remove' && size <= MAX_TAKEN && !!s && !!t && s.rank < t.rank && this.members.has(r.fp)
+    if (r.type !== 'remove' || !s || !t || s.rank >= t.rank || !this.members.has(r.fp)) return false
+    const listed = new Set(r.seen ?? [])
+    let room = MAX_TAKEN
+    for (const a of adds().get(r.fp) ?? []) room += !listed.has(a.id) ? a.size : a.made ? SEEN_ENTRY : 0
+    return size <= room
+  }
+
+  /** The adds held, by who signed them. */
+  addsBySigner() {
+    /** @type {Map<string, { id: string, size: number, made: boolean }[]>} */
+    const out = new Map()
+    for (const r of this.records) {
+      if (r.type !== 'add') continue
+      if (!out.has(r.by)) out.set(r.by, [])
+      out.get(r.by)?.push({ id: recId(r), size: Buffer.byteLength(JSON.stringify(r)), made: this.ranked.get(r.fp)?.by === r.by })
+    }
+    return out
   }
 
   /**
@@ -137,14 +162,16 @@ export class Roster {
     let bytes = trustClock ? 0 : Buffer.byteLength(JSON.stringify(this.records))
     /** @type {Set<string>} machines taken off past the limit in this batch: once is enough */
     const over = new Set()
+    /** @type {ReturnType<Roster['addsBySigner']> | undefined} */
+    let adds
     for (const r of Array.isArray(list) ? list : []) {
-      if (!wellFormed(r) || this.ids.has(recId(r))) continue
+      if (!wellFormed(r) || this.ids.has(recId(r)) || this.forged.has(recKey(r))) continue
       if (!trustClock && r.at > Date.now() + MAX_FUTURE_MS) continue
       const o = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (r))
       const clean = /** @type {RosterRecord} */ (/** @type {unknown} */ (Object.fromEntries(['type', 'host', 'fp', 'cert', 'at', 'by', 'dk', 'seen', 'sig'].filter(k => o[k] !== undefined).map(k => [k, o[k]]))))
       const size = Buffer.byteLength(JSON.stringify(clean))
       if (!trustClock && bytes + size > MAX_ROSTER_BYTES) {
-        if (over.has(clean.fp) || !this.mustTake(clean, size)) continue
+        if (over.has(clean.fp) || !this.mustTake(clean, size, () => adds ??= this.addsBySigner())) continue
         over.add(clean.fp)
       }
       bytes += size
@@ -185,7 +212,11 @@ export class Roster {
     const ok = (pub, r) => {
       const k = recKey(r)
       if (this.verified.has(k)) return true
-      if (!verifyRecord(pub, r)) return false
+      if (!verifyRecord(pub, r)) {
+        if (this.forged.size >= MAX_FORGED) this.forged.clear()
+        this.forged.add(k)
+        return false
+      }
       this.verified.add(k)
       return true
     }
@@ -198,7 +229,7 @@ export class Roster {
         try {
           const x509 = new crypto.X509Certificate(Buffer.from(String(r.cert), 'base64'))
           const host = normHost(String(r.host))
-          if (host === r.host && fingerprint(x509) === r.fp) c = { host, pem: x509.toString(), publicKey: x509.publicKey }
+          if (host === r.host && machineName(host) && fingerprint(x509) === r.fp) c = { host, pem: x509.toString(), publicKey: x509.publicKey }
         } catch {}
         this.parsed.set(k, c)
       }
@@ -293,16 +324,12 @@ export class Roster {
     const once = (/** @type {RosterRecord} */ r) => { const id = recId(r); if (copies.has(id)) return false; copies.add(id); return true }
     const kept = this.records.filter(r => {
       const s = ranked.get(r.by)
-      if (!s) {                                                                 // (the founder's genesis)
-        const c = r.type === 'add' && r.by === r.fp && r.fp === this.net ? parse(r) : null
-        return !!c && ok(c.publicKey, r) && once(r)
-      }
-      if (!ok(s.publicKey, r) || !once(r)) return false
+      if (!s || !ok(s.publicKey, r) || !once(r)) return false
       if (r.type === 'add') {
         if (!parse(r)) return false                                             // can never count
         if (members.has(r.by)) return true
         if (ranked.get(r.fp)?.by === r.by && counts(r.by, r)) return true
-        if (!dropped.has(r.fp) || ranked.has(r.fp)) return false
+        if (!dropped.has(r.fp)) return false
         const n = (droppedKept.get(r.by) || 0) + 1
         droppedKept.set(r.by, n)
         return n <= MAX_DROPPED
@@ -326,13 +353,15 @@ export class Roster {
       const signer = members.get(r.by)
       if (!r.dk || !signer) continue                               // never a key made by a removed machine
       const target = ranked.get(r.fp)
-      // the founder's first key, and the keys in removals that stand: no other record brings one in
+      // the founder's first key, and the keys in removals that stand: no other record brings one in.
+      // (This is the only check of which removals may bring in a key, whatever the checks above imply.)
       if (r.type === 'add' ? r.by === r.fp && r.fp === this.net : !!target && status(r.fp).removed && signer.rank < target.rank) {
         dks.push(r.dk)
         dkAt.push(r.at)
       }
     }
     this.parsed = new Map(kept.filter(r => r.type === 'add').map(r => [recKey(r), this.parsed.get(recKey(r)) ?? null]))
+    if (this.verified.size > MAX_FORGED) this.verified = new Set(kept.map(recKey).filter(k => this.verified.has(k)))
     Object.assign(this, { members, byHost, ranked, removed, dropped, dks, dkAt, records: kept, ids: new Set(kept.map(recId)) })
   }
 
@@ -366,13 +395,13 @@ export class Roster {
     /** @type {Map<string, string>} */
     const made = new Map()
     for (const x of this.records) {
-      if (x.by === fp && x.type === 'add' && !made.has(x.fp) && (this.members.get(x.fp)?.by === fp || this.removed.has(x.fp))) made.set(x.fp, recId(x))
+      if (x.by === fp && x.type === 'add' && !made.has(x.fp) && this.ranked.get(x.fp)?.by === fp) made.set(x.fp, recId(x))
     }
     /** @type {Omit<RosterRecord, 'sig'>} */
     const r = { type: 'remove', fp, at: this.nextAt(), by: me.fp, dk: newDiscoveryKey(), seen: [...made.values()] }
     const rec = { ...r, sig: signRecord(me.key, r) }
     this.merge([rec])
-    if (!this.ids.has(recId(rec)) || this.members.has(fp)) throw new Error('the removal could not be recorded')
+    if (!this.ids.has(recId(rec)) || this.members.has(fp)) throw new Error('its removal could not be recorded')
     return rec
   }
 

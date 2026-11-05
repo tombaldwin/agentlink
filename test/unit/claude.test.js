@@ -194,3 +194,160 @@ test('the account a shell is using is enabled even if nothing else names it', ()
   process.env.CLAUDE_CONFIG_DIR = dir
   try { assert.ok(c.claudeAccounts().some(a => a.dir === dir)) } finally { delete process.env.CLAUDE_CONFIG_DIR }
 })
+
+test('a block that lost its END takes none of the user\'s lines with it', () => {
+  const rc = path.join(HOME, '.zshrc')
+  const saved = fs.readFileSync(rc, 'utf8')
+  c.writeShellBlock({ pathDir: '/opt/agentlink/bin' })
+  fs.writeFileSync(rc, fs.readFileSync(rc, 'utf8').replace('# <<< agentlink <<<\n', '') + 'export MINE=1\n')
+  c.writeShellBlock({ pathDir: '/opt/agentlink/bin' })
+  c.writeShellBlock({ pathDir: '/opt/agentlink/bin' })
+  const text = fs.readFileSync(rc, 'utf8')
+  assert.match(text, /export MINE=1/)
+  assert.equal(text.match(/>>> agentlink >>>/g).length, 1, 'and the stray marker goes')
+  c.removeShellBlock()
+  assert.match(fs.readFileSync(rc, 'utf8'), /export MINE=1/)
+  fs.writeFileSync(rc, saved)
+})
+
+test('shell files: bytes are kept, nothing is made for nothing, and one we can\'t read is left alone', () => {
+  const rc = path.join(HOME, '.zshrc')
+  const saved = fs.readFileSync(rc)
+  fs.rmSync(path.join(HOME, '.agentlink', 'bin-dir'), { force: true })
+  const latin = Buffer.concat([Buffer.from('export X=caf'), Buffer.from([0xe9]), Buffer.from('\n')])
+  fs.writeFileSync(rc, latin)
+  c.writeShellBlock({})
+  assert.deepEqual(fs.readFileSync(rc), latin, 'nothing to add: not touched')
+  c.writeShellBlock({ pathDir: '/opt/caf\u00e9/bin' })
+  const bytes = fs.readFileSync(rc)
+  assert.ok(bytes.includes(Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a])), 'their byte is as it was')
+  assert.ok(bytes.includes(Buffer.from('/opt/caf\u00e9/bin')), 'and ours is UTF-8')
+  c.removeShellBlock()
+  fs.writeFileSync(rc, saved)
+  const shell = process.env.SHELL, gone = path.join(HOME, '.not-there')
+  process.env.SHELL = '/bin/sh'
+  const profile = path.join(HOME, '.profile')
+  fs.rmSync(profile, { force: true })
+  fs.rmSync(path.join(HOME, '.agentlink', 'bin-dir'), { force: true })
+  c.writeShellBlock({})
+  assert.ok(!fs.existsSync(profile), 'no file for an empty block')
+  c.writeShellBlock({ pathDir: '/opt/x/bin' })
+  assert.ok(fs.existsSync(profile))
+  c.removeShellBlock()
+  assert.equal(fs.readFileSync(profile, 'utf8').trim(), '', 'and it\'s left empty')
+  fs.rmSync(profile)
+  if (process.platform === 'darwin') {
+    process.env.SHELL = '/bin/bash'
+    c.writeShellBlock({ pathDir: '/opt/x/bin' })
+    c.removeShellBlock()
+    assert.ok(!fs.existsSync(path.join(HOME, '.bash_profile')), 'but an empty .bash_profile would hide .profile')
+    process.env.SHELL = '/bin/sh'
+  }
+  fs.symlinkSync(gone, profile)
+  assert.throws(() => c.writeShellBlock({ pathDir: '/opt/x/bin' }), 'a link to nothing is not an empty file')
+  fs.rmSync(profile)
+  process.env.SHELL = shell
+})
+
+test('uninstalling and setting up again puts the PATH line back', () => {
+  const rc = path.join(HOME, '.zshrc')
+  const saved = fs.readFileSync(rc, 'utf8')
+  const shell = process.env.SHELL
+  process.env.SHELL = '/bin/zsh'
+  c.writeShellBlock({ pathDir: '/opt/agentlink/bin' })
+  c.removeShellBlock()
+  assert.doesNotMatch(fs.readFileSync(rc, 'utf8'), /opt\/agentlink/)
+  c.writeShellBlock()
+  assert.match(fs.readFileSync(rc, 'utf8'), /export PATH="\/opt\/agentlink\/bin":"\$PATH"/)
+  c.removeShellBlock()
+  fs.writeFileSync(rc, saved)
+  process.env.SHELL = shell
+})
+
+test('the right shell file: what bash and zsh really read', () => {
+  const shell = process.env.SHELL, zdot = process.env.ZDOTDIR
+  process.env.SHELL = '/bin/zsh'
+  process.env.ZDOTDIR = path.join(HOME, 'zdot')
+  assert.equal(c.primaryRc(), path.join(HOME, 'zdot', '.zshrc'))
+  fs.mkdirSync(path.join(HOME, 'zdot'), { recursive: true })
+  fs.writeFileSync(path.join(HOME, 'zdot', '.zshrc'), `alias cz='CLAUDE_CONFIG_DIR=/tmp/cz claude'\n`)
+  assert.ok(c.claudeAccounts().some(a => a.alias === 'cz'), 'its aliases are read too')
+  fs.rmSync(path.join(HOME, 'zdot'), { recursive: true })
+  if (zdot === undefined) delete process.env.ZDOTDIR; else process.env.ZDOTDIR = zdot
+  if (process.platform === 'darwin') {
+    process.env.SHELL = '/bin/bash'
+    assert.equal(c.primaryRc(), path.join(HOME, '.bash_profile'), 'nothing there yet')
+    fs.writeFileSync(path.join(HOME, '.profile'), 'export FROM_PROFILE=1\n')
+    assert.equal(c.primaryRc(), path.join(HOME, '.profile'), 'a new .bash_profile would hide it')
+    fs.rmSync(path.join(HOME, '.profile'))
+  }
+  process.env.SHELL = shell
+})
+
+test('an alias with a variable we don\'t have isn\'t turned into a path under the current folder', () => {
+  const rc = path.join(HOME, '.zshrc')
+  const saved = fs.readFileSync(rc, 'utf8')
+  fs.writeFileSync(rc, saved + `alias cx='CLAUDE_CONFIG_DIR=$NOT_SET_HERE/x claude'\nalias cy='CLAUDE_CONFIG_DIR=$AL_TEST_DIR/y claude'\n`)
+  process.env.AL_TEST_DIR = '/tmp/al-test'
+  const accts = c.claudeAccounts()
+  assert.ok(!accts.some(a => a.alias === 'cx'))
+  assert.equal(accts.find(a => a.alias === 'cy')?.dir, '/tmp/al-test/y')
+  delete process.env.AL_TEST_DIR
+  fs.writeFileSync(rc, saved)
+})
+
+test('which finds commands without the which program, and node paths are ones that will last', () => {
+  assert.equal(c.which('definitely-not-a-command-here'), null)
+  const dir = fs.mkdtempSync(path.join(HOME, 'bin-')), f = path.join(dir, 'tool')
+  fs.writeFileSync(f, '#!/bin/sh\n', { mode: 0o755 })
+  const PATH0 = process.env.PATH
+  process.env.PATH = `/nowhere:${dir}`
+  assert.equal(c.which('tool'), fs.realpathSync(dir) === dir ? f : c.which('tool'))
+  assert.equal(c.which('nope'), null)
+  // fnm's name for node, on Linux: a link for one shell, gone after a reboot
+  const shellDir = path.join(HOME, 'fnm_multishells', '123_456', 'bin')
+  fs.mkdirSync(shellDir, { recursive: true })
+  fs.symlinkSync(process.execPath, path.join(shellDir, 'node'))
+  process.env.PATH = shellDir
+  assert.doesNotMatch(c.nodePath(), /fnm_multishells/)
+  process.env.PATH = PATH0
+})
+
+test('the hook is only ever agentlink\'s, and a user\'s other hooks stay as they were', () => {
+  const dir = path.join(HOME, '.claude-hooks'), file = path.join(dir, 'settings.json')
+  fs.mkdirSync(dir, { recursive: true })
+  const theirs = { hooks: { Stop: [{ matcher: 'x', hooks: [] }, { hooks: [{ type: 'command', command: '~/bin/notify-agentlink wake' }] }], PostToolUse: [{ matcher: 'Edit', hooks: [{ type: 'command', command: 'lint' }] }] } }
+  fs.writeFileSync(file, JSON.stringify(theirs))
+  c.installHook(dir)
+  const on = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(on.hooks.PostToolUse.at(-1).matcher, 'mcp__agentlink__inbox', 'reading the inbox arms it again: an interrupted turn fires nothing else')
+  assert.equal(on.hooks.Stop.length, 3)
+  c.removeHook(dir)
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).hooks, theirs.hooks)
+  assert.deepEqual(fs.readdirSync(dir), ['settings.json'], 'and no temporary file is left')
+})
+
+test('a Claude Code too old for the hook counts as registered, so `agentlink claude` doesn\'t re-register every time', () => {
+  const dir = fs.mkdtempSync(path.join(HOME, 'fake-claude-')), bin = path.join(dir, 'claude')
+  fs.writeFileSync(bin, '#!/bin/sh\necho "notice: 9.9.9 is out"\necho "2.1.300 (Claude Code)"\n', { mode: 0o755 })
+  const PATH0 = process.env.PATH
+  process.env.PATH = `${dir}:${PATH0}`
+  assert.deepEqual(c.wakeSupport(), { ok: false, version: '2.1.300' }, 'its version, not a number on another line')
+  fs.writeFileSync(path.join(HOME, '.claude.json'), JSON.stringify({ mcpServers: { agentlink: { command: c.adapterCmd()[0], args: c.adapterCmd().slice(1) } } }))
+  assert.ok(c.isRegistered(''))
+  fs.rmSync(path.join(HOME, '.claude.json'))
+  process.env.PATH = PATH0
+})
+
+test('print mode and attended sessions, as Claude Code tells its hooks', async () => {
+  const { interactive, launchFlags } = await import('../../src/wake.js')
+  assert.ok(c.isPrintFlag('-p') && c.isPrintFlag('-cp') && c.isPrintFlag('-pc') && c.isPrintFlag('--print'))
+  assert.ok(!c.isPrintFlag('--permission-mode') && !c.isPrintFlag('-c') && !c.isPrintFlag('--plugin-dir'))
+  assert.ok(interactive('', '', { CLAUDE_CODE_SESSION_ATTENDED: '1' }), 'an IDE\'s session has no terminal')
+  assert.ok(!interactive('claude', 'ttys003', { CLAUDE_CODE_SESSION_ATTENDED: '0' }))
+  assert.ok(!interactive('claude -p hi', 'ttys003', { CLAUDE_CODE_SESSION_ATTENDED: '1' }))
+  assert.ok(interactive('claude --output-format stream-json', '', { CLAUDE_CODE_SESSION_ATTENDED: '1' }), 'a host that attends its session')
+  assert.deepEqual(launchFlags('claude --resume abc --model opus fix it'), ['--resume', '--model'])
+  assert.deepEqual(launchFlags('claude --channels server:agentlink server:other -c'), ['--channels', 'server:agentlink', 'server:other', '-c'])
+  assert.deepEqual(launchFlags('claude server:agentlink is down'), [])
+})

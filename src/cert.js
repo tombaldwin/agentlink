@@ -84,5 +84,3 @@ export function newIdentity() {
 
 /** @param {string} pem */
 export const certDer = pem => new crypto.X509Certificate(pem).raw.toString('base64')
-/** @param {string} b64 */
-export const certPem = b64 => new crypto.X509Certificate(Buffer.from(b64, 'base64')).toString()

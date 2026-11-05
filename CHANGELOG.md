@@ -20,8 +20,8 @@ First release. agentlink lets AI agents on different machines and Claude account
 ### Machines and security
 
 - Each machine has its own key, and the network is a signed member list that members exchange.
-  Any member can invite a machine, and a machine can remove the ones that joined after it. A removal
-  is final; a removed machine can come back with a new invite, which gives it a new key.
+  Any member can invite a machine, and a machine can remove the ones that joined after it. A removed
+  machine can come back with a new invite, which gives it a new key.
 - Machines talk TLS and prove their keys inside the connection, so nothing is sent to an address
   until the machine there proves who it is. Every message is signed by the machine that sent it.
 - A node shows only throwaway keys to anyone who connects, so a laptop can't be recognised as it moves
