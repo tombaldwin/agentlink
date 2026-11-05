@@ -314,6 +314,179 @@ test('roster: a member can\'t stay on by filling a node with removals of keys no
   assert.ok(!atN.members.has(M.fp))
 })
 
+// snapshots: a founder, some members, and a copy of the roster as another machine would hold it
+function snapshotNet(n = 3) {
+  const F = newIdentity(), ids = Array.from({ length: n }, () => newIdentity())
+  const r = Roster.genesis(F, 'f.local')
+  ids.forEach((id, i) => r.add(F, `m${i}.local`, id.cert))
+  return { F, ids, r, copy: (x = r) => new Roster({ net: x.net, records: structuredClone(x.records) }) }
+}
+const view = r => ({ members: [...r.members.values()].map(m => [m.host, m.rank]).sort(), dks: r.dks, dk: r.dk })
+
+test('snapshot: a network flooded with real machines can be cleaned up, and machines can join again', () => {
+  const F = newIdentity(), M = newIdentity()
+  const r = Roster.genesis(F, 'f.local')
+  r.add(F, 'm.local', M.cert)
+  const at = r.nextAt()
+  r.merge(Array.from({ length: 3000 }, (_, i) => { const p = newIdentity(); const u = { type: 'add', host: `p${i}.local`, fp: p.fp, cert: certDer(p.cert), at: at + i, by: M.fp }; return { ...u, sig: signRecord(M.key, u) } }))
+  const puppets = [...r.members.values()].filter(m => m.by === M.fp).map(m => m.fp)
+  assert.throws(() => r.add(F, 'new.local', newIdentity().cert), /compact/)
+  r.remove(F, M.fp)
+  const t = r.nextAt()      // all at once: each `remove` replays the roster
+  r.merge(puppets.map((fp, i) => { const u = { type: 'remove', fp, at: t + i, by: F.fp, dk: newDiscoveryKey(), seen: [] }; return { ...u, sig: signRecord(F.key, u) } }))
+  assert.equal(r.members.size, 1)
+  assert.throws(() => r.add(F, 'new.local', newIdentity().cert), /size limit/, 'removing them alone doesn\'t make room')
+  r.compact(F)
+  assert.ok(Buffer.byteLength(JSON.stringify(r.records)) < 3000)
+  r.add(F, 'new.local', newIdentity().cert)
+  assert.ok(r.byHost.has('new.local'))
+})
+
+test('snapshot: every machine reaches the same result, whatever order records arrive in', () => {
+  for (let round = 0; round < 25; round++) {
+    const { F, ids, r, copy } = snapshotNet(4)
+    const stale = copy()
+    const fresh = newIdentity(), late = newIdentity()
+    const atB = copy()
+    r.remove(F, ids[3].fp)                                           // settled before the snapshot
+    atB.merge(r.records)
+    const unseen = atB.remove(F, ids[2].fp)                          // made at the same moment, not seen by the snapshot
+    const old = copy(r).compact(F)                                   // an earlier snapshot, for good measure
+    r.merge([old])
+    r.compact(F)
+    r.add(F, 'late.local', late.cert)
+    const after = copy(r)
+    after.add(ids[0], 'fresh.local', fresh.cert)
+    const all = [...stale.records, ...r.records, ...after.records, unseen, old]
+    const results = Array.from({ length: 4 }, () => {
+      const n = copy(stale)
+      const shuffled = [...all].sort(() => Math.random() - 0.5)
+      for (let i = 0; i < shuffled.length; i += 3) n.merge(shuffled.slice(i, i + 3))
+      return view(n)
+    })
+    for (const x of results) assert.deepEqual(x, results[0])
+    assert.deepEqual(results[0].members.map(m => m[0]), ['f.local', 'fresh.local', 'late.local', 'm0.local', 'm1.local'])
+  }
+})
+
+test('snapshot: joining order, and who can remove whom, survive it', () => {
+  const { F, ids, r } = snapshotNet()
+  r.compact(F)
+  assert.deepEqual([...r.members.values()].sort((a, b) => a.rank - b.rank).map(m => m.host), ['f.local', 'm0.local', 'm1.local', 'm2.local'])
+  assert.ok(r.canRemove(ids[0].fp, ids[1].fp))
+  assert.ok(!r.canRemove(ids[1].fp, ids[0].fp))
+  const late = newIdentity()
+  r.add(ids[2], 'late.local', late.cert)
+  assert.ok(r.canRemove(ids[2].fp, late.fp))
+  assert.equal(r.members.get(late.fp).rank, 4)
+  r.remove(ids[0], ids[2].fp)
+  assert.ok(r.members.has(late.fp), 'a machine the removed one added after the snapshot, and the remover had seen')
+})
+
+test('snapshot: a removed machine can\'t come back on anything from before it', () => {
+  const { F, ids, r, copy } = snapshotNet()
+  const oldRecords = copy().records
+  const gone = ids[2]
+  const puppet = newIdentity()
+  const fromGone = copy(); fromGone.add(gone, 'puppet.local', puppet.cert)
+  r.remove(F, gone.fp)
+  r.compact(F)
+  r.merge([...oldRecords, ...fromGone.records])
+  assert.ok(!r.members.has(gone.fp), 'its old add')
+  assert.ok(!r.members.has(puppet.fp), 'what it added')
+  // an add backdated by a member that's still here
+  const u = { type: 'add', host: 'back.local', fp: gone.fp, cert: certDer(gone.cert), at: r.snapshot.at - 1, by: ids[0].fp }
+  r.merge([{ ...u, sig: signRecord(ids[0].key, u) }])
+  assert.ok(!r.members.has(gone.fp), 'a backdated add')
+  // and its removals no longer count
+  const v = { type: 'remove', fp: ids[1].fp, at: r.nextAt(), by: gone.fp, dk: newDiscoveryKey(), seen: [] }
+  r.merge([{ ...v, sig: signRecord(gone.key, v) }])
+  assert.ok(r.members.has(ids[1].fp))
+  assert.ok(!r.records.some(x => x.by === gone.fp))
+})
+
+test('snapshot: only the founder\'s counts', () => {
+  const { F, ids, r, copy } = snapshotNet()
+  assert.throws(() => r.compact(ids[0]), /founding machine/)
+  const good = copy().compact(F)
+  const dropped = { ...good, list: good.list.slice(0, 2) }
+  const planted = { ...good, keys: [[newDiscoveryKey(), good.at]] }
+  const list = good.list.map(m => [...m])
+  list[1][1] = ids[2].fp
+  const signedByMember = u => ({ ...u, sig: signRecord(ids[0].key, u) })
+  const { sig, ...fields } = good
+  // a member's own certificate where the founder's goes, claiming the founder signed it
+  const mine = good.list.map(m => [...m])
+  mine[0][2] = certDer(ids[0].cert)
+  const impostor = signedByMember({ ...fields, list: mine })
+  const impostorKey = good.list.map(m => [...m])
+  impostorKey[0][1] = ids[0].fp; impostorKey[0][2] = certDer(ids[0].cert)
+  for (const bad of [dropped, planted, { ...good, list }, signedByMember(fields), signedByMember({ ...fields, fp: ids[0].fp, by: ids[0].fp }), impostor, signedByMember({ ...fields, list: impostorKey })]) {
+    const n = copy()
+    n.merge([bad])
+    assert.equal(n.snapshot, null)
+    assert.equal(n.members.size, 4)
+    assert.ok(!n.records.some(x => x.type === 'snapshot'))
+  }
+})
+
+test('snapshot: an old one changes nothing, and a full roster still takes a new one', () => {
+  const { F, ids, r, copy } = snapshotNet()
+  const first = copy().compact(F)
+  r.merge([first])
+  const second = r.compact(F)
+  const before = view(r)
+  r.merge([first])
+  assert.deepEqual(view(r), before)
+  assert.equal(r.snapshot.at, second.at)
+
+  const n = snapshotNet()
+  const held = n.copy()
+  const a = held.nextAt()
+  held.merge(Array.from({ length: 3000 }, (_, i) => { const p = newIdentity(); const u = { type: 'add', host: `p${i}.local`, fp: p.fp, cert: certDer(p.cert), at: a + i, by: n.ids[0].fp }; return { ...u, sig: signRecord(n.ids[0].key, u) } }))
+  assert.ok(Buffer.byteLength(JSON.stringify(held.records)) > 1000000)
+  n.r.merge(held.records.slice(0, 300))
+  n.r.remove(n.F, n.ids[0].fp)
+  const snap = n.r.compact(n.F)
+  held.merge(n.r.records)
+  assert.equal(held.snapshot?.at, snap.at)
+  assert.ok(Buffer.byteLength(JSON.stringify(held.records)) < 200_000)
+})
+
+test('snapshot: recent discovery keys still work, a new one comes in, and old ones expire', () => {
+  const { F, ids, r, copy } = snapshotNet()
+  r.remove(F, ids[2].fp)
+  const [first, second] = r.dks
+  r.compact(F)
+  assert.equal(r.dks.length, 3)
+  assert.deepEqual(r.dks.slice(0, 2), [first, second])
+  assert.notEqual(r.dk, second)
+  assert.deepEqual(r.gateDks(), r.dks)
+  assert.deepEqual(r.gateDks(Date.now() + 15 * 86400_000), [r.dk])
+  const n = copy()
+  n.merge(r.records)
+  assert.deepEqual(n.dks, r.dks)
+  // a removal that lands after it still replaces the key, on every machine
+  const concurrent = copy(); const rec = concurrent.remove(F, ids[1].fp)
+  n.merge([rec]); r.merge([rec])
+  assert.equal(n.dk, rec.dk)
+  assert.equal(r.dk, rec.dk)
+  assert.ok(!n.members.has(ids[1].fp))
+})
+
+test('snapshot: a roster with one loads back the same, and a machine can join from it', () => {
+  const { F, ids, r } = snapshotNet()
+  r.remove(F, ids[2].fp)
+  r.compact(F)
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'al-snap-')), 'roster.json')
+  fs.writeFileSync(file, JSON.stringify({ net: r.net, records: r.records }))
+  const back = Roster.load(file)
+  assert.deepEqual(view(back), view(r))
+  assert.equal(back.snapshot.at, r.snapshot.at)
+  const joined = new Roster({ net: r.net, records: JSON.parse(JSON.stringify(r.records)) })
+  assert.ok(joined.members.has(ids[0].fp))
+})
+
 test('roster: a malformed discovery key is refused', () => {
   const f = newIdentity(), m = newIdentity(), r = Roster.genesis(f, 'f.local')
   r.add(f, 'm.local', m.cert)

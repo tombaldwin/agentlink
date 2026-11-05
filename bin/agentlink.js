@@ -8,7 +8,7 @@ const [cmd, ...rest] = process.argv.slice(2)
 // Only these are flags; anything else (a message that happens to start with "--") is an argument,
 // and "--" ends the flags.
 const VALUE_FLAGS = ['name', 'from', 'host', 'peer', 'join', 'pin', 'net', 'token']
-const BOOL_FLAGS = ['no-service', 'no-claude', 'no-alias', 'new-network', 'poll', 'channel', 'on-demand', 'revoke', 'list', 'check']
+const BOOL_FLAGS = ['yes', 'no-service', 'no-claude', 'no-alias', 'new-network', 'poll', 'channel', 'on-demand', 'revoke', 'list', 'check']
 /** @type {Record<string, any>} */
 const flags = {}
 /** @type {string[]} */
@@ -43,6 +43,7 @@ const HELP = `agentlink ${VERSION} — wake-on-message networking for AI agents
   agentlink invite [--list|--revoke]  print a one-time line to add another machine
                                 (--list: show unused ones; --revoke: cancel them)
   agentlink remove <host>       remove a machine from the network (it can no longer send or receive)
+  agentlink compact [--yes]     on the founding machine: shrink the member list to current members
   agentlink uninstall           remove service and Claude Code registration
 
   agentlink node                run the node (normally run by the background service)
@@ -124,6 +125,17 @@ async function main() {
       if (pos.length !== 1) throw new Error('usage: agentlink remove <host>')
       const r = await (await client()).req('POST', '/local/remove', { host: pos[0] })
       return console.log(`removed ${r.removed}: it can no longer send to or receive from this network`)
+    }
+    case 'compact': {
+      if (pos.length) throw new Error('usage: agentlink compact [--yes]')
+      const r = await (await client()).req('POST', '/local/compact', { confirm: !!flags.yes })
+      if (flags.yes) return console.log(`member list compacted: ${r.before} bytes to ${r.bytes}. Members: ${r.members.join(', ')}`)
+      return console.log([
+        `A snapshot would keep these machines: ${r.members.join(', ')}`,
+        ...(r.offline.length ? [`Not reachable just now, so anything they've heard of is unknown here: ${r.offline.join(', ')}`] : []),
+        `The member list is ${r.bytes} bytes (limit ${r.limit}). A machine added that isn't listed above will need a new invite, and removed machines are forgotten.`,
+        'Run `agentlink compact --yes` to go ahead.',
+      ].join('\n'))
     }
     case 'uninstall': {
       const { uninstall } = await import('../src/setup.js')

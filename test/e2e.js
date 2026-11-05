@@ -636,6 +636,41 @@ try {
     for (const n of ['m', 'n']) fs.rmSync(path.join(ROOT, n), { recursive: true, force: true })     // later steps start these afresh
   })
 
+  await step('compact: the founder shrinks the member list, and everyone follows', async () => {
+    const r = Roster.genesis(IDS.m, 'm.test')
+    r.add(IDS.m, 'n.test', IDS.n.cert)
+    r.add(IDS.m, 'h.test', IDS.h.cert)
+    r.add(IDS.m, 'x.test', newIdentity().cert)
+    const gone = newIdentity()
+    r.add(IDS.m, 'gone.test', gone.cert)
+    r.remove(IDS.m, gone.fp)
+    for (const n of ['m', 'n', 'h']) { fs.rmSync(path.join(ROOT, n), { recursive: true, force: true }); home(n, { peers: ['m', 'n', 'h'].filter(x => x !== n).map(x => `${x}.test`) }, r) }
+    await startNode('m'); await startNode('n')
+    assert.match(cliFails('n', 'compact', '--yes'), /only the founding machine can do this: m\.test/)
+    const preview = cli('m', 'compact')
+    assert.match(preview, /would keep these machines: m\.test, n\.test, h\.test, x\.test/)
+    assert.match(preview, /Not reachable just now.*h\.test/)
+    assert.match(preview, /--yes/)
+    const size = () => JSON.parse(cli('m', 'status')).roster.bytes
+    const before = size()
+    assert.equal(JSON.parse(cli('m', 'status')).members.length, 4, 'and a preview changes nothing')
+    assert.match(cli('m', 'compact', '--yes'), /member list compacted/)
+    assert.ok(size() < before)
+    // the others hear of it, messages still flow, and a machine that was off catches up
+    const records = () => JSON.parse(fs.readFileSync(path.join(ROOT, 'n', 'roster.json'), 'utf8')).records
+    await waitFor(() => records().some(x => x.type === 'snapshot'), 8000, 'n to hear of it')
+    assert.match(cli('m', 'send', 'someone@n.test', 'after the snapshot'), /stored on n\.test/)
+    await startNode('h')
+    await waitFor(() => JSON.parse(fs.readFileSync(path.join(ROOT, 'h', 'roster.json'), 'utf8')).records.some(x => x.type === 'snapshot'), 8000, 'h to catch up')
+    assert.match(cli('h', 'send', 'someone@n.test', 'from the machine that was off'), /stored on n\.test/)
+    // and the node comes back on it after a restart
+    await stopNode('m'); await startNode('m')
+    assert.equal(JSON.parse(cli('m', 'status')).members.length, 4)
+    assert.match(cli('n', 'send', 'someone@m.test', 'after a restart'), /stored on m\.test/)
+    for (const n of ['m', 'n', 'h']) await stopNode(n)
+    for (const n of ['m', 'n']) fs.rmSync(path.join(ROOT, n), { recursive: true, force: true })
+  })
+
   await step('a large batch for a live session does not freeze the node', async () => {
     await ensureNode('b')
     const msgs = Array.from({ length: 2000 }, (_, i) => envelope('bob@b.test', `batch ${i}`))

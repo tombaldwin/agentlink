@@ -89,7 +89,7 @@ Claude handles everyday use and invites; these are for terminals and scripts.
 
     agentlink send <name@host> <msg>   agentlink peers     agentlink status
     agentlink invite [--list|--revoke] agentlink remove <host>
-    agentlink uninstall
+    agentlink compact [--yes]          agentlink uninstall
 
 `agentlink peers` says why a machine is offline (the node log, `~/.agentlink/node.log`, records
 when a machine stops or starts answering).

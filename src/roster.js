@@ -30,12 +30,13 @@ import { normHost, machineName, writeAtomic } from './config.js'
 // takes at least about 400 bytes, so that's some 2600 machines at the very most, each with one adder,
 // and what's cleared is at most what was held: 1 MB + 2600 * 2 KB + 2600 * 25 B + 1 MB is about
 // 7 MB, whatever a member signs.
-const MAX_ROSTER_BYTES = 1 << 20
+export const MAX_ROSTER_BYTES = 1 << 20
 const MAX_TAKEN = 2 << 10              // a removal listing no one, with room for some 70 adds not held here
 const SEEN_ENTRY = 25                  // what listing one record in `seen` takes
 const MAX_FORGED = 20_000              // bad signatures remembered, so a resent one costs nothing
 const MAX_FUTURE_MS = 3600_000     // a record stamped further ahead than this is refused (bad clock)
 const MAX_SEEN = 4000                  // more than a full roster's adds, so no machine can make itself impossible to remove
+const MAX_KEYS = 8                     // discovery keys a snapshot carries (a gate only tries the newest few)
 const MAX_DROPPED = 50                 // adds that didn't count, kept per removed machine (so their keys stay known as dropped)
 // a replaced discovery key still opens other members' gates for this long, so a machine that was
 // offline during a removal can catch up; after that it needs a new invite
@@ -49,16 +50,31 @@ const ASCII_KEY = /^[\w+/=-]+$/        // fingerprints and signatures: base64, i
 /** @param {any} r @returns {r is RosterRecord} */
 function wellFormed(r) {
   if (!r || typeof r !== 'object') return false
-  if (r.type !== 'add' && r.type !== 'remove') return false
+  if (r.type !== 'add' && r.type !== 'remove' && r.type !== 'snapshot') return false
   if (typeof r.fp !== 'string' || !ASCII_KEY.test(r.fp) || r.fp.length > 64 || typeof r.by !== 'string' || !ASCII_KEY.test(r.by) || r.by.length > 64) return false
   if (typeof r.sig !== 'string' || !ASCII_KEY.test(r.sig) || r.sig.length > 200 || !Number.isSafeInteger(r.at) || r.at < 0) return false
   if (r.dk !== undefined && (typeof r.dk !== 'string' || r.dk.length !== 44 || Buffer.from(r.dk, 'base64').length !== 32)) return false
-  if (r.type === 'remove' && (r.host !== undefined || r.cert !== undefined)) return false
+  if (r.type !== 'add' && (r.host !== undefined || r.cert !== undefined)) return false
+  if (r.type === 'snapshot' ? !snapshotShape(r) : r.list !== undefined || r.keys !== undefined) return false
   if (r.seen !== undefined && (r.type !== 'remove' || !Array.isArray(r.seen) || r.seen.length > MAX_SEEN || !r.seen.every((/** @type {unknown} */ x) => typeof x === 'string' && /^[\w-]{22}$/.test(x)))) return false
   // strict base64: the decoder skips anything else, so a good certificate could carry padding
   if (r.type === 'add' && (typeof r.host !== 'string' || r.host.length > 253 || typeof r.cert !== 'string' || r.cert.length > 1024 || !/^[A-Za-z0-9+/]+={0,2}$/.test(r.cert))) return false
   return true
 }
+
+/** @param {RosterRecord} r */
+function snapshotShape(r) {
+  const key = (/** @type {unknown} */ s) => typeof s === 'string' && s.length <= 64 && ASCII_KEY.test(s)
+  return r.fp === r.by && r.dk === undefined && r.seen === undefined &&
+    Array.isArray(r.list) && r.list.length > 0 && r.list.length <= MAX_SEEN &&
+    r.list.every(m => Array.isArray(m) && m.length === 5 && typeof m[0] === 'string' && m[0].length <= 253 && key(m[1]) &&
+      typeof m[2] === 'string' && m[2].length <= 1024 && /^[A-Za-z0-9+/]+={0,2}$/.test(m[2]) && Number.isSafeInteger(m[3]) && m[3] >= 0 && key(m[4])) &&
+    Array.isArray(r.keys) && r.keys.length > 0 && r.keys.length <= MAX_KEYS &&
+    r.keys.every(k => Array.isArray(k) && k.length === 2 && typeof k[0] === 'string' && k[0].length === 44 && Buffer.from(k[0], 'base64').length === 32 && Number.isSafeInteger(k[1]) && k[1] >= 0)
+}
+
+/** What a snapshot says about each member, in the shape of the add that made it. @param {RosterRecord} r */
+const snapshotAdds = r => (r.list ?? []).map(([host, fp, cert, at, by]) => /** @type {RosterRecord} */ ({ type: 'add', host, fp, cert, at, by, sig: '' }))
 
 export class Roster {
   /**
@@ -90,6 +106,8 @@ export class Roster {
     this.dkAt = []
     /** @type {Set<string>} keys added by a machine that was removed before the add was seen: never members */
     this.dropped = new Set()
+    /** @type {RosterRecord | null} the founder's newest snapshot, which everything now starts from */
+    this.snapshot = null
     /** @type {Map<string, { host: string, pem: string, publicKey: crypto.KeyObject } | null>} parsed add records (see recKey) */
     this.parsed = new Map()
     this.merge(data.records, { trustClock: true })
@@ -140,6 +158,14 @@ export class Roster {
     return size <= room
   }
 
+  /** Did the founder sign this snapshot? It carries the founder's own certificate. @param {RosterRecord} r */
+  signedSnapshot(r) {
+    try {
+      const x509 = new crypto.X509Certificate(Buffer.from(String(r.list?.[0]?.[2]), 'base64'))
+      return r.by === this.net && fingerprint(x509) === this.net && r.list?.[0]?.[1] === this.net && verifyRecord(x509.publicKey, r)
+    } catch { return false }
+  }
+
   /** What a machine's removal would list or clear, by who signed it. */
   addsBySigner() {
     /** @type {Map<string, { id: string, size: number, made: boolean }[]>} */
@@ -168,10 +194,15 @@ export class Roster {
     for (const r of Array.isArray(list) ? list : []) {
       if (!wellFormed(r) || this.ids.has(recId(r)) || this.forged.has(recKey(r))) continue
       if (!trustClock && r.at > Date.now() + MAX_FUTURE_MS) continue
+      // what a snapshot has already settled, sent by a machine that hasn't heard of it yet
+      if (this.snapshot && r.type !== 'remove' && r.at <= this.snapshot.at) continue
       const o = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (r))
-      const clean = /** @type {RosterRecord} */ (/** @type {unknown} */ (Object.fromEntries(['type', 'host', 'fp', 'cert', 'at', 'by', 'dk', 'seen', 'sig'].filter(k => o[k] !== undefined).map(k => [k, o[k]]))))
+      const clean = /** @type {RosterRecord} */ (/** @type {unknown} */ (Object.fromEntries(['type', 'host', 'fp', 'cert', 'at', 'by', 'dk', 'seen', 'list', 'keys', 'sig'].filter(k => o[k] !== undefined).map(k => [k, o[k]]))))
       const size = Buffer.byteLength(JSON.stringify(clean))
-      if (!trustClock && bytes + size > MAX_ROSTER_BYTES) {
+      if (clean.type === 'snapshot') {
+        // it's what makes room, so it always gets in, and only the founder's can
+        if (!this.signedSnapshot(clean)) { this.forged.add(recKey(clean)); continue }
+      } else if (!trustClock && bytes + size > MAX_ROSTER_BYTES) {
         if (over.has(clean.fp) || !this.mustTake(clean, size, () => adds ??= this.addsBySigner())) continue
         over.add(clean.fp)
       }
@@ -202,6 +233,14 @@ export class Roster {
    * Records are kept if they could ever count: everything signed by current members, and what
    * counts of what removed machines signed. Anything else can never count, whatever arrives later
    * (removals only accumulate), so every node reaches the same result.
+   *
+   * A snapshot replaces all of that history. The founder's newest one is where replay starts: its
+   * members hold their places in joining order, and its keys are the discovery keys so far. After it:
+   * - An add counts only if it's dated later. So a removed machine can't come back on an old add,
+   *   and an add the founder hadn't heard of needs a new invite.
+   * - A removal counts whatever its date, if its signer is in the snapshot and joined before its
+   *   target. So a removal made at the same moment as the snapshot isn't lost.
+   * - Nothing else from before it counts, so it's dropped, and the roster shrinks.
    */
   replay() {
     // ties go by content: which encoding of a signature a node happened to get must not decide anything
@@ -236,6 +275,11 @@ export class Roster {
       }
       return c
     }
+
+    // (signatures were checked on the way in)
+    const snapshot = [...this.records].reverse().find(r => r.type === 'snapshot' && snapshotAdds(r).every(parse)) ?? null
+    const since = snapshot?.at ?? -1
+    const base = snapshot ? snapshotAdds(snapshot) : []
 
     /** @type {Map<string, RosterRecord[]>} target fp -> remove records naming it */
     const removesOf = new Map()
@@ -276,8 +320,15 @@ export class Roster {
     /** @type {Set<string>} keys whose add didn't count because their adder was removed first */
     const dropped = new Set()
     let rank = 0
+    for (const r of base) {
+      const c = parse(r)
+      if (!c || ranked.has(r.fp)) continue
+      const m = { host: c.host, fp: r.fp, pem: c.pem, publicKey: c.publicKey, at: r.at, by: r.by, rank: rank++ }
+      ranked.set(r.fp, m)
+      nameHolder.set(c.host, m)
+    }
     for (const r of this.records) {
-      if (r.type !== 'add') continue
+      if (r.type !== 'add' || r.at <= since) continue
       const c = parse(r)
       if (!c) continue
       const genesis = r.by === r.fp
@@ -324,6 +375,8 @@ export class Roster {
     const copies = new Set()
     const once = (/** @type {RosterRecord} */ r) => { const id = recId(r); if (copies.has(id)) return false; copies.add(id); return true }
     const kept = this.records.filter(r => {
+      if (r.type === 'snapshot') return r === snapshot && once(r)
+      if (r.type === 'add' && r.at <= since) return false
       const s = ranked.get(r.by)
       if (!s || !ok(s.publicKey, r) || !once(r)) return false
       if (r.type === 'add') {
@@ -343,13 +396,13 @@ export class Roster {
         return true
       }
       // a machine it can't remove stays that way; one we haven't heard of yet may turn out otherwise
-      return !t && members.has(r.by)
+      return !t && members.has(r.by) && r.at > since
     })
 
     /** @type {string[]} */
-    const dks = []
+    const dks = (snapshot?.keys ?? []).map(k => k[0])
     /** @type {number[]} */
-    const dkAt = []
+    const dkAt = (snapshot?.keys ?? []).map(k => k[1])
     for (const r of kept) {
       const signer = members.get(r.by)
       if (!r.dk || !signer) continue                               // never a key made by a removed machine
@@ -361,9 +414,9 @@ export class Roster {
         dkAt.push(r.at)
       }
     }
-    this.parsed = new Map(kept.filter(r => r.type === 'add').map(r => [recKey(r), this.parsed.get(recKey(r)) ?? null]))
+    this.parsed = new Map([...base, ...kept.filter(r => r.type === 'add')].map(r => [recKey(r), this.parsed.get(recKey(r)) ?? null]))
     if (this.verified.size > MAX_FORGED) this.verified = new Set(kept.map(recKey).filter(k => this.verified.has(k)))
-    Object.assign(this, { members, byHost, ranked, removed, dropped, dks, dkAt, records: kept, ids: new Set(kept.map(recId)) })
+    Object.assign(this, { members, byHost, ranked, removed, dropped, dks, dkAt, snapshot, records: kept, ids: new Set(kept.map(recId)) })
   }
 
   /** A timestamp later than every record we hold, so our records sort after what we've seen
@@ -381,7 +434,7 @@ export class Roster {
     const r = { type: 'add', host, fp: fingerprint(pem), cert: certDer(pem), at: this.nextAt(), by: me.fp }
     const rec = { ...r, sig: signRecord(me.key, r) }
     this.merge([rec])
-    if (!this.ids.has(recId(rec))) throw new Error('the network has reached its size limit: remove a machine that is flooding it. If that leaves no room, start a new network (agentlink setup --new-network)')
+    if (!this.ids.has(recId(rec))) throw new Error('the network has reached its size limit: remove any machine that is flooding it, then run `agentlink compact` on the founding machine')
     return rec
   }
 
@@ -403,6 +456,30 @@ export class Roster {
     const rec = { ...r, sig: signRecord(me.key, r) }
     this.merge([rec])
     if (!this.ids.has(recId(rec)) || this.members.has(fp)) throw new Error('its removal could not be recorded')
+    return rec
+  }
+
+  /**
+   * Sign and merge a snapshot of the current members, which replaces everything before it. Only the
+   * founder's counts: it's the one machine every member trusts and no one can remove. Removed
+   * machines are forgotten, and a new discovery key comes in, so whatever a removed machine still
+   * held stops being current.
+   * @param {import('./types.js').Identity} me
+   */
+  compact(me) {
+    if (me.fp !== this.net) throw new Error('only the founding machine can do this')
+    const at = this.nextAt()
+    const live = this.gateDks()
+    const keys = this.dks.flatMap((dk, i) => live.includes(dk) ? [/** @type {[string, number]} */ ([dk, this.dkAt[i]])] : []).slice(1 - MAX_KEYS)
+    /** @type {Omit<RosterRecord, 'sig'>} */
+    const r = {
+      type: 'snapshot', fp: me.fp, by: me.fp, at,
+      list: [...this.members.values()].sort((a, b) => a.rank - b.rank).map(m => [m.host, m.fp, certDer(m.pem), m.at, m.by]),
+      keys: [...keys, [newDiscoveryKey(), at]],
+    }
+    const rec = { ...r, sig: signRecord(me.key, r) }
+    this.merge([rec])
+    if (this.snapshot === null || recId(this.snapshot) !== recId(rec)) throw new Error('the snapshot could not be recorded')
     return rec
   }
 

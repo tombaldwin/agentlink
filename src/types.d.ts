@@ -79,7 +79,7 @@ export interface Identity { key: string; cert: string; fp: string }
 
 /** A signed membership record (see roster.js). */
 export interface RosterRecord {
-  type: 'add' | 'remove'
+  type: 'add' | 'remove' | 'snapshot'
   /** add: the machine's name */
   host?: string
   /** the machine added or removed */
@@ -94,6 +94,10 @@ export interface RosterRecord {
   /** remove: ids (recId) of the records signed by the removed machine that the remover had; any
    * other record it signed is void, whatever its timestamp */
   seen?: string[]
+  /** snapshot: the members, in joining order: [host, fp, cert, at, by] */
+  list?: [string, string, string, number, string][]
+  /** snapshot: the discovery keys that still open gates, oldest first: [key, when it came in] */
+  keys?: [string, number][]
   sig: string
 }
 

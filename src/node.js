@@ -17,7 +17,7 @@ import { openStore } from './store.js'
 import { startDiscovery } from './discovery.js'
 import { signEnvelope, verifyEnvelope, sha256, randomToken, gateOk, proveAuth, checkAuth } from './crypto.js'
 import { fingerprint, shortFp, newIdentity, selfSignedCert } from './cert.js'
-import { Roster } from './roster.js'
+import { Roster, MAX_ROSTER_BYTES } from './roster.js'
 import { authedRequest, exporterOf, PinError, ProtoError, PROTO, MAX_BODY as MAX_REQ, MIN_RATE } from './tls.js'
 import { SEA, PKG_ROOT, readAsset, appBundle } from './self.js'
 import { parseAddr, parsePeer, normHost, machineName, sanitizeName, shQuote, validAddr, tailscaleName, localIPv4s, errMsg, netHint, ensureHomeDir, rosterPath, MAX_TTL_MS, VERSION } from './config.js'
@@ -865,6 +865,10 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     else status = `${to.host} unreachable (${r.last_error}); queued — will deliver when it comes back` + (copies ? ' (also offering copies to other online machines)' : '')
     return { id: e.id, to: e.to, status }
   }
+  const rosterStatus = () => {
+    const bytes = Buffer.byteLength(JSON.stringify(roster.records))
+    return { bytes, limit: MAX_ROSTER_BYTES, ...(bytes > MAX_ROSTER_BYTES * 0.75 ? { note: 'the member list is nearly full: remove any machine flooding it, then run `agentlink compact` on the founding machine' } : {}) }
+  }
   /** @param {string} to */
   const fullError = to => httpErr(429, `not sent: too many messages are waiting for ${to}, or this machine's message store is full. Try again once they've been read`)
   /** @param {string} name @param {boolean} [live] it was just told (its wait, having woken it, is over) */
@@ -1174,6 +1178,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
         return reply(res, 200, {
           host: cfg.host, aliases: [...selfAliases], net: shortFp(cfg.net), fp: shortFp(me.fp), port: cfg.port, version: VERSION, pid: process.pid,
           member: roster.members.has(me.fp), removed: roster.removed.has(me.fp),
+          roster: rosterStatus(),
           members: members(), sessions: [...sessions.keys()], counts: q.counts.all(), peers: allPeers(),
           pending: db.prepare(`SELECT id,to_addr,role,attempts,replicated,last_error FROM messages WHERE state='pending' ORDER BY sent_at LIMIT 20`).all(),
         })
@@ -1206,6 +1211,20 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
         discovery?.announce()
         setImmediate(helloAll)
         return reply(res, 200, { removed: m.host })
+      }
+      case 'POST /local/compact': {
+        if (me.fp !== roster.net) throw httpErr(403, `only the founding machine can do this: ${roster.ranked.get(roster.net)?.host ?? 'the first machine on the network'}`)
+        await helloAll()                          // what the others know first: an add we haven't heard of would be lost
+        const list = [...roster.members.values()].map(m => m.host)
+        const offline = list.filter(h => h !== cfg.host && reach.get(h))
+        if (!d.confirm) return reply(res, 200, { members: list, offline, ...rosterStatus() })
+        const before = rosterStatus().bytes
+        try { roster.compact(me) } catch (e) { throw httpErr(507, `could not compact: ${errMsg(e)}`) }
+        roster.save()
+        log(`compacted the member list: ${before} bytes to ${rosterStatus().bytes}`)
+        discovery?.announce()
+        setImmediate(helloAll)
+        return reply(res, 200, { members: list, offline, before, ...rosterStatus() })
       }
       case 'POST /local/shutdown':
         reply(res, 200, { ok: true })

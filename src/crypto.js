@@ -31,7 +31,7 @@ export const verifyEnvelope = (pub, m) => verify(pub, envPayload(m), m.sig)
 
 /** @param {Omit<import('./types.js').RosterRecord, 'sig'>} r */
 const recPayload = r => JSON.stringify(['agentlink-roster-1', r.type, r.host ?? '', r.fp, r.cert ?? '', r.at, r.by, r.dk ?? '',
-  ...(r.type === 'remove' ? [(r.seen ?? []).join(',')] : [])])
+  ...(r.type === 'remove' ? [(r.seen ?? []).join(',')] : r.type === 'snapshot' ? [JSON.stringify(r.list), JSON.stringify(r.keys)] : [])])
 /**
  * A short id for a roster record (what a remove record lists in `seen`): of its content, not its
  * signature. A signature can be re-encoded by anyone and still verify, so it can't say which record

@@ -29,16 +29,22 @@ the same membership from the same records.
   Before a machine has proved its key, the only membership records it can submit are the ones that
   add it. Any member can add a machine by inviting it. A record counts, and is kept and passed on,
   only if its signature checks out against the signer it names. A roster stops taking new records
-  at 1 MB, apart from removals of a current member by a machine that joined before it, one per
+  at 1 MB, apart from the founder's snapshots and removals of a current member by a machine that joined before it, one per
   machine, which may be as big as a removal has any reason to be: an entry for each machine the
   target really added, and otherwise no bigger than what it clears. So a roster always fits in the
   one request (8 MB) that carries it between machines, and a member can't stay on by filling one.
 - **Removal.** Machines are ranked in the order they joined, and a machine can remove only machines
   that joined after it. The founding machine can remove anyone, and two machines can never remove
   each other. Removing the remover doesn't bring a machine back, and removals made at the same time
-  all stand. A removed key is gone for good (the machine isn't told, and re-joins with an invite and
-  a new key), with one exception: see *Known limitations*. A key made by a removed machine never
-  becomes the discovery key.
+  all stand. A removed key can't come back on its own (the machine isn't told, and re-joins with an
+  invite and a new key), with the exceptions in *Known limitations*. A key made by a removed machine
+  never becomes the discovery key.
+- **Snapshots.** `agentlink compact`, on the founding machine, signs a list of the current members
+  in joining order, with the discovery keys still in use and a new one. Any machine can check it
+  against the network's ID, and it replaces all the records before it. After a snapshot, an add dated
+  before it counts for nothing, nor does anything signed by a machine that isn't in it. A removal
+  between two machines in it still counts, whatever its date, so a removal made at the same moment
+  isn't lost.
 - **A removed machine can't add machines.** A removal lists the removed machine's records the
   remover had. Machines it added stay if every remover had seen the add. An add the remover hadn't
   seen doesn't count, whatever date it carries, and that machine needs a new invite. Every member
@@ -94,7 +100,16 @@ the same membership from the same records.
 - **A member can undo a removal made by a machine that joined after it.** It signs a backdated add of
   the removed key, dated before the remover joined, so that the remover no longer ranks above it, and
   the machine is back under its old key. A removal by a machine that joined before that member stands.
-  If you suspect a member, remove it first, from the earliest machine you can.
+  If you suspect a member, remove it first, from the earliest machine you can. A snapshot ends this
+  for everything before it, because adds can't be dated before a snapshot.
+- **A snapshot forgets removed keys.** A removed machine can then come back under its old key, but
+  only if a member adds it: with an invite, as any new machine would. Sending to it after that says
+  it isn't a machine on the network, not that it was removed.
+- **A snapshot can drop a machine.** One added just before it, which the founding machine hadn't
+  heard of, isn't in it and needs a new invite. `agentlink compact` catches up first, and shows who
+  will be kept and who it couldn't reach.
+- **Only the founding machine can make a snapshot.** If it's lost, the way out of a full member list
+  is a new network.
 - **Messages aren't end-to-end encrypted.** While the recipient's machine is off, copies wait on
   other members, which can read them until they're handed over. They can't alter them. Don't send
   anything through agentlink that you wouldn't want your other machines to hold.
@@ -110,13 +125,13 @@ the same membership from the same records.
   (which it knew already). It still can't send, receive or change the member list.
 - **Two removals at the same moment can leave a removed machine holding the current discovery key.**
   If one machine removes another that has already heard of a third's removal, the removed machine has
-  the key that removal brought in, until the next removal by a current member replaces it. It can pass
-  the gate as above, for that long.
+  the key that removal brought in, until the next removal by a current member, or a snapshot, replaces
+  it. It can pass the gate as above, for that long.
 - **A member can flood the roster.** Until you remove it, a compromised member can fill the roster
   so that no new machine can join, and machines may disagree about the last records to arrive.
   Removing it clears what it signed, apart from machines it really added and its removals of machines
-  that had joined. Those stay for good, and a member that padded them can leave a roster with no room
-  even once it's gone: then no machine can join, and the only way out is a new network. While
+  that had joined. Those stay until the next snapshot, so a roster can stay full once the member has
+  gone: remove the machines it added, then run `agentlink compact` on the founding machine. While
   a roster is full, two kinds of removal wait until there's room, so machines can disagree until
   then: a second removal of a machine already removed, and one listing dozens of machines a full node
   has never heard of, if what fills that node was signed by someone else. Remove that machine first.
