@@ -27,7 +27,7 @@ the same membership from the same records.
   machine sees only ciphertext.
 - **Membership.** A node accepts machine-to-machine requests only from current members' keys.
   Before a machine has proved its key, the only membership records it can submit are the ones that
-  add it. Any member can add a machine by inviting it. A record counts, and is kept and passed on,
+  add it and one snapshot, which only the founding machine can have signed. Any member can add a machine by inviting it. A record counts, and is kept and passed on,
   only if its signature checks out against the signer it names. A roster stops taking new records
   at 1 MB, apart from the founder's snapshots and removals of a current member by a machine that joined before it, one per
   machine, which may be as big as a removal has any reason to be: an entry for each machine the
@@ -108,6 +108,15 @@ the same membership from the same records.
 - **A snapshot can drop a machine.** One added just before it, which the founding machine hadn't
   heard of, isn't in it and needs a new invite. `agentlink compact` catches up first, and shows who
   will be kept and who it couldn't reach.
+- **A snapshot goes by what the founding machine knows.** If it hasn't heard of a removal yet, two
+  things can go against the rules above. A machine that was removed by a machine that's now gone
+  too comes back, as the removal counts for nothing without its signer. And a machine added by a
+  removed one stays, if the founding machine heard of the add first. So make a snapshot with your
+  machines online, and check the list `agentlink compact` shows.
+- **A backdated removal can cut a machine off until someone reaches it.** A member can sign a removal
+  dated before a snapshot that's over 14 days old, which brings in a new key and leaves no grace period
+  for the snapshot's. A machine that hasn't heard is refused at the gate until another member reaches
+  it, and then it catches up.
 - **Only the founding machine can make a snapshot.** If it's lost, the way out of a full member list
   is a new network.
 - **Messages aren't end-to-end encrypted.** While the recipient's machine is off, copies wait on

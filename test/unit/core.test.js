@@ -337,7 +337,7 @@ test('snapshot: a network flooded with real machines can be cleaned up, and mach
   assert.equal(r.members.size, 1)
   assert.throws(() => r.add(F, 'new.local', newIdentity().cert), /size limit/, 'removing them alone doesn\'t make room')
   r.compact(F)
-  assert.ok(Buffer.byteLength(JSON.stringify(r.records)) < 3000)
+  assert.ok(Buffer.byteLength(JSON.stringify(r.records)) < 150_000, "one member, and the discovery keys still in their grace period")
   r.add(F, 'new.local', newIdentity().cert)
   assert.ok(r.byHost.has('new.local'))
 })
@@ -472,6 +472,82 @@ test('snapshot: recent discovery keys still work, a new one comes in, and old on
   assert.equal(n.dk, rec.dk)
   assert.equal(r.dk, rec.dk)
   assert.ok(!n.members.has(ids[1].fp))
+})
+
+test('snapshot: every key still in its grace period survives, however many there were', () => {
+  const { F, r, copy } = snapshotNet(1)
+  const offline = copy()
+  for (let i = 0; i < 12; i++) { const x = newIdentity(); r.add(F, `x${i}.local`, x.cert); r.remove(F, x.fp) }
+  r.compact(F)
+  assert.ok(r.gateDks().includes(offline.dk), 'the key a machine that was off still holds')
+  assert.ok(new Roster({ net: r.net, records: structuredClone(r.records) }).gateDks().includes(offline.dk))
+})
+
+test('snapshot: a removal dated long before it doesn\'t expire the snapshot\'s key', () => {
+  const { F, ids, r, copy } = snapshotNet()
+  const old = copy()
+  const t = old.nextAt()
+  const u = { type: 'remove', fp: ids[2].fp, at: t, by: ids[0].fp, dk: newDiscoveryKey(), seen: [] }
+  const removal = { ...u, sig: signRecord(ids[0].key, u) }
+  const now = Date.now
+  Date.now = () => now() + 20 * 86400_000
+  try {
+    r.compact(F)
+    const key = r.dk
+    r.merge([removal])
+    assert.equal(r.dk, u.dk, 'the removal replaces the key')
+    assert.ok(r.gateDks().includes(key), 'and the one it replaced has its grace period')
+  } finally { Date.now = now }
+})
+
+test('snapshot: a key forgotten and let back in isn\'t caught by a removal from before', () => {
+  const { F, ids, r, copy } = snapshotNet()
+  const stale = copy()
+  const removal = r.remove(F, ids[2].fp)
+  r.compact(F)
+  r.add(ids[0], 'm2.local', ids[2].cert)
+  assert.ok(r.members.has(ids[2].fp))
+  stale.merge([removal])
+  r.merge(stale.records)
+  stale.merge(r.records)
+  assert.ok(r.members.has(ids[2].fp))
+  assert.deepEqual(view(stale), view(r))
+  assert.ok(!r.records.includes(removal))
+})
+
+test('snapshot: two with the same date settle the same way, whichever arrives first', () => {
+  const { F, r, copy } = snapshotNet()
+  const at = r.nextAt()
+  const make = () => { const u = { type: 'snapshot', fp: F.fp, by: F.fp, at, list: [...r.members.values()].map(m => [m.host, m.fp, certDer(m.pem), m.at, m.by]), keys: [[newDiscoveryKey(), at]] }; return { ...u, sig: signRecord(F.key, u) } }
+  const a = make(), b = make(), x = copy(), y = copy()
+  x.merge([a]); y.merge([b])
+  x.merge(y.records); y.merge(x.records)
+  assert.equal(x.dk, y.dk)
+})
+
+test('snapshot: what comes with one gets in, however full the roster was', () => {
+  const n = snapshotNet()
+  const held = n.copy()
+  const a = held.nextAt()
+  held.merge(Array.from({ length: 3000 }, (_, i) => { const p = newIdentity(); const u = { type: 'add', host: `p${i}.local`, fp: p.fp, cert: certDer(p.cert), at: a + i, by: n.ids[0].fp }; return { ...u, sig: signRecord(n.ids[0].key, u) } }))
+  n.r.compact(n.F)
+  const late = newIdentity()
+  n.r.add(n.F, 'late.local', late.cert)
+  held.merge([...n.r.records].reverse())
+  assert.ok(held.members.has(late.fp))
+})
+
+test('forged snapshots are remembered up to the same limit as other records', () => {
+  const { F, ids, copy } = snapshotNet()
+  const good = copy().compact(F)
+  const n = copy()
+  const { sig, ...fields } = good
+  const bad = i => { const u = { ...fields, at: fields.at + i }; return { ...u, sig: signRecord(ids[0].key, u) } }
+  for (let i = 0; i < 5; i++) n.merge([bad(i)])
+  assert.equal(n.forged.size, 5)
+  n.forged = new Set(Array.from({ length: 20_000 }, (_, i) => String(i)))
+  n.merge([bad(9)])
+  assert.ok(n.forged.size <= 20_000)
 })
 
 test('snapshot: a roster with one loads back the same, and a machine can join from it', () => {

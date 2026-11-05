@@ -645,28 +645,41 @@ try {
     r.add(IDS.m, 'gone.test', gone.cert)
     r.remove(IDS.m, gone.fp)
     for (const n of ['m', 'n', 'h']) { fs.rmSync(path.join(ROOT, n), { recursive: true, force: true }); home(n, { peers: ['m', 'n', 'h'].filter(x => x !== n).map(x => `${x}.test`) }, r) }
+    const newcomer = newIdentity()              // joins while h is off
+    r.add(IDS.m, 'y.test', newcomer.cert)
+    home('m', { peers: ['n.test', 'h.test'] }, r)
     await startNode('m'); await startNode('n')
     assert.match(cliFails('n', 'compact', '--yes'), /only the founding machine can do this: m\.test/)
     const preview = cli('m', 'compact')
-    assert.match(preview, /would keep these machines: m\.test, n\.test, h\.test, x\.test/)
+    assert.match(preview, /would keep these machines: m\.test, n\.test, h\.test, x\.test, y\.test/)
     assert.match(preview, /Not reachable just now.*h\.test/)
     assert.match(preview, /--yes/)
     const size = () => JSON.parse(cli('m', 'status')).roster.bytes
     const before = size()
-    assert.equal(JSON.parse(cli('m', 'status')).members.length, 4, 'and a preview changes nothing')
+    assert.equal(JSON.parse(cli('m', 'status')).roster.bytes, before, 'and a preview changes nothing')
     assert.match(cli('m', 'compact', '--yes'), /member list compacted/)
     assert.ok(size() < before)
     // the others hear of it, messages still flow, and a machine that was off catches up
     const records = () => JSON.parse(fs.readFileSync(path.join(ROOT, 'n', 'roster.json'), 'utf8')).records
     await waitFor(() => records().some(x => x.type === 'snapshot'), 8000, 'n to hear of it')
     assert.match(cli('m', 'send', 'someone@n.test', 'after the snapshot'), /stored on n\.test/)
+    // a machine known only from the snapshot can show it to one that hasn't heard, before anything else
+    await stopNode('m'); await stopNode('n')
     await startNode('h')
+    const mine = JSON.parse(fs.readFileSync(path.join(ROOT, 'n', 'roster.json'), 'utf8')).records
+    const asNew = records => memberPost('h', '/v1/hello', { records }, newcomer, r.dks)
+    assert.equal((await asNew([])).status, 403)
+    assert.equal((await asNew(mine.filter(x => x.type === 'snapshot'))).status, 200)
+    await startNode('m'); await startNode('n')
     await waitFor(() => JSON.parse(fs.readFileSync(path.join(ROOT, 'h', 'roster.json'), 'utf8')).records.some(x => x.type === 'snapshot'), 8000, 'h to catch up')
     assert.match(cli('h', 'send', 'someone@n.test', 'from the machine that was off'), /stored on n\.test/)
     // and the node comes back on it after a restart
     await stopNode('m'); await startNode('m')
-    assert.equal(JSON.parse(cli('m', 'status')).members.length, 4)
+    assert.equal(JSON.parse(cli('m', 'status')).members.length, 5)
     assert.match(cli('n', 'send', 'someone@m.test', 'after a restart'), /stored on m\.test/)
+    // a machine that had no add record left is still known as removed
+    cli('m', 'remove', 'x.test')
+    assert.match(cliFails('m', 'send', 'someone@x.test', 'hello?'), /x\.test was removed/)
     for (const n of ['m', 'n', 'h']) await stopNode(n)
     for (const n of ['m', 'n']) fs.rmSync(path.join(ROOT, n), { recursive: true, force: true })
   })

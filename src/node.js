@@ -41,6 +41,7 @@ const PEERS_WAIT_MS = 5000             // `peers` answers by then: a machine tha
 const CLOCK_SLACK_MS = 86400_000       // how far ahead of us a sender's clock can put a message's expiry
 const INVITE_TTL_MS = 24 * 3600_000
 const SEND_WAIT_MS = 10_000            // a send answers by then: it's stored, and clients stop waiting at 15 s
+const COMPACT_WAIT_MS = 100_000        // to catch up before a snapshot: the command waits a little longer
 const MAX_LOG = 10 << 20               // node.log is cut back to its last MB past this
 const LOG_ERRORS_PER_MIN = 10          // failed requests logged: anyone can cause one
 
@@ -458,10 +459,11 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
       if (!cfg.routes[host]) await Promise.all(otherAddrs(host).slice(0, 4).map(addr => probe(host, addr)))
     }
   }
-  let helloing = false
-  async function helloAll() {
-    if (helloing) return
-    helloing = true
+  /** @type {Promise<void> | null} */
+  let helloing = null
+  /** Say hello to everyone: finished when the round in progress, or a new one, is. */
+  const helloAll = () => helloing ??= helloRound().finally(() => { helloing = null })
+  async function helloRound() {
     try {
       // configured names that aren't member names (an IP, a Tailscale name): find out who they are
       for (const pe of cfg.peers) if (!member(pe.host) && !isSelf(pe.host) && !peerRow(pe.host)?.alias_of) await resolveName(pe.host)
@@ -470,7 +472,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
       await Promise.all(Array.from({ length: Math.min(HELLO_CONCURRENCY, hosts.length) }, async () => {
         while (i < hosts.length) await hello(hosts[i++])
       }))
-    } catch (e) { log('hello error', errMsg(e)) } finally { helloing = false }
+    } catch (e) { log('hello error', errMsg(e)) }
   }
 
   // ---------- messages ----------
@@ -503,7 +505,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
   }
   /** Is `host` a machine that was removed, or whose add never counted (it never will)? @param {string} host */
   const removedHost = host => {
-    const fp = [...roster.records].reverse().find(r => r.type === 'add' && r.host === host)?.fp
+    const fp = [...roster.records].reverse().find(r => r.type === 'add' && r.host === host)?.fp ?? [...roster.ranked.values()].reverse().find(m => m.host === host)?.fp
     return !!fp && (roster.removed.has(fp) || roster.dropped.has(fp))
   }
   /**
@@ -905,7 +907,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
   }
 
   const hostOfFp = (/** @type {string} */ fp) => roster.members.get(fp)?.host ||
-    [...roster.records].reverse().find(r => r.type === 'add' && r.fp === fp)?.host || shortFp(fp)
+    roster.ranked.get(fp)?.host || [...roster.records].reverse().find(r => r.type === 'add' && r.fp === fp)?.host || shortFp(fp)
   function members() {
     // in joining order: each machine can remove the ones listed after it
     return [...roster.members.values()].sort((a, b) => a.rank - b.rank).map(m => ({
@@ -1040,7 +1042,12 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
       const [fp = '', sig] = String(req.headers['x-agentlink-auth'] || '').split('.')
       // a machine that has just joined proves it with the records that add it (and those adding
       // whoever added it, if they are new too). Nothing else is taken before the signature checks out.
-      if (p === '/v1/hello' && fp !== me.fp && !roster.members.has(fp)) mergeRoster(joinChain(d.records, fp))
+      if (p === '/v1/hello' && fp !== me.fp && !roster.members.has(fp)) {
+        // it may be in a snapshot we haven't heard of, with no add left to show: one record, and only
+        // the founder can have signed it
+        mergeRoster(Array.isArray(d.records) ? d.records.filter((/** @type {any} */ r) => r?.type === 'snapshot').slice(-1) : [])
+        if (!roster.members.has(fp)) mergeRoster(joinChain(d.records, fp))
+      }
       const pub = fp === me.fp ? myPub : roster.members.get(fp)?.publicKey
       if (pub && checkAuth(pub, 'client', exporterOf(sock), sig)) { clientFp = fp; authed.set(sock, fp) }
     }
@@ -1214,9 +1221,13 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
       }
       case 'POST /local/compact': {
         if (me.fp !== roster.net) throw httpErr(403, `only the founding machine can do this: ${roster.ranked.get(roster.net)?.host ?? 'the first machine on the network'}`)
-        await helloAll()                          // what the others know first: an add we haven't heard of would be lost
+        // what the others know first, from a round begun now: an add we haven't heard of would be lost
+        const catchUp = async () => { await helloing; await helloAll() }
+        /** @type {NodeJS.Timeout | undefined} */
+        let limit
+        await Promise.race([catchUp(), new Promise(res => { limit = setTimeout(res, COMPACT_WAIT_MS) })]).finally(() => clearTimeout(limit))
         const list = [...roster.members.values()].map(m => m.host)
-        const offline = list.filter(h => h !== cfg.host && reach.get(h))
+        const offline = list.filter(h => h !== cfg.host && reach.get(h) !== '')     // or not reached yet
         if (!d.confirm) return reply(res, 200, { members: list, offline, ...rosterStatus() })
         const before = rosterStatus().bytes
         try { roster.compact(me) } catch (e) { throw httpErr(507, `could not compact: ${errMsg(e)}`) }

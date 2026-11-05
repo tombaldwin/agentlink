@@ -13,9 +13,10 @@
 //
 // A removal is final. Timestamps are chosen by the signer, so a removed machine could sign records
 // dated before its removal; instead, a removed machine's records count only if its remover listed
-// them in `seen`. Anything else it signs is void, whatever its date. A removed key is gone for good
-// (re-adding a machine means a new key). The set of records only grows, so merging converges in any
-// order and offline machines catch up on their next hello.
+// them in `seen`. Anything else it signs is void, whatever its date. Between snapshots, a removed key
+// stays removed (re-adding a machine means a new key) and the set of records only grows, so merging
+// converges in any order and offline machines catch up on their next hello. A snapshot replaces all
+// of that with one record: see replay.
 import fs from 'node:fs'
 import crypto from 'node:crypto'
 import { signRecord, verifyRecord, newDiscoveryKey, recId, recKey } from './crypto.js'
@@ -36,7 +37,7 @@ const SEEN_ENTRY = 25                  // what listing one record in `seen` take
 const MAX_FORGED = 20_000              // bad signatures remembered, so a resent one costs nothing
 const MAX_FUTURE_MS = 3600_000     // a record stamped further ahead than this is refused (bad clock)
 const MAX_SEEN = 4000                  // more than a full roster's adds, so no machine can make itself impossible to remove
-const MAX_KEYS = 8                     // discovery keys a snapshot carries (a gate only tries the newest few)
+const MAX_KEYS = 4000                  // discovery keys a snapshot carries: every one still in its grace period, if it can
 const MAX_DROPPED = 50                 // adds that didn't count, kept per removed machine (so their keys stay known as dropped)
 // a replaced discovery key still opens other members' gates for this long, so a machine that was
 // offline during a removal can catch up; after that it needs a new invite
@@ -158,6 +159,12 @@ export class Roster {
     return size <= room
   }
 
+  /** @param {string} key */
+  noteForged(key) {
+    if (this.forged.size >= MAX_FORGED) this.forged.clear()
+    this.forged.add(key)
+  }
+
   /** Did the founder sign this snapshot? It carries the founder's own certificate. @param {RosterRecord} r */
   signedSnapshot(r) {
     try {
@@ -182,8 +189,15 @@ export class Roster {
   /**
    * Add records we were sent (or made). Returns true if the set of records changed.
    * @param {unknown} list @param {{ trustClock?: boolean }} [opts]
+   * @returns {boolean}
    */
   merge(list, { trustClock = false } = {}) {
+    // a snapshot first: what it clears makes room for what came with it
+    const isSnapshot = (/** @type {any} */ r) => r?.type === 'snapshot'
+    if (Array.isArray(list) && list.some(isSnapshot) && !list.every(isSnapshot)) {
+      const a = this.merge(list.filter(isSnapshot), { trustClock })
+      return this.merge(list.filter(r => !isSnapshot(r)), { trustClock }) || a
+    }
     let added = false
     const before = this.ids
     let bytes = trustClock ? 0 : Buffer.byteLength(JSON.stringify(this.records))
@@ -195,13 +209,15 @@ export class Roster {
       if (!wellFormed(r) || this.ids.has(recId(r)) || this.forged.has(recKey(r))) continue
       if (!trustClock && r.at > Date.now() + MAX_FUTURE_MS) continue
       // what a snapshot has already settled, sent by a machine that hasn't heard of it yet
-      if (this.snapshot && r.type !== 'remove' && r.at <= this.snapshot.at) continue
+      const held = this.snapshot
+      if (held && r.type === 'add' && r.at <= held.at) continue
+      if (held && r.type === 'snapshot' && (r.at < held.at || (r.at === held.at && recId(r) < recId(held)))) continue
       const o = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (r))
       const clean = /** @type {RosterRecord} */ (/** @type {unknown} */ (Object.fromEntries(['type', 'host', 'fp', 'cert', 'at', 'by', 'dk', 'seen', 'list', 'keys', 'sig'].filter(k => o[k] !== undefined).map(k => [k, o[k]]))))
       const size = Buffer.byteLength(JSON.stringify(clean))
       if (clean.type === 'snapshot') {
         // it's what makes room, so it always gets in, and only the founder's can
-        if (!this.signedSnapshot(clean)) { this.forged.add(recKey(clean)); continue }
+        if (!this.signedSnapshot(clean)) { this.noteForged(recKey(clean)); continue }
       } else if (!trustClock && bytes + size > MAX_ROSTER_BYTES) {
         if (over.has(clean.fp) || !this.mustTake(clean, size, () => adds ??= this.addsBySigner())) continue
         over.add(clean.fp)
@@ -232,14 +248,15 @@ export class Roster {
    *
    * Records are kept if they could ever count: everything signed by current members, and what
    * counts of what removed machines signed. Anything else can never count, whatever arrives later
-   * (removals only accumulate), so every node reaches the same result.
+   * (since the last snapshot, removals only accumulate), so every node reaches the same result.
    *
    * A snapshot replaces all of that history. The founder's newest one is where replay starts: its
    * members hold their places in joining order, and its keys are the discovery keys so far. After it:
    * - An add counts only if it's dated later. So a removed machine can't come back on an old add,
    *   and an add the founder hadn't heard of needs a new invite.
-   * - A removal counts whatever its date, if its signer is in the snapshot and joined before its
-   *   target. So a removal made at the same moment as the snapshot isn't lost.
+   * - A removal of a machine in the snapshot counts whatever its date, if its signer is in it too and
+   *   joined first. So a removal made at the same moment as the snapshot isn't lost. A removal dated
+   *   before it says nothing about a machine added after it: that key was forgotten and let back in.
    * - Nothing else from before it counts, so it's dropped, and the roster shrinks.
    */
   replay() {
@@ -252,11 +269,7 @@ export class Roster {
     const ok = (pub, r) => {
       const k = recKey(r)
       if (this.verified.has(k)) return true
-      if (!verifyRecord(pub, r)) {
-        if (this.forged.size >= MAX_FORGED) this.forged.clear()
-        this.forged.add(k)
-        return false
-      }
+      if (!verifyRecord(pub, r)) { this.noteForged(k); return false }
       this.verified.add(k)
       return true
     }
@@ -280,6 +293,9 @@ export class Roster {
     const snapshot = [...this.records].reverse().find(r => r.type === 'snapshot' && snapshotAdds(r).every(parse)) ?? null
     const since = snapshot?.at ?? -1
     const base = snapshot ? snapshotAdds(snapshot) : []
+    const inBase = new Set(base.map(r => r.fp))
+    /** Has this removal been overtaken by a snapshot that forgot its target? @param {RosterRecord} r */
+    const stale = r => r.type === 'remove' && r.at <= since && !inBase.has(r.fp)
 
     /** @type {Map<string, RosterRecord[]>} target fp -> remove records naming it */
     const removesOf = new Map()
@@ -301,7 +317,7 @@ export class Roster {
       // one removal per signer counts: its earliest (so signing more can't change the outcome)
       if (m) for (const r of removesOf.get(fp) || []) {
         const s = ranked.get(r.by)
-        if (s && s.rank < m.rank && !signers.has(r.by) && ok(s.publicKey, r)) { stand.push(r); signers.add(r.by) }
+        if (s && s.rank < m.rank && !stale(r) && !signers.has(r.by) && ok(s.publicKey, r)) { stand.push(r); signers.add(r.by) }
       }
       const st = stand.length
         ? { removed: /** @type {const} */ (true), at: stand[0].at, by: stand[0].by, seen: stand.map(r => new Set(r.seen ?? [])) }
@@ -376,7 +392,7 @@ export class Roster {
     const once = (/** @type {RosterRecord} */ r) => { const id = recId(r); if (copies.has(id)) return false; copies.add(id); return true }
     const kept = this.records.filter(r => {
       if (r.type === 'snapshot') return r === snapshot && once(r)
-      if (r.type === 'add' && r.at <= since) return false
+      if ((r.type === 'add' && r.at <= since) || stale(r)) return false
       const s = ranked.get(r.by)
       if (!s || !ok(s.publicKey, r) || !once(r)) return false
       if (r.type === 'add') {
@@ -396,7 +412,7 @@ export class Roster {
         return true
       }
       // a machine it can't remove stays that way; one we haven't heard of yet may turn out otherwise
-      return !t && members.has(r.by) && r.at > since
+      return !t && members.has(r.by)
     })
 
     /** @type {string[]} */
@@ -411,7 +427,7 @@ export class Roster {
       // (This is the only check of which removals may bring in a key, whatever the checks above imply.)
       if (r.type === 'add' ? r.by === r.fp && r.fp === this.net : !!target && status(r.fp).removed && signer.rank < target.rank) {
         dks.push(r.dk)
-        dkAt.push(r.at)
+        dkAt.push(Math.max(r.at, since))         // it replaced the snapshot's key no earlier than the snapshot
       }
     }
     this.parsed = new Map([...base, ...kept.filter(r => r.type === 'add')].map(r => [recKey(r), this.parsed.get(recKey(r)) ?? null]))

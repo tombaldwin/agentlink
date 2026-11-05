@@ -72,10 +72,10 @@ export class Local {
    * @param {object} [obj]
    * @returns {Promise<any>}
    */
-  async req(method, p, obj, query = '') {
+  async req(method, p, obj, query = '', timeout = 15_000) {
     let r
     try {
-      r = await authedRequest(this.opts({ method, path: p + query, body: obj === undefined ? '' : JSON.stringify(obj), timeout: 15_000 }), MAX_LOCAL_REPLY)
+      r = await authedRequest(this.opts({ method, path: p + query, body: obj === undefined ? '' : JSON.stringify(obj), timeout }), MAX_LOCAL_REPLY)
     } catch (e) { throw this.wrap(e) }
     /** @type {any} */
     let data = {}

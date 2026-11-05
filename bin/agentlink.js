@@ -128,12 +128,14 @@ async function main() {
     }
     case 'compact': {
       if (pos.length) throw new Error('usage: agentlink compact [--yes]')
-      const r = await (await client()).req('POST', '/local/compact', { confirm: !!flags.yes })
-      if (flags.yes) return console.log(`member list compacted: ${r.before} bytes to ${r.bytes}. Members: ${r.members.join(', ')}`)
+      const r = await (await client()).req('POST', '/local/compact', { confirm: !!flags.yes }, '', 150_000)
+      const off = r.offline.length ? [`Not reachable just now, so anything they've heard of is unknown here: ${r.offline.join(', ')}`] : []
+      if (flags.yes) return console.log([`member list compacted: ${r.before} bytes to ${r.bytes}. Members: ${r.members.join(', ')}`, ...off].join('\n'))
       return console.log([
         `A snapshot would keep these machines: ${r.members.join(', ')}`,
-        ...(r.offline.length ? [`Not reachable just now, so anything they've heard of is unknown here: ${r.offline.join(', ')}`] : []),
+        ...off,
         `The member list is ${r.bytes} bytes (limit ${r.limit}). A machine added that isn't listed above will need a new invite, and removed machines are forgotten.`,
+        'A removal this machine has not heard of can be undone by this, if the machine that made it is removed too: check any machine you removed from elsewhere is gone from the list above.',
         'Run `agentlink compact --yes` to go ahead.',
       ].join('\n'))
     }
