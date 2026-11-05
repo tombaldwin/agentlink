@@ -294,6 +294,26 @@ test('roster: only the founder and standing removals bring in a discovery key', 
   assert.deepEqual(r.gateDks(), [dk])
 })
 
+test('roster: a member can\'t stay on by filling a node with removals of keys no one has heard of', () => {
+  const A = newIdentity(), M = newIdentity(), N = newIdentity()
+  const r = Roster.genesis(A, 'a.local')
+  r.add(A, 'n.local', N.cert); r.add(A, 'm.local', M.cert)
+  const copy = () => new Roster({ net: r.net, records: structuredClone(r.records) })
+  const atA = copy(), atN = copy()
+  const sign = x => ({ ...x, sig: signRecord(M.key, x) })
+  const ids = n => Array.from({ length: n }, () => crypto.randomBytes(16).toString('base64url').slice(0, 22))
+  const at = r.nextAt()
+  for (let i = 0; Buffer.byteLength(JSON.stringify(atN.records)) < (1 << 20) - 100_000 && i < 20; i++) atN.merge([sign({ type: 'remove', fp: crypto.randomBytes(32).toString('base64'), at: at + i, by: M.fp, dk: newDiscoveryKey(), seen: ids(3700) })])
+  atN.merge([sign({ type: 'remove', fp: crypto.randomBytes(32).toString('base64'), at: at + 50, by: M.fp, dk: newDiscoveryKey(), seen: ids(Math.floor(((1 << 20) - Buffer.byteLength(JSON.stringify(atN.records)) - 330) / 25)) })])
+  // machines only A hears of, so A's removal lists more than a full node would otherwise make room for
+  const made = Array.from({ length: 100 }, (_, i) => { const x = newIdentity(); return sign({ type: 'add', host: `p${i}.local`, fp: x.fp, cert: certDer(x.cert), at: at + 100 + i, by: M.fp }) })
+  atA.merge(made)
+  assert.equal(atN.merge(made), false, 'the node is full')
+  atA.remove(A, M.fp)
+  atN.merge(atA.records)
+  assert.ok(!atN.members.has(M.fp))
+})
+
 test('roster: a malformed discovery key is refused', () => {
   const f = newIdentity(), m = newIdentity(), r = Roster.genesis(f, 'f.local')
   r.add(f, 'm.local', m.cert)

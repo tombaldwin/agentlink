@@ -107,9 +107,10 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
       (id,from_addr,to_addr,to_host,to_name,body,sent_at,expires_at,sig,role,state,next_attempt,updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`),
     get: db.prepare(`SELECT * FROM messages WHERE id=?`),
-    // what's due for these names, the oldest first; for one name; and the names nothing has identified,
-    // those tried least first, so a crowd of made-up names can't keep a real one waiting
-    due: db.prepare(`SELECT id,to_host,role,attempts,replicated FROM messages WHERE state='pending' AND next_attempt<=? AND expires_at>? AND to_host IN (SELECT value FROM json_each(?)) ORDER BY sent_at LIMIT 2000`),
+    // the names with something due, those tried least first, so a backlog for a machine that's off
+    // can't keep the others waiting; what's due for one name, the oldest first; and the names nothing
+    // has identified, the same way, so a crowd of made-up names can't keep a real one waiting
+    due: db.prepare(`SELECT to_host FROM messages WHERE state='pending' AND next_attempt<=? AND expires_at>? AND to_host IN (SELECT value FROM json_each(?)) GROUP BY to_host ORDER BY MIN(attempts)`),
     dueFor: db.prepare(`SELECT id,to_host,role,attempts,replicated FROM messages WHERE state='pending' AND next_attempt<=? AND expires_at>? AND to_host=? ORDER BY sent_at LIMIT 2000`),
     dueNames: db.prepare(`SELECT to_host FROM messages WHERE state='pending' AND next_attempt<=? AND expires_at>? AND to_host NOT IN (SELECT value FROM json_each(?)) GROUP BY to_host ORDER BY MIN(attempts) LIMIT ?`),
     // handed over: the text has no more use here, and shouldn't sit on a holder until the message expires
@@ -130,6 +131,9 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     expire: db.prepare(`UPDATE messages SET state='expired', updated_at=? WHERE state IN ('pending','queued') AND expires_at<=?`),
     gc: db.prepare(`DELETE FROM messages WHERE expires_at < ?`),
     counts: db.prepare(`SELECT role, state, count(*) n FROM messages GROUP BY role, state`),
+    waiting: db.prepare(`SELECT count(*) n FROM messages WHERE to_host=? AND to_name=? AND state IN ('pending','queued')`),
+    // pages in use: what's been freed is used again before the file grows
+    stored: db.prepare(`SELECT (p.page_count - f.freelist_count) * s.page_size n FROM pragma_page_count p, pragma_freelist_count f, pragma_page_size s`),
     upsertPeer: db.prepare(`INSERT INTO peers(host,addr,last_seen,configured) VALUES(?,?,?,?)
       ON CONFLICT(host) DO UPDATE SET last_seen=excluded.last_seen,
         addr=COALESCE(excluded.addr, peers.addr), configured=MAX(peers.configured, excluded.configured)`),
@@ -516,7 +520,18 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
   }
 
   /**
+   * Is there no room for another message to this session? Whatever sends too much, a script gone wrong
+   * or agents stuck in a loop, is held back at the sender, and everything else keeps moving. The limit
+   * on the store as a whole is for what no one recipient's limit sees: any number of made-up names, or
+   * messages read as fast as they come. Nothing is lost by this: the sender keeps trying until the
+   * message expires, and a session here is told at once.
+   * @param {string} host @param {string} name
+   */
+  const full = (host, name) => Number(q.waiting.get(host, name)?.n) >= cfg.maxWaiting || Number(q.stored.get()?.n) >= cfg.maxStoreBytes
+
+  /**
    * Store an incoming envelope durably. Returns 'live' | 'queued' | 'held' | 'expired' |
+   * 'full' (not stored: no room for now, and the sender should retry) |
    * 'unknown-sender' (not stored: the sender should tell us its membership records, then retry) |
    * null (rejected: the envelope itself is bad, and the sender must not retry it). Storage errors (disk full,
    * database busy) throw, so callers can report a temporary failure and the sender retries.
@@ -543,6 +558,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     }
     if (env.expires_at <= now()) return 'expired'
     if (isSelf(to.host) || (mine && mine === parseAddr(env.from, '').host && !member(to.host) && !removedHost(to.host))) {
+      if (full(cfg.host, to.name) && !msgRow(env.id)) return 'full'
       if (!store(env, cfg.host, to.name, 'inbox', 'queued')) return null
       q.claim.run(cfg.host, to.name, now(), env.id)
       const s = sessions.get(to.name)
@@ -551,6 +567,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
       else pump(to.name)
       return live ? 'live' : 'queued'
     }
+    if (full(to.host, to.name) && !msgRow(env.id)) return 'full'
     if (!store(env, to.host, to.name, 'held', 'pending')) return null
     kick()
     return 'held'
@@ -626,12 +643,14 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
         const res = await call(host, 'POST', '/v1/deliver', { messages: batch.map(envOf), mine: batch.filter(r => r.role === 'outbox' && r.to_host !== host).map(r => r.id) })
         const results = res.results || {}
         const unknown = new Set(Array.isArray(res.unknown) ? res.unknown : [])
+        const noRoom = new Set(Array.isArray(res.full) ? res.full : [])
         let tell = false
         tx(() => {
           for (const r of batch) {
             if (results[r.id]) q.forwarded.run(now(), r.id)
             // it hasn't heard of the sending machine yet: tell it what we know, then try again later
             else if (unknown.has(r.id)) { q.retry.run(now() + backoff(r.attempts), `${host} doesn't know the sender yet`, now(), r.id); tell ||= r.attempts < 3 }
+            else if (noRoom.has(r.id)) q.retry.run(now() + backoff(r.attempts), `no room on ${host} for now`, now(), r.id)
             else q.failed.run(`rejected by ${host} (invalid or malformed message)`, now(), r.id)
           }
         })
@@ -665,7 +684,9 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
   /** @type {Set<string>} names being delivered to now: a machine that's slow to answer holds up only itself */
   const busy = new Set()
   let delivering = 0, lookingUp = 0
-  const kick = () => setImmediate(flush)
+  let kicked = false
+  /** Flush soon: once, however many messages came in together. */
+  const kick = () => { if (!kicked) { kicked = true; setImmediate(() => { kicked = false; flush() }) } }
 
   function flush() {
     try {
@@ -673,15 +694,11 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
       q.expire.run(t, t)
       // every name we can put a machine to
       const known = [cfg.host, ...selfAliases, ...knownPeers(), ...allPeers().filter(p => member(p.alias_of || '')).map(p => p.host)]
-      /** @type {Map<string, DueRow[]>} */
-      const byHost = new Map()
-      for (const r of dueRows(q.due.all(t, t, JSON.stringify(known.filter(h => !busy.has(h)))))) {
-        if (inFlight.has(r.id)) continue
-        if (!byHost.has(r.to_host)) byHost.set(r.to_host, [])
-        byHost.get(r.to_host)?.push(r)
-      }
-      for (const [host, rows] of byHost) {
+      for (const row of q.due.all(t, t, JSON.stringify(known.filter(h => !busy.has(h))))) {
         if (delivering >= FLUSH_HOSTS) break
+        const host = String(row.to_host)
+        const rows = dueRows(q.dueFor.all(t, t, host)).filter(r => !inFlight.has(r.id))
+        if (!rows.length) continue
         delivering++
         busy.add(host)
         deliver(host, rows).catch(e => log('flush error', errMsg(e))).finally(() => { busy.delete(host); delivering-- })
@@ -793,6 +810,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
       const known = [cfg.host, ...knownPeers()].join(', ')
       throw httpErr(404, `${to.host} is not a machine on this network, and nothing at that name answered as one (machines: ${known}). If it is new, run \`agentlink invite\` and join it first.`)
     }
+    if (full(to.host, to.name)) throw fullError(`${to.name}@${to.host}`)
     /** @type {Omit<Envelope, 'sig'>} */
     const unsigned = {
       id: crypto.randomUUID(),
@@ -809,13 +827,14 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
       try { st = accept(e) } catch (err) { throw httpErr(503, `could not queue message: ${errMsg(err)}`) }
       if (st === 'unknown-sender') throw httpErr(409, `this machine (${cfg.host}) isn't on its member list, so nothing was sent: run \`agentlink setup\``)
       if (st === 'expired') throw httpErr(400, 'the message expired before it could be queued')
+      if (st === 'full') throw fullError(e.to)
       if (!st) throw httpErr(500, 'could not queue message')
       return { id: e.id, to: e.to, status: `${d.to !== e.to && String(d.to).includes('@') ? `${parseAddr(d.to, cfg.host).host} is this machine — ` : ''}${localStatus(to.name, st === 'live')}` }
     }
     // hidden from the flush loop while we try the direct hand-off, so it isn't sent twice
     inFlight.add(e.id)
     q.insert.run(e.id, e.from, e.to, to.host, to.name, e.body, e.sent_at, e.expires_at, e.sig, 'outbox', 'pending', now() + IN_FLIGHT_MS, now())
-    let remote = null, copies = false
+    let remote = null, copies = false, refused = false
     try {
       if (!member(to.host)) throw new Error(notMember(to.host))
       /** @type {NodeJS.Timeout | undefined} */
@@ -827,6 +846,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
       remote = res.results?.[e.id]
       if (remote) q.forwarded.run(now(), e.id)
       else if (Array.isArray(res.unknown) && res.unknown.includes(e.id)) throw new Error(`${to.host} doesn't know this machine yet`)
+      else if (Array.isArray(res.full) && res.full.includes(e.id)) { refused = true; q.retry.run(now() + backoff(0), `no room on ${to.host} for now`, now(), e.id) }
       else q.failed.run(`rejected by ${to.host} (invalid or malformed message)`, now(), e.id)
     } catch (err) {
       q.retry.run(now() + backoff(0), errMsg(err), now(), e.id)
@@ -841,9 +861,12 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     if (r.role === 'inbox') status = `${to.host} is this machine — ${localStatus(to.name)}`
     else if (r.state === 'forwarded') status = remote === 'live' ? `pushed to ${e.to}'s live session` : `stored on ${to.host}; ${to.name} will get it when it next connects or checks its inbox`
     else if (r.state === 'failed') status = `FAILED: ${r.last_error}`
+    else if (refused) status = `${to.host} has no room for more messages to ${to.name} for now; queued here — will deliver once it has`
     else status = `${to.host} unreachable (${r.last_error}); queued — will deliver when it comes back` + (copies ? ' (also offering copies to other online machines)' : '')
     return { id: e.id, to: e.to, status }
   }
+  /** @param {string} to */
+  const fullError = to => httpErr(429, `not sent: too many messages are waiting for ${to}, or this machine's message store is full. Try again once they've been read`)
   /** @param {string} name @param {boolean} [live] it was just told (its wait, having woken it, is over) */
   function localStatus(name, live) {
     const s = sessions.get(name)
@@ -1040,6 +1063,8 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
         const results = {}
         /** @type {string[]} */
         const unknown = []
+        /** @type {string[]} */
+        const noRoom = []
         /** @type {Set<string>} */
         const toPump = new Set()    // offer each local recipient its new messages once, not per envelope
         const mine = new Set(Array.isArray(d.mine) ? d.mine.slice(0, 2000) : [])
@@ -1048,6 +1073,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
             for (const e of Array.isArray(d.messages) ? d.messages.slice(0, 2000) : []) {
               const st = accept(e, toPump, mine.has(e?.id) ? peer.host : undefined)
               if (st === 'unknown-sender') unknown.push(e.id)
+              else if (st === 'full') noRoom.push(e.id)
               else if (st) results[e.id] = st
             }
           })
@@ -1058,7 +1084,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
           throw httpErr(503, 'temporarily unable to store messages; retry later')
         }
         for (const n of toPump) pump(n)
-        return reply(res, 200, { results, unknown })
+        return reply(res, 200, { results, unknown, full: noRoom })
       }
       case 'POST /v1/hello': {
         if (peer.fp !== me.fp) {

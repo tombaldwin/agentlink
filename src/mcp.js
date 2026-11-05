@@ -129,6 +129,7 @@ export async function runAdapter(cfg, { name, poll = false, channel } = {}) {
         await local.stream(myName, token, async (ev, d) => {
           if (ev === 'hello') {
             myName = d.name; address = d.address; delay = 500
+            more = false                  // a new stream: it says so again if it still has more
             firstHello(d)
           } else if (ev === 'message') {
             await onMessage(d).catch(e => log('deliver failed:', errMsg(e)))

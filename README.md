@@ -63,7 +63,10 @@ your laptop in the same way.
 - **Nothing gets lost.** Messages are stored on disk at every hop and retried. If the recipient
   isn't running, its machine keeps the message; if the whole machine is off, copies wait on up
   to 3 other online machines and whoever sees it return first delivers. Duplicates are dropped.
-  Messages expire after 7 days.
+  Messages expire after 7 days. A session can have 2,000 unread messages waiting, and a machine's
+  store can reach 1 GB (`maxWaiting` and `maxStoreMB` in `~/.agentlink/config.json`). Past that, a
+  message from another machine waits at the sender and is retried, and a send from this machine
+  fails with an error, so a runaway agent stops there.
 - **Zero-config discovery.** Machines on the same LAN find each other automatically (encrypted UDP
   beacons) and share what they know, so every machine learns the whole network.
 - **Multiple Claude accounts.** Every `CLAUDE_CONFIG_DIR` account setup can find is enabled
@@ -74,6 +77,9 @@ your laptop in the same way.
   again at its other addresses, within a couple of minutes.
 - **Other agents.** Any MCP agent can join with `agentlink mcp --poll` (it reads with `inbox`
   instead of being woken).
+- **Channels and managed accounts.** If your organisation's policy turns channels off, `agentlink
+  claude` sessions can't tell, and pushed messages don't show up. Set `AGENTLINK_POLL=1` so they're
+  read with `inbox` instead.
 
 Name a session with `AGENTLINK_NAME=<name> claude` (default: the project folder name).
 

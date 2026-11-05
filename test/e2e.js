@@ -522,6 +522,116 @@ try {
     await waitFor(() => bob.got.some(g => g.content === 'still flowing'), 5000, 'delivery after poison')
   })
 
+  // m and n share a small network of their own, with limits low enough to reach
+  const SMALL = Roster.genesis(IDS.m, 'm.test')
+  SMALL.add(IDS.m, 'n.test', IDS.n.cert)
+  SMALL.add(IDS.m, 't.test', TESTER.cert)
+  const copyOf = r => new Roster({ net: r.net, records: r.records })
+  const smallPost = (p, obj, as) => memberPost('m', p, obj, as, SMALL.dks)
+
+  await step('a session\'s queue has a limit: a flood waits at the sender, and nothing else is held up', async () => {
+    home('m', { peers: [], maxWaiting: 3 }, SMALL)
+    home('n', { peers: ['m.test'], maxWaiting: 2 }, SMALL)
+    await startNode('m'); await startNode('n')
+    const msgs = Array.from({ length: 5 }, (_, i) => envelope('flooded@m.test', `flood ${i}`))
+    let r = await smallPost('/v1/deliver', { messages: msgs })
+    assert.deepEqual(Object.keys(r.data.results), msgs.slice(0, 3).map(m => m.id))
+    assert.deepEqual(r.data.full, msgs.slice(3).map(m => m.id))
+    r = await smallPost('/v1/deliver', { messages: [msgs[0]] })
+    assert.ok(r.data.results[msgs[0].id], 'a copy of what it already has is still fine')
+    const other = envelope('quiet@m.test', 'for someone else')
+    assert.ok((await smallPost('/v1/deliver', { messages: [other] })).data.results[other.id], 'another session is unaffected')
+    assert.match(cliFails('m', 'send', 'flooded@m.test', 'one more'), /too many messages are waiting/)
+    // copies held for another machine count the same way
+    const held = Array.from({ length: 4 }, (_, i) => envelope('x@elsewhere.test', `held ${i}`))
+    assert.equal((await smallPost('/v1/deliver', { messages: held })).data.full.length, 1)
+
+    // from another machine: what doesn't fit waits there and arrives once there's room
+    const out = [0, 1, 2, 3, 4].map(i => cli('n', 'send', 'reader@m.test', `waited ${i}`))
+    assert.ok(out.slice(0, 3).every(o => /stored on m\.test/.test(o)), out.join('\n'))
+    assert.ok(out.slice(3).every(o => /no room for more messages to reader/.test(o)), out.join('\n'))
+    assert.match(cliFails('n', 'send', 'reader@m.test', 'too many'), /too many messages are waiting/)
+    const s = await adapter('m', 'reader', true)
+    const seen = new Set()
+    await waitFor(async () => {
+      for (const m of (await s.call('inbox')).matchAll(/waited (\d)/g)) seen.add(m[1])
+      return seen.size === 5
+    }, 40000, 'all five to arrive')
+    await s.close()
+  })
+
+  await step('a store past its limit takes nothing more, and says so', async () => {
+    await stopNode('m')
+    home('m', { peers: [], maxStoreMB: 0.001 }, SMALL)
+    await startNode('m')
+    const e = envelope('anyone@m.test', 'no room')
+    assert.deepEqual((await smallPost('/v1/deliver', { messages: [e] })).data.full, [e.id])
+    assert.match(cliFails('m', 'send', 'anyone@m.test', 'no room'), /message store is full/)
+  })
+
+  await step('a new machine gets in on the records that add it, and only those', async () => {
+    await stopNode('m')
+    home('m', { peers: [] }, SMALL)
+    await startNode('m')
+    const hello = (as, records) => smallPost('/v1/hello', { records }, as)
+    // t.test added c1, c1 added c2, and so on: m has heard of none of them
+    const r = copyOf(SMALL), ids = []
+    let by = TESTER
+    for (let i = 0; i < 5; i++) { const id = newIdentity(); r.add(by, `c${i}.test`, id.cert); ids.push(id); by = id }
+    assert.equal((await hello(ids[4], r.records)).status, 403, 'a chain longer than the limit')
+    assert.equal((await hello(ids[3], r.records)).status, 200, 'one within it')
+    assert.equal((await hello(ids[4], r.records)).status, 200, 'and the next, now that it joins a member')
+    // a key that signs itself in, or a chain from someone who isn't a member
+    const outsider = newIdentity(), lone = Roster.genesis(outsider, 'lone.test'), friend = newIdentity()
+    lone.add(outsider, 'friend.test', friend.cert)
+    assert.equal((await hello(outsider, lone.records)).status, 403)
+    assert.equal((await hello(friend, lone.records)).status, 403)
+    // a chain through a removed machine counts for nothing, even if it was added first
+    const gone = newIdentity(), late = newIdentity()
+    const before = copyOf(SMALL)
+    before.add(TESTER, 'gone.test', gone.cert)
+    assert.equal((await hello(gone, before.records)).status, 200)
+    const add = copyOf(before)
+    add.add(gone, 'late.test', late.cert)
+    const removal = copyOf(before).remove(IDS.m, gone.fp)
+    assert.equal((await smallPost('/v1/hello', { records: [...before.records, removal] }, TESTER)).status, 200)
+    await waitFor(() => !JSON.parse(cli('m', 'status')).members.some(x => x.host === 'gone.test'), 5000, 'the removal')
+    assert.equal((await hello(late, add.records)).status, 403)
+    await stopNode('m'); await stopNode('n')
+  })
+
+  await step('beacons under a discovery key past its grace period are ignored', async () => {
+    const wasNow = Date.now
+    Date.now = () => wasNow() - 20 * 86400_000       // the removal that replaced the key was 20 days ago
+    const r = Roster.genesis(IDS.n, 'n.test')
+    r.add(IDS.n, 'b.test', IDS.b.cert)
+    r.add(IDS.n, 'x.test', newIdentity().cert)
+    r.remove(IDS.n, [...r.members.values()].find(x => x.host === 'x.test').fp)
+    Date.now = wasNow
+    assert.equal(r.dks.length, 2)
+    const [old, current] = r.dks
+    home('n', { discovery: true, discoveryPort: 17788, peers: [], routes: {} }, r)
+    await startNode('n')
+    const dgram = await import('node:dgram')
+    let tried = 0
+    const probed = net.createServer(c => { tried++; c.destroy() })
+    await new Promise(res => probed.listen(0, '127.0.0.1', res))
+    const port = probed.address().port
+    const send = async dk => {
+      const s = dgram.createSocket('udp4')
+      await new Promise(res => s.send(sealBeacon(dk, { host: 'b.test', fp: IDS.b.fp, port, ts: Date.now(), reply: true }), 17788, '127.0.0.1', res))
+      s.close()
+    }
+    await send(old)
+    await sleep(1500)
+    assert.equal(tried, 0, 'the old key opened nothing')
+    await send(current)
+    await waitFor(() => tried > 0, 5000, 'the current key to work')
+    probed.close()
+    await stopNode('n')
+    for (const n of ['m', 'n']) fs.rmSync(path.join(ROOT, n), { recursive: true, force: true })     // later steps start these afresh
+  })
+
   await step('a large batch for a live session does not freeze the node', async () => {
     await ensureNode('b')
     const msgs = Array.from({ length: 2000 }, (_, i) => envelope('bob@b.test', `batch ${i}`))

@@ -21,6 +21,8 @@ export interface Config {
   discoveryPort?: number
   discovery: boolean
   ttlMs: number
+  maxWaiting: number
+  maxStoreBytes: number
   autoAliases: boolean
 }
 
@@ -109,7 +111,7 @@ export interface Member {
 }
 
 /** What accept() did with an incoming envelope; null means rejected as invalid. */
-export type AcceptResult = 'live' | 'queued' | 'held' | 'expired' | 'unknown-sender' | null
+export type AcceptResult = 'live' | 'queued' | 'held' | 'expired' | 'full' | 'unknown-sender' | null
 
 /** Health reply from a node's /health endpoint. */
 export interface Health { ok: boolean; host: string; net: string; fp: string; version: string; proto?: number; pid: number }
@@ -128,6 +130,8 @@ export interface ConfigFile {
   discoveryPort?: number
   discovery?: boolean
   ttlDays?: number
+  maxWaiting?: number
+  maxStoreMB?: number
 }
 
 /** A message pushed to a session over the local stream. */

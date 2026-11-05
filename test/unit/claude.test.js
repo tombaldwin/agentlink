@@ -69,7 +69,13 @@ test('re-running setup from a normal shell keeps the PATH line', () => {
   fs.writeFileSync(rc, saved)
 })
 
-test('isRegistered reads the account config file', () => {
+test('isRegistered reads the account config file', t => {
+  // a Claude Code that can run the hook, whether or not this machine has one
+  const bin = path.join(HOME, 'stub-bin'), PATH0 = process.env.PATH
+  fs.mkdirSync(bin, { recursive: true })
+  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\necho "2.1.318 (Claude Code)"\n', { mode: 0o755 })
+  process.env.PATH = `${bin}:${PATH0}`
+  t.after(() => { process.env.PATH = PATH0 })
   assert.equal(c.isRegistered(''), false)
   fs.writeFileSync(path.join(HOME, '.claude.json'), JSON.stringify({ mcpServers: { agentlink: { command: c.adapterCmd()[0], args: c.adapterCmd().slice(1) } } }))
   assert.equal(c.isRegistered(''), false, 'the adapter without the hook is half a setup')

@@ -210,6 +210,8 @@ export function loadConfig() {
     discovery: process.env.AGENTLINK_DISCOVERY ? process.env.AGENTLINK_DISCOVERY !== '0' : file.discovery !== false,
     ttlMs: Math.min(Number(file.ttlDays) > 0 ? Number(file.ttlDays) * 86400_000 : 7 * 86400_000, MAX_TTL_MS),
     autoAliases,
+    maxWaiting: Number(file.maxWaiting) > 0 ? Number(file.maxWaiting) : 2000,      // unread messages for one session
+    maxStoreBytes: (Number(file.maxStoreMB) > 0 ? Number(file.maxStoreMB) : 1024) * 2 ** 20,
   }
 }
 

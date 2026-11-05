@@ -27,9 +27,9 @@ import { normHost, machineName, writeAtomic } from './config.js'
 // own file, so nothing already held is lost, or to a removal that must get in (see mustTake), so a
 // full roster can always be cleaned up. There is at most one of those per machine, of at most
 // MAX_TAKEN, plus a list entry for each machine its target added, plus what it clears. A machine's add
-// takes at least about 500 bytes, so that's some 2000 machines at the very most, each with one adder,
-// and what's cleared is at most what was held: 1 MB + 2000 * 2 KB + 2000 * 25 B + 1 MB is about
-// 6 MB, whatever a member signs.
+// takes at least about 400 bytes, so that's some 2600 machines at the very most, each with one adder,
+// and what's cleared is at most what was held: 1 MB + 2600 * 2 KB + 2600 * 25 B + 1 MB is about
+// 7 MB, whatever a member signs.
 const MAX_ROSTER_BYTES = 1 << 20
 const MAX_TAKEN = 2 << 10              // a removal listing no one, with room for some 70 adds not held here
 const SEEN_ENTRY = 25                  // what listing one record in `seen` takes
@@ -129,7 +129,7 @@ export class Roster {
    * (the target's adds it doesn't list stop counting). So a list padded with made-up ids gets nothing
    * for them, and a member can't stop its own removal by filling one node with adds no one else has.
    * @param {RosterRecord} r @param {number} size its size in bytes
-   * @param {() => Map<string, { id: string, size: number, made: boolean }[]>} adds what each machine has added
+   * @param {() => Map<string, { id: string, size: number, made: boolean }[]>} adds what each machine has signed that its removal would list or clear
    */
   mustTake(r, size, adds) {
     const s = this.ranked.get(r.by), t = this.ranked.get(r.fp)
@@ -140,12 +140,13 @@ export class Roster {
     return size <= room
   }
 
-  /** The adds held, by who signed them. */
+  /** What a machine's removal would list or clear, by who signed it. */
   addsBySigner() {
     /** @type {Map<string, { id: string, size: number, made: boolean }[]>} */
     const out = new Map()
     for (const r of this.records) {
-      if (r.type !== 'add') continue
+      // a removal of a key no one has heard of goes when its signer does, so it counts as much as an add
+      if (r.type !== 'add' && this.ranked.has(r.fp)) continue
       if (!out.has(r.by)) out.set(r.by, [])
       out.get(r.by)?.push({ id: recId(r), size: Buffer.byteLength(JSON.stringify(r)), made: this.ranked.get(r.fp)?.by === r.by })
     }
@@ -380,7 +381,7 @@ export class Roster {
     const r = { type: 'add', host, fp: fingerprint(pem), cert: certDer(pem), at: this.nextAt(), by: me.fp }
     const rec = { ...r, sig: signRecord(me.key, r) }
     this.merge([rec])
-    if (!this.ids.has(recId(rec))) throw new Error('the network has reached its size limit: remove a machine that is flooding it, or start a new network')
+    if (!this.ids.has(recId(rec))) throw new Error('the network has reached its size limit: remove a machine that is flooding it. If that leaves no room, start a new network (agentlink setup --new-network)')
     return rec
   }
 

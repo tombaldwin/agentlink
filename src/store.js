@@ -27,6 +27,7 @@ export function openStore(file) {
     CREATE INDEX IF NOT EXISTS ix_due ON messages(state, next_attempt);
     CREATE INDEX IF NOT EXISTS ix_inbox ON messages(role, to_name, state);
     CREATE INDEX IF NOT EXISTS ix_expiry ON messages(state, expires_at);
+    CREATE INDEX IF NOT EXISTS ix_waiting ON messages(to_host, to_name) WHERE state IN ('pending','queued');
     CREATE TABLE IF NOT EXISTS peers(
       host TEXT PRIMARY KEY, addr TEXT, last_seen INTEGER NOT NULL, configured INTEGER NOT NULL DEFAULT 0,
       alias_of TEXT);

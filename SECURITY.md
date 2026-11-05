@@ -86,8 +86,11 @@ the same membership from the same records.
   `agentlink status` lists machines in joining order and shows which member added each one:
   remove any you don't recognise, or start a new network with `agentlink setup --new-network`
   and re-join your machines. One thing it won't show: a member can sign a second key under its own
-  name. That key never becomes a member, and it's dropped when the member is removed. Nothing limits
-  how much a member can queue for a session here, beyond messages expiring: it can use up disk space.
+  name. That key never becomes a member, and it's dropped when the member is removed.
+- **A member can fill a machine's message store.** A session can have 2,000 messages waiting, but a
+  member can write to made-up names, or to a session reading as fast as they arrive. A store stops at
+  1 GB, so the disk is safe, but then that machine takes no new messages from anyone until old ones
+  expire, even after the member is removed. Messages sent to it wait at their senders until then.
 - **A member can undo a removal made by a machine that joined after it.** It signs a backdated add of
   the removed key, dated before the remover joined, so that the remover no longer ranks above it, and
   the machine is back under its old key. A removal by a machine that joined before that member stands.
@@ -111,7 +114,9 @@ the same membership from the same records.
   the gate as above, for that long.
 - **A member can flood the roster.** Until you remove it, a compromised member can fill the roster
   so that no new machine can join, and machines may disagree about the last records to arrive.
-  Removing it clears what it signed, apart from machines it really added and removals it made. While
+  Removing it clears what it signed, apart from machines it really added and its removals of machines
+  that had joined. Those stay for good, and a member that padded them can leave a roster with no room
+  even once it's gone: then no machine can join, and the only way out is a new network. While
   a roster is full, two kinds of removal wait until there's room, so machines can disagree until
   then: a second removal of a machine already removed, and one listing dozens of machines a full node
   has never heard of, if what fills that node was signed by someone else. Remove that machine first.

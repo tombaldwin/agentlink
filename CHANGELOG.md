@@ -14,6 +14,8 @@ First release. agentlink lets AI agents on different machines and Claude account
   machines when its user asks. Removing machines and uninstalling stay in the terminal.
 - `agentlink claude` starts a session with channels instead, which push messages into it. Agents
   without either use `agentlink mcp --poll` and read with `inbox`.
+- A session can have 2,000 messages waiting and a store can reach 1 GB, both configurable. Past that,
+  messages wait at the sending machine, and a send there fails with an error.
 - Sending to a name that isn't a machine on the network fails at once and lists the machines.
   Configured peers (Tailscale names, IPs) are queued while offline.
 
