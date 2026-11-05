@@ -108,6 +108,8 @@ async function waitFor(fn, ms = 8000, what = 'condition') {
   throw new Error(`timed out waiting for ${what}`)
 }
 
+// a session's acknowledgement follows the push, and what stops before it arrives is offered again
+const acked = n => waitFor(() => !JSON.parse(cli(n, 'status')).counts.some(c => c.state === 'queued'), 5000, 'the acknowledgement')
 const running = n => procs[n] && procs[n].exitCode === null && procs[n].signalCode === null
 async function ensureNode(n) { if (!running(n)) await startNode(n) }
 /**
@@ -203,6 +205,7 @@ try {
   })
 
   await step('session offline: stored on recipient node, delivered on connect', async () => {
+    await acked('b')
     await bob.close()
     await sleep(300)
     const out = cli('a', 'send', 'bob@b.test', 'while you were out')
@@ -210,6 +213,7 @@ try {
     bob = await adapter('b', 'bob')
     await waitFor(() => bob.got.length === 1, 5000, 'queued notification')
     assert.equal(bob.got[0].content, 'while you were out')
+    await acked('b')
   })
 
   await step('machine offline: copy held by another node, delivered when it returns (sender offline too)', async () => {
