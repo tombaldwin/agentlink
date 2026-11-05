@@ -6,6 +6,7 @@ import { sealBeacon, openBeacon } from './crypto.js'
 
 const EVERY = 30_000
 const MAX_SKEW = 5 * 60_000
+const MAX_KEYS_TRIED = 64              // anyone can send a packet; a machine on an older key is found other ways
 
 function broadcastAddrs() {
   const out = new Set(['255.255.255.255'])
@@ -42,7 +43,7 @@ export function startDiscovery(cfg, keys, onPeer, log) {
     if (msg) for (const a of broadcastAddrs()) sock.send(msg, port, a, () => {})
   }
   sock.on('message', (buf, rinfo) => {
-    const b = openBeacon(keys(), buf)
+    const b = openBeacon(keys().slice(-MAX_KEYS_TRIED), buf)
     if (!b || typeof b.host !== 'string' || typeof b.fp !== 'string' || b.fp === cfg.identity.fp) return
     if (!Number.isFinite(b.ts) || Math.abs(Date.now() - b.ts) > MAX_SKEW) return
     if (!Number.isInteger(b.port) || b.port <= 0 || b.port >= 65536) return

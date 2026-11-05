@@ -515,6 +515,21 @@ test('snapshot: a key forgotten and let back in isn\'t caught by a removal from 
   assert.ok(!r.records.includes(removal))
 })
 
+test('snapshot: a removal it set aside stays set aside at the next one', () => {
+  const { F, ids, r, copy } = snapshotNet()
+  const held = copy()
+  const removal = r.remove(ids[0], ids[2].fp)      // a machine that slept through what follows still has this
+  held.merge([removal])
+  r.compact(F)
+  r.add(ids[1], 'm2.local', ids[2].cert)
+  r.compact(F)
+  r.merge(held.records)
+  assert.ok(r.members.has(ids[2].fp))
+  assert.notEqual(r.dk, removal.dk)
+  held.merge(r.records)
+  assert.deepEqual(view(held), view(r))
+})
+
 test('snapshot: two with the same date settle the same way, whichever arrives first', () => {
   const { F, r, copy } = snapshotNet()
   const at = r.nextAt()

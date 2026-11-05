@@ -255,8 +255,9 @@ export class Roster {
    * - An add counts only if it's dated later. So a removed machine can't come back on an old add,
    *   and an add the founder hadn't heard of needs a new invite.
    * - A removal of a machine in the snapshot counts whatever its date, if its signer is in it too and
-   *   joined first. So a removal made at the same moment as the snapshot isn't lost. A removal dated
-   *   before it says nothing about a machine added after it: that key was forgotten and let back in.
+   *   joined first, and it's dated after that machine's add. So a removal made at the same moment
+   *   as the snapshot isn't lost, and one from before a forgotten key was let back in says nothing
+   *   about the machine there now, at this snapshot or any later one.
    * - Nothing else from before it counts, so it's dropped, and the roster shrinks.
    */
   replay() {
@@ -293,9 +294,17 @@ export class Roster {
     const snapshot = [...this.records].reverse().find(r => r.type === 'snapshot' && snapshotAdds(r).every(parse)) ?? null
     const since = snapshot?.at ?? -1
     const base = snapshot ? snapshotAdds(snapshot) : []
-    const inBase = new Set(base.map(r => r.fp))
-    /** Has this removal been overtaken by a snapshot that forgot its target? @param {RosterRecord} r */
-    const stale = r => r.type === 'remove' && r.at <= since && !inBase.has(r.fp)
+    const addedAt = new Map(base.map(r => [r.fp, r.at]))
+    /**
+     * Is this removal about a key a snapshot forgot, rather than the machine there now? An honest
+     * removal is dated after the add it answers, as its signer held that add.
+     * @param {RosterRecord} r
+     */
+    const stale = r => {
+      if (r.type !== 'remove' || r.at > since) return false
+      const added = addedAt.get(r.fp)
+      return added === undefined || r.at < added
+    }
 
     /** @type {Map<string, RosterRecord[]>} target fp -> remove records naming it */
     const removesOf = new Map()

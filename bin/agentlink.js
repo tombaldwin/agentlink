@@ -8,7 +8,7 @@ const [cmd, ...rest] = process.argv.slice(2)
 // Only these are flags; anything else (a message that happens to start with "--") is an argument,
 // and "--" ends the flags.
 const VALUE_FLAGS = ['name', 'from', 'host', 'peer', 'join', 'pin', 'net', 'token']
-const BOOL_FLAGS = ['yes', 'no-service', 'no-claude', 'no-alias', 'new-network', 'poll', 'channel', 'on-demand', 'revoke', 'list', 'check']
+const BOOL_FLAGS = ['yes', 'force', 'no-service', 'no-claude', 'no-alias', 'new-network', 'poll', 'channel', 'on-demand', 'revoke', 'list', 'check']
 /** @type {Record<string, any>} */
 const flags = {}
 /** @type {string[]} */
@@ -44,6 +44,7 @@ const HELP = `agentlink ${VERSION} — wake-on-message networking for AI agents
                                 (--list: show unused ones; --revoke: cancel them)
   agentlink remove <host>       remove a machine from the network (it can no longer send or receive)
   agentlink compact [--yes]     on the founding machine: shrink the member list to current members
+                                (--force: go ahead even if machines couldn't be checked in time)
   agentlink uninstall           remove service and Claude Code registration
 
   agentlink node                run the node (normally run by the background service)
@@ -128,12 +129,13 @@ async function main() {
     }
     case 'compact': {
       if (pos.length) throw new Error('usage: agentlink compact [--yes]')
-      const r = await (await client()).req('POST', '/local/compact', { confirm: !!flags.yes }, '', 150_000)
+      const r = await (await client()).req('POST', '/local/compact', { confirm: !!flags.yes, force: !!flags.force }, '', 150_000)
       const off = r.offline.length ? [`Not reachable just now, so anything they've heard of is unknown here: ${r.offline.join(', ')}`] : []
       if (flags.yes) return console.log([`member list compacted: ${r.before} bytes to ${r.bytes}. Members: ${r.members.join(', ')}`, ...off].join('\n'))
       return console.log([
         `A snapshot would keep these machines: ${r.members.join(', ')}`,
         ...off,
+        ...(r.caughtUp ? [] : ['Not every machine could be checked in time: run this again before going ahead.']),
         `The member list is ${r.bytes} bytes (limit ${r.limit}). A machine added that isn't listed above will need a new invite, and removed machines are forgotten.`,
         'A removal this machine has not heard of can be undone by this, if the machine that made it is removed too: check any machine you removed from elsewhere is gone from the list above.',
         'Run `agentlink compact --yes` to go ahead.',

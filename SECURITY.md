@@ -43,8 +43,8 @@ the same membership from the same records.
   in joining order, with the discovery keys still in use and a new one. Any machine can check it
   against the network's ID, and it replaces all the records before it. After a snapshot, an add dated
   before it counts for nothing, nor does anything signed by a machine that isn't in it. A removal
-  between two machines in it still counts, whatever its date, so a removal made at the same moment
-  isn't lost.
+  between two machines in it still counts if it's dated after that machine was added, so a removal
+  made at the same moment isn't lost, and one from before a machine was let back in doesn't apply.
 - **A removed machine can't add machines.** A removal lists the removed machine's records the
   remover had. Machines it added stay if every remover had seen the add. An add the remover hadn't
   seen doesn't count, whatever date it carries, and that machine needs a new invite. Every member

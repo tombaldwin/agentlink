@@ -70,7 +70,7 @@ export function sealBeacon(dk, obj) {
 /** @param {string[]} dks keys to try @param {Buffer} buf @returns {any} the beacon, or null */
 export function openBeacon(dks, buf) {
   if (buf.length < 29 || buf.length > 2048) return null
-  for (const dk of dks) {
+  for (const dk of [...dks].reverse()) {      // the current key is the one nearly every beacon uses
     try {
       const d = crypto.createDecipheriv('aes-256-gcm', Buffer.from(dk, 'base64'), buf.subarray(0, 12))
       d.setAuthTag(buf.subarray(buf.length - 16))

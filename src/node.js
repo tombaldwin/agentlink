@@ -500,14 +500,20 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     if (e.from !== `${from.name}@${from.host}` || e.to !== `${to.name}@${to.host}`) return 'bad'
     const host = from.host
     const sender = roster.byHost.get(host)
-    if (!sender) return removedHost(host) ? 'bad' : 'unknown-sender'
+    if (!sender) {
+      const gone = removedKey(host), key = gone && roster.ranked.get(gone)?.publicKey
+      // signed by another key, it may be that name's machine back with a new one we haven't heard of
+      return gone && (!key || verifyEnvelope(key, e)) ? 'bad' : 'unknown-sender'
+    }
     return verifyEnvelope(sender.publicKey, e) ? 'ok' : 'bad'
   }
-  /** Is `host` a machine that was removed, or whose add never counted (it never will)? @param {string} host */
-  const removedHost = host => {
+  /** The key of a machine called `host` that was removed, or whose add never counted (it never will). @param {string} host */
+  const removedKey = host => {
     const fp = [...roster.records].reverse().find(r => r.type === 'add' && r.host === host)?.fp ?? [...roster.ranked.values()].reverse().find(m => m.host === host)?.fp
-    return !!fp && (roster.removed.has(fp) || roster.dropped.has(fp))
+    return fp && (roster.removed.has(fp) || roster.dropped.has(fp)) ? fp : null
   }
+  /** @param {string} host */
+  const removedHost = host => removedKey(host) !== null
   /**
    * Store a row unless one with that id exists. An existing id is only fine for the same message:
    * a different message reusing an id someone has seen is refused, not reported as delivered. (The
@@ -881,11 +887,14 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
 
   /** @type {Map<string, string>} host -> why it was last unreachable ('' once reached) */
   const reach = new Map()
+  /** @type {Map<string, number>} host -> when it last answered */
+  const reachedAt = new Map()
   /**
    * Log when a machine becomes unreachable, or reachable again (not every attempt).
    * @param {string} host @param {string | null} reason null: reached
    */
   function noteReach(host, reason) {
+    if (reason === null) reachedAt.set(host, now())
     const prev = reach.get(host)
     if (reason === null) {
       if (prev) log(`${host} is reachable again`)
@@ -1222,13 +1231,16 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
       case 'POST /local/compact': {
         if (me.fp !== roster.net) throw httpErr(403, `only the founding machine can do this: ${roster.ranked.get(roster.net)?.host ?? 'the first machine on the network'}`)
         // what the others know first, from a round begun now: an add we haven't heard of would be lost
-        const catchUp = async () => { await helloing; await helloAll() }
+        const asked = now()
+        const catchUp = async () => { await helloing; await helloAll(); return true }
         /** @type {NodeJS.Timeout | undefined} */
         let limit
-        await Promise.race([catchUp(), new Promise(res => { limit = setTimeout(res, COMPACT_WAIT_MS) })]).finally(() => clearTimeout(limit))
+        const caughtUp = await Promise.race([catchUp(), new Promise(res => { limit = setTimeout(() => res(false), COMPACT_WAIT_MS) })]).finally(() => clearTimeout(limit))
         const list = [...roster.members.values()].map(m => m.host)
-        const offline = list.filter(h => h !== cfg.host && reach.get(h) !== '')     // or not reached yet
-        if (!d.confirm) return reply(res, 200, { members: list, offline, ...rosterStatus() })
+        const offline = list.filter(h => h !== cfg.host && !(Number(reachedAt.get(h)) >= asked))
+        if (!d.confirm) return reply(res, 200, { members: list, offline, caughtUp, ...rosterStatus() })
+        if (req.socket.destroyed) return                       // the command was interrupted: that's a no
+        if (!caughtUp && !d.force) throw httpErr(504, `not every machine could be checked in time, so nothing was changed. Not reached: ${offline.join(', ')}. Run it again, or add --force to go ahead without them`)
         const before = rosterStatus().bytes
         try { roster.compact(me) } catch (e) { throw httpErr(507, `could not compact: ${errMsg(e)}`) }
         roster.save()
