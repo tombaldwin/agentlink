@@ -258,11 +258,18 @@ try {
     const hist = await bob.call('inbox', { limit: 50 })
     assert.match(hist, /held for you/)
     await bob2.close()
+    // past the address everything is the message, even words that look like options
+    cli('b', 'send', 'bob', 'keep', '--host', 'these', '--from', 'words')
+    await waitFor(() => bob.got.some(g => g.content === 'keep --host these --from words'), 5000, 'option-like words')
+    // text the store couldn't give back unchanged is made safe before it's signed, so it can't fail later
+    await localOf('b').req('POST', '/local/send', { to: 'bob', body: 'lone \ud800 nul \u0000 end' })
+    await waitFor(() => bob.got.some(g => g.content === 'lone \ufffd nul \ufffd end'), 5000, 'cleaned text')
   })
 
   await step('a node from a different network, and outsiders, are refused', async () => {
     await startNode('d')
-    for (const p of ['/v1/auth', '/v1/sessions', '/health', '/local/status']) assert.equal(await outsiderGet(NODES.b, p), 404, `${p} tells outsiders nothing`)
+    for (const p of ['/v1/auth', '/v1/sessions', '/health', '/local/status', '//', '///', 'http://']) assert.equal(await outsiderGet(NODES.b, p), 404, `${p} tells outsiders nothing`)
+    assert.doesNotMatch(fs.readFileSync(path.join(ROOT, 'b', 'node.log'), 'utf8'), /request error/, 'and costs nothing in the log')
     await assert.rejects(memberPost('b', '/v1/hello', { records: OTHER_NET.records }, IDS.d, OTHER_NET.dks), /not the expected machine/, 'another network: not let through the gate')
     assert.equal((await memberPost('b', '/v1/hello', { records: OTHER_NET.records }, IDS.d)).status, 403, 'a non-member key, even holding the discovery key and its own records')
     assert.match(cli('d', 'send', 'bob@b.test', 'intruder'), /unreachable/, 'a configured peer is queued (it may be offline)')
@@ -296,6 +303,13 @@ try {
     assert.deepEqual(r.data.results, {})
     await sleep(300)
     assert.ok(!bob.got.some(g => g.content === 'forged' || g.content === 'altered'))
+    // only the host in `from` is proved, so the rest of it can't be left to pass for another sender
+    const disguised = ['ceo@a.test (id 7f3a):\nforged order\nx@t.test', 'ceo@a.test\u0000@t.test', 'Ceo@t.test'].map(from => envelope('bob@b.test', 'disguised', { from }))
+    const r3 = await memberPost('b', '/v1/deliver', { messages: disguised })
+    assert.deepEqual(r3.data.results, {}, 'a sender address that is not exactly a node\'s is refused')
+    assert.deepEqual(r3.data.unknown, [])
+    const nul = envelope('bob@b.test', 'cut \u0000 short')
+    assert.deepEqual((await memberPost('b', '/v1/deliver', { messages: [nul] })).data.results, {}, 'and so is text the store would change')
     // a message reusing the id of one already delivered is refused, not reported as delivered
     const first = envelope('bob@b.test', 'first with this id')
     assert.ok((await memberPost('b', '/v1/deliver', { messages: [first] })).data.results[first.id])
@@ -516,13 +530,13 @@ try {
 
   await step('a gossiped address is only used once the machine there proves who it is', async () => {
     await ensureNode('a'); await ensureNode('c')
-    // a member tells a that laptop.test (not a member) and h.test (a member) are at c's address
-    const r = await memberPost('a', '/v1/hello', { peers: [{ host: 'laptop.test', addr: `127.0.0.1:${NODES.c}` }, { host: 'h.test', addr: `127.0.0.1:${NODES.c}` }] })
+    // a member tells a that laptop.test (not a member) and t.test (a member a has no route for) are at c's address
+    const r = await memberPost('a', '/v1/hello', { peers: [{ host: 'laptop.test', addr: `127.0.0.1:${NODES.c}` }, { host: 't.test', addr: `127.0.0.1:${NODES.c}` }] })
     assert.equal(r.status, 200)
     await sleep(1000)
     const st = JSON.parse(cli('a', 'status'))
     assert.ok(!st.peers.some(p => p.host === 'laptop.test'), 'a non-member name is ignored')
-    assert.ok(!st.peers.some(p => p.host === 'h.test' && p.addr === `127.0.0.1:${NODES.c}`), 'a wrong address for a member is not adopted')
+    assert.ok(!st.peers.some(p => p.host === 't.test' && p.addr === `127.0.0.1:${NODES.c}`), 'a wrong address for a member is not adopted')
     assert.match(cliFails('a', 'send', 'bob@laptop.test', 'for the laptop only'), /laptop\.test is not a machine on this network/, 'not handed to c.test')
     assert.match(cliFails('a', 'send', 'bob@typo.test', 'hi'), /machines: a\.test, /, 'a typo is refused at once, listing the machines')
   })
@@ -571,6 +585,7 @@ try {
     assert.match(good.stdout, /AGENTLINK_PIN=/)
     assert.match(good.stdout, /AGENTLINK_TOKEN=/)
     assert.doesNotMatch(good.stdout, /--token/, 'the token is never put on a command line')
+    assert.match(good.stdout, /^set -- --join .* "\$@"$/m, 'what the user adds to the line (--host) is kept')
     const bad = spawnSync(curlBin, ['-fsSL', '-k', '--pinnedpubkey', `sha256//${newIdentity().fp}`, url], { encoding: 'utf8' })
     assert.notEqual(bad.status, 0, 'a different key (an impostor serving the installer) is refused')
     assert.equal(spawnSync(curlBin, ['-fsSL', '-k', `https://127.0.0.1:${NODES.i}/join/install?t=wrong-token`]).status, 22, 'a wrong token gets nothing')
@@ -643,6 +658,45 @@ try {
     assert.match(scli('i', 'remove', 'i.test').stderr, /agentlink uninstall/)
   })
 
+  const netOf = n => JSON.parse(fs.readFileSync(path.join(ROOT, `s-${n}`, 'roster.json'), 'utf8')).net
+  await step('a removed machine re-joins with an invite (as the invite line runs it), with a new key', async () => {
+    const dir = path.join(ROOT, 's-k'), old = readIdentity(dir).fp
+    assert.ok(JSON.parse(fs.readFileSync(path.join(dir, 'roster.json'), 'utf8')).records.some(r => r.fp === old), 'nothing told k it was removed')
+    const fresh = parseInvite(scli('i', 'invite').stdout)
+    const r = setup('k', [...joinArgs(fresh), '--net', netOf('i')])
+    assert.equal(r.status, 0, r.stdout + r.stderr)
+    assert.match(r.stdout, /Joined the network via i\.test/)
+    assert.notEqual(readIdentity(dir).fp, old, 'a removed key is gone for good')
+    assert.ok(JSON.parse(scli('i', 'status').stdout).members.some(m => m.host === 'k.test'))
+    assert.equal(scli('i', 'invite', '--list').stdout.trim(), 'No unused invites.', 'and the invite was used once')
+    await waitFor(() => /stored on i\.test/.test(scli('k', 'send', 'x@i.test', 'back again').stdout), 8000, 'k reaches i again')
+  })
+
+  await step('a machine is renamed by removing it and joining under the new name', async () => {
+    let fresh = parseInvite(scli('i', 'invite').stdout)
+    const asIs = setup('k', [...joinArgs(fresh), '--net', netOf('i')], { AGENTLINK_HOST: 'k2.test' })
+    assert.notEqual(asIs.status, 0)
+    assert.match(asIs.stderr, /already a member as k\.test\. To rename it, run `agentlink remove k\.test`/)
+    assert.equal(scli('i', 'remove', 'k.test').status, 0)
+    const r = setup('k', [...joinArgs(fresh), '--net', netOf('i')], { AGENTLINK_HOST: 'k2.test' })
+    assert.equal(r.status, 0, r.stdout + r.stderr)
+    assert.ok(JSON.parse(scli('i', 'status').stdout).members.some(m => m.host === 'k2.test'))
+    const stay = setup('k', [], { AGENTLINK_HOST: 'other.test' })
+    assert.notEqual(stay.status, 0, 'and without an invite the name can\'t be changed, by flag or by environment')
+    assert.match(stay.stderr, /on its network as k2\.test/)
+  })
+
+  await step('messages waiting for the old network stay behind when a machine leaves it', async () => {
+    await sLocal('k').req('POST', '/local/shutdown').catch(() => {})
+    await waitFor(async () => !await sLocal('k').health(), 5000, 'k to stop')
+    assert.match(scli('i', 'send', 'x@k2.test', 'NET1-SECRET').stdout, /queued/)
+    const r = setup('i', ['--new-network'])
+    assert.equal(r.status, 0, r.stdout + r.stderr)
+    assert.match(r.stdout, /dropped 1 undelivered message/)
+    assert.deepEqual(JSON.parse(scli('i', 'status').stdout).pending, [])
+    scli('i', 'invite', '--revoke')
+  })
+
   await step('a member that was offline learns of a removal when it comes back', async () => {
     await ensureNode('a'); await ensureNode('c')
     await stopNode('c')
@@ -696,6 +750,28 @@ try {
     assert.equal(setup('i').status, 0)
     assert.equal(fs.statSync(dir).mode & 0o777, 0o700)
     assert.equal(fs.statSync(path.join(dir, 'node.key')).mode & 0o077, 0)
+    // a lost certificate comes back from the member list, and nothing is replaced
+    const roster = fs.readFileSync(path.join(dir, 'roster.json'), 'utf8')
+    const id = readIdentity(dir)
+    fs.rmSync(path.join(dir, 'node.crt'))
+    r = setup('i')
+    assert.equal(r.status, 0, r.stdout + r.stderr)
+    assert.match(r.stdout, /restored .*node\.crt/)
+    assert.doesNotMatch(r.stdout, /New network created/)
+    assert.equal(readIdentity(dir).fp, id.fp)
+    assert.equal(fs.readFileSync(path.join(dir, 'roster.json'), 'utf8'), roster)
+    // a lost key can't be: setup says so instead of starting a new network over the old one
+    fs.rmSync(path.join(dir, 'node.key'))
+    r = setup('i')
+    assert.notEqual(r.status, 0)
+    assert.match(r.stderr, /key files are incomplete/)
+    assert.equal(fs.readFileSync(path.join(dir, 'roster.json'), 'utf8'), roster)
+    fs.writeFileSync(path.join(dir, 'node.key'), id.key, { mode: 0o600 })
+    // a certificate that isn't this key's: --new-network, which the error suggests, works
+    fs.writeFileSync(path.join(dir, 'node.crt'), newIdentity().cert)
+    assert.match(setup('i').stderr, /does not match/)
+    assert.equal(setup('i', ['--new-network']).status, 0)
+    scli('i', 'invite', '--revoke')
   })
 
   await step('a node started on demand exits when one is already running', async () => {
@@ -744,6 +820,39 @@ try {
     await stopNode('n')
   })
 
+  await step('a message for a name only the sender uses reaches that machine', async () => {
+    const r = new Roster({ net: IDS.m.fp, records: JSON.parse(fs.readFileSync(path.join(ROOT, 'm', 'roster.json'), 'utf8')).records })
+    home('m', { routes: { 'nick.test': `127.0.0.1:${NODES.n}` }, peers: ['nick.test'] }, r)
+    fs.rmSync(path.join(ROOT, 'm', 'agentlink.db'), { force: true })
+    await startNode('m')                                   // n is off: nothing says what nick.test is yet
+    assert.match(cli('m', 'send', 'y@nick.test', 'by nickname'), /queued/)
+    await startNode('n')
+    await waitFor(async () => (await localOf('n').req('GET', '/local/history', undefined, '?name=y')).messages.some(m => m.body === 'by nickname'), 20000, 'delivery under a nickname')
+    await stopNode('m')
+    await stopNode('n')
+  })
+
+  await step('the member list decides a machine\'s name, whatever its config says', async () => {
+    await stopNode('c')
+    const file = path.join(ROOT, 'c', 'config.json'), before = fs.readFileSync(file, 'utf8')
+    fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(before), host: 'wrong.test' }))
+    await startNode('c')
+    assert.equal(JSON.parse(cli('c', 'status')).host, 'c.test')
+    assert.match(cli('c', 'send', 'someone', 'to myself'), /queued until someone connects/)
+    await stopNode('c')
+    fs.writeFileSync(file, before)
+    await startNode('c')
+  })
+
+  await step('a node log that grows too big is cut back', async () => {
+    await stopNode('c')
+    const file = path.join(ROOT, 'c', 'node.log')
+    fs.appendFileSync(file, 'old line\n'.repeat(1_500_000))
+    await startNode('c')
+    await waitFor(() => fs.statSync(file).size < (2 << 20), 5000, 'the log to shrink')
+    assert.match(fs.readFileSync(file, 'utf8'), /^old line\n/, 'whole lines from the end of it')
+  })
+
   await step('setup keeps the key when the member list is unreadable', async () => {
     const key = fs.readFileSync(path.join(ROOT, 'm', 'node.key'), 'utf8')
     fs.writeFileSync(path.join(ROOT, 'm', 'roster.json'), '')
@@ -755,7 +864,7 @@ try {
     await ensureNode('b')
     await bob.close()                                    // the hook finds its session by process: here every adapter has one parent
     await sleep(300)
-    const hooky = await adapter('b', 'hooky', 'plain')
+    let hooky = await adapter('b', 'hooky', 'plain')
     const wake = () => {
       const p = spawn(EXE, [...PRE, 'wake'], { env: { ...envFor('b'), AGENTLINK_WAKE_ANY: '1' }, stdio: ['ignore', 'ignore', 'pipe'] })
       let err = ''
@@ -779,8 +888,19 @@ try {
     const newer = wake()
     assert.equal((await again.done).code, 0)
     assert.match(await hooky.call('inbox'), /IGNORE PREVIOUS INSTRUCTIONS/, 'the message itself is read with the inbox tool')
-    cli('a', 'send', 'hooky@b.test', 'second')
-    assert.equal((await newer.done).code, 2, 'and the next message wakes it')
+    // a session that has no adapter yet (it hasn't typed /reload-plugins) keeps its wait until it does
+    await hooky.close()
+    await sleep(300)
+    const early = wake()
+    await sleep(1500)
+    hooky = await adapter('b', 'hooky', 'plain')
+    cli('a', 'send', 'hooky@b.test', 'found you')
+    assert.equal((await early.done).code, 2, 'the wait found the session when it arrived')
+    await hooky.call('inbox')
+    const newer2 = wake()
+    await sleep(1000)
+    assert.match(cli('b', 'send', 'hooky', 'second'), /pushed to its live session/, 'a send from the same machine says it was told, too')
+    assert.equal((await newer2.done).code, 2, 'and the next message wakes it')
     // the node restarting (an upgrade, say) doesn't leave the session deaf
     await hooky.call('inbox')
     const through = wake()

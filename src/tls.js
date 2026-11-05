@@ -39,6 +39,10 @@ export class ProtoError extends Error {
  * a stranger. Bump it on any incompatible change.
  */
 export const PROTO = 1
+/** The largest request or response between machines. A roster always fits (see roster.js). */
+export const MAX_BODY = 4 << 20
+/** The slowest link we wait for, in bytes per ms (about 200 kbit/s). */
+export const MIN_RATE = 25
 const notExpected = () => new PinError('not the expected machine (key mismatch)')
 
 /** A connection's TLS exporter: the value both identity proofs sign. @param {tls.TLSSocket} sock */
@@ -89,7 +93,11 @@ export async function authedRaw(o) {
   const { host, port } = splitAddr(o.addr)
   // one connection for both steps; no SNI: it would show the machine's name to anyone watching
   const agent = new https.Agent({ keepAlive: true, maxSockets: 1, rejectUnauthorized: false, minVersion: 'TLSv1.3' })
-  const base = { host, port, agent, servername: '', signal: o.signal }
+  const base = { host, port, agent, servername: '' }
+  // The first step answers to anyone at the address, who has proved nothing yet. The timeout below only
+  // notices silence, so someone sending a byte now and then would otherwise hold this open for good.
+  const first = new AbortController()
+  const limit = setTimeout(() => first.abort(), 2 * (o.timeout || 4000))
   try {
     // 1. the gate: show we belong to the network; the server answers with its signed identity
     /** @type {tls.TLSSocket | null} */
@@ -97,7 +105,8 @@ export async function authedRaw(o) {
     const r1 = await new Promise((resolve, reject) => {
       // the timeout option, not req.setTimeout: that one only starts once the connection is up, so a
       // silently dropped connect would wait out the OS's limit (over a minute)
-      const req = https.request({ ...base, method: 'GET', path: '/v1/auth', headers: { 'x-agentlink-proto': String(PROTO) }, timeout: o.timeout || 4000 }, resolve)
+      const signal = o.signal ? AbortSignal.any([o.signal, first.signal]) : first.signal
+      const req = https.request({ ...base, signal, method: 'GET', path: '/v1/auth', headers: { 'x-agentlink-proto': String(PROTO) }, timeout: o.timeout || 4000 }, resolve)
       req.on('timeout', () => req.destroy(new Error('timed out')))
       req.on('error', e => reject(mapErr(e)))
       req.on('socket', s => {
@@ -119,13 +128,14 @@ export async function authedRaw(o) {
     const key = r1.statusCode === 200 && typeof who?.fp === 'string' ? o.accept.get(who.fp) : undefined
     if (!key || !checkAuth(key, 'server', ekm, who.sig)) throw notExpected()
     const peerFp = String(who.fp)
+    clearTimeout(limit)
 
     // 2. the request, carrying our own signed identity, on the same connection only
     const body = o.body ?? ''
     const proof = `${o.identity.fp}.${proveAuth(o.identity.key, 'client', ekm)}`
     const res = await new Promise((resolve, reject) => {
       const req = https.request({
-        ...base, method: o.method || 'GET', path: o.path,
+        ...base, signal: o.signal, method: o.method || 'GET', path: o.path,
         headers: { ...(body ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } : {}), ...o.headers, 'x-agentlink-auth': proof },
       }, resolve)
       req.setTimeout(o.timeout ?? 4000, () => req.destroy(new Error('timed out')))
@@ -136,8 +146,9 @@ export async function authedRaw(o) {
     res.once('close', () => agent.destroy())
     return { res, peerFp }
   } catch (e) {
+    clearTimeout(limit)
     agent.destroy()
-    throw e
+    throw first.signal.aborted ? new Error('timed out') : e
   }
 }
 
@@ -146,9 +157,16 @@ export async function authedRaw(o) {
  * @param {AuthOpts} o @param {number} [max] largest response body accepted
  * @returns {Promise<{ status: number, text: string, peerFp: string }>}
  */
-export async function authedRequest(o, max = 2 << 20) {
-  const { res, peerFp } = await authedRaw(o)
-  return { status: res.statusCode || 0, text: await readAll(res, max), peerFp }
+export async function authedRequest(o, max = MAX_BODY) {
+  // the whole exchange has an end, however slowly the other side trickles it out
+  const whole = new AbortController()
+  const limit = setTimeout(() => whole.abort(), 3 * (o.timeout || 4000) + max / MIN_RATE)
+  try {
+    const { res, peerFp } = await authedRaw({ ...o, signal: o.signal ? AbortSignal.any([o.signal, whole.signal]) : whole.signal })
+    return { status: res.statusCode || 0, text: await readAll(res, max), peerFp }
+  } catch (e) {
+    throw whole.signal.aborted ? new Error('timed out') : e
+  } finally { clearTimeout(limit) }
 }
 
 /**
@@ -158,7 +176,7 @@ export async function authedRequest(o, max = 2 << 20) {
  * @param {number} [max]
  * @returns {Promise<{ status: number, text: string, peerFp: string }>}
  */
-export async function pinnedRequest(o, max = 2 << 20) {
+export async function pinnedRequest(o, max = MAX_BODY) {
   const { host, port } = splitAddr(o.addr)
   const allowed = new Set(o.trust.map(t => t.fp))
   const body = o.body ?? ''

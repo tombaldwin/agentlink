@@ -9,7 +9,12 @@ import { homeDir, loadConfig } from './config.js'
 import { Local } from './local.js'
 
 const RETRY_MS = 5000
-const GIVE_UP_MS = 60_000      // the node is up but has no session of ours (no adapter, or an old one): nothing to wait for
+const SLOW_RETRY_MS = 30_000
+const SLOW_AFTER_MS = 120_000
+// The node is up but has no session of ours. That's normal for a while: a session that was running
+// when agentlink was installed has no adapter until someone types /reload-plugins, and that fires no
+// hook, so this wait has to still be here when it happens.
+const GIVE_UP_MS = 86400_000
 
 /** This process's ancestors, nearest first: one of them is the Claude session that started us. */
 function ancestors() {
@@ -34,14 +39,27 @@ function findClaude(pids) {
 }
 
 /**
+ * The options at the front of a claude command line as ps prints it. ps loses the quoting, so whatever
+ * follows the first plain word may be a prompt: "mkdir -p src" has a -p in it, and that's not an option.
+ * @param {string} cmdline
+ */
+export function launchFlags(cmdline) {
+  const words = cmdline.trim().split(/\s+/).slice(1)
+  if (/[\\/]claude-code[\\/]/.test(words[0] || '')) words.shift()    // node .../claude-code/cli.js
+  const end = words.findIndex(w => !w.startsWith('-') && !w.startsWith('server:'))
+  return end < 0 ? words : words.slice(0, end)
+}
+
+/**
  * Is this an interactive session? Only those can be woken, and a script must never wait on this
- * hook: a `claude -p` run doesn't finish until its hooks do. When in doubt, the answer is no.
+ * hook: a `claude -p` run doesn't finish until its hooks do. Claude Code says which it is in
+ * CLAUDE_CODE_ENTRYPOINT (sdk-cli for -p, however the options are ordered); the flags are a second check.
  * @param {string} args an ancestor's command line @param {string} tty its terminal, as ps prints it
  * @param {NodeJS.ProcessEnv} [env]
  */
 export function interactive(args, tty, env = process.env) {
   if (/^sdk/.test(env.CLAUDE_CODE_ENTRYPOINT || '')) return false
-  if (/(^|\s)(-p|--print|--input-format|--output-format)(?=$|[\s=])/.test(args)) return false
+  if (launchFlags(args).some(f => /^(-p|--print|--input-format|--output-format)(=|$)/.test(f))) return false
   return !!tty && !/^[?-]+$/.test(tty.trim())
 }
 
@@ -66,11 +84,13 @@ export async function runWake() {
   // one wait per session: each turn starts another, and the newest takes over, even with no node to ask
   const mark = path.join(homeDir(), `wake-${owner}`)
   const me = String(process.pid)
+  sweepMarks()
   try { fs.writeFileSync(mark, me) } catch {}
   const isMine = () => { try { return fs.readFileSync(mark, 'utf8') === me } catch { return true } }
   const finish = (/** @type {number} */ code) => { if (isMine()) fs.rmSync(mark, { force: true }); return code }
   let since = Date.now()
   for (;;) {
+    if (!isMine()) return 0                         // before asking: the newest wait is the one to be told
     /** @type {{ event: string, name?: string, count?: number } | null} */
     let r = null, reached = true
     try { r = await local.wakeWait(mine) } catch { reached = false }
@@ -80,7 +100,19 @@ export async function runWake() {
     try { process.kill(owner, 0) } catch { return finish(0) }    // Claude has gone
     // no node to ask (it may be restarting), or the session was there a moment ago: keep going
     if (!reached || r?.event === 'closed') since = Date.now()
-    if (Date.now() - since > GIVE_UP_MS) return finish(0)
-    await new Promise(res => setTimeout(res, RETRY_MS))
+    const waited = Date.now() - since
+    if (waited > GIVE_UP_MS) return finish(0)
+    await new Promise(res => setTimeout(res, waited > SLOW_AFTER_MS ? SLOW_RETRY_MS : RETRY_MS))
   }
+}
+
+/** A session that ended while waiting leaves its mark behind: clear those of sessions that are gone. */
+function sweepMarks() {
+  try {
+    for (const f of fs.readdirSync(homeDir())) {
+      const pid = Number(f.match(/^wake-(\d+)$/)?.[1])
+      if (!pid) continue
+      try { process.kill(pid, 0) } catch (e) { if (/** @type {any} */ (e).code === 'ESRCH') fs.rmSync(path.join(homeDir(), f), { force: true }) }
+    }
+  } catch {}
 }

@@ -14,6 +14,7 @@ import { Roster } from './roster.js'
 import { selfCmd } from './claude.js'
 
 const sleep = (/** @type {number} */ ms) => new Promise(r => setTimeout(r, ms))
+const MAX_LOCAL_REPLY = 64 << 20   // the most an inbox read can come to: 100 messages of 64 KB, escaped
 
 /**
  * The running node is a newer agentlink than this process: this process (a session's adapter
@@ -81,7 +82,7 @@ export class Local {
   async req(method, p, obj, query = '') {
     let r
     try {
-      r = await authedRequest(this.opts({ method, path: p + query, body: obj === undefined ? '' : JSON.stringify(obj), timeout: 15_000 }))
+      r = await authedRequest(this.opts({ method, path: p + query, body: obj === undefined ? '' : JSON.stringify(obj), timeout: 15_000 }), MAX_LOCAL_REPLY)
     } catch (e) { throw this.wrap(e) }
     /** @type {any} */
     let data = {}

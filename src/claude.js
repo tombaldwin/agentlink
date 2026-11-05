@@ -56,13 +56,15 @@ export function which(cmd) {
   return r.status === 0 ? r.stdout.trim().split('\n')[0] : null
 }
 
-/** The claude executable: on PATH, or Claude Code's per-user "local" install (which the user's
- * shell reaches through an alias, invisible to `which`). */
+/** The claude executable: on PATH, or in one of Claude Code's per-user installs, which a shell that
+ * didn't load the user's profile can't see (install.sh checks the same places). */
 export function claudeBin() {
   const onPath = which('claude')
   if (onPath) return onPath
-  const local = path.join(HOME, '.claude', 'local', 'claude')
-  try { fs.accessSync(local, fs.constants.X_OK); return local } catch { return null }
+  for (const f of [path.join(HOME, '.local', 'bin', 'claude'), path.join(HOME, '.claude', 'local', 'claude')]) {
+    try { fs.accessSync(f, fs.constants.X_OK); return f } catch {}
+  }
+  return null
 }
 
 export function rcFiles() {
@@ -70,7 +72,9 @@ export function rcFiles() {
 }
 export function primaryRc() {
   const shell = path.basename(process.env.SHELL || '')
-  return path.join(HOME, shell === 'bash' ? (process.platform === 'darwin' ? '.bash_profile' : '.bashrc') : '.zshrc')
+  if (shell === 'zsh') return path.join(HOME, '.zshrc')
+  if (shell === 'bash') return path.join(HOME, process.platform === 'darwin' ? '.bash_profile' : '.bashrc')
+  return path.join(HOME, '.profile')
 }
 
 const expand = (/** @type {string} */ p) => p.replace(/^~(?=\/|$)/, HOME).replace(/\$\{?HOME\}?/g, HOME)
@@ -110,6 +114,11 @@ export function claudeAccounts() {
     try { if (fs.statSync(d).isDirectory() && fs.existsSync(path.join(d, '.claude.json'))) byDir.set(d, { dir: d, alias: e.slice(1) }) } catch {}
   }
   for (const a of accountAliases()) byDir.set(a.dir, { dir: a.dir, alias: a.name, aliasValue: a.value })
+  // the account this shell is using, wherever it lives
+  if (process.env.CLAUDE_CONFIG_DIR) {
+    const d = path.resolve(expand(process.env.CLAUDE_CONFIG_DIR))
+    if (!byDir.has(d)) byDir.set(d, { dir: d, alias: `claude-${path.basename(d).replace(/^\./, '')}` })
+  }
   // accounts enabled by `agentlink claude` under a CLAUDE_CONFIG_DIR found nowhere above
   for (const d of registeredDirs()) if (!byDir.has(d) && fs.existsSync(d)) byDir.set(d, { dir: d, alias: `claude-${path.basename(d).replace(/^\./, '')}` })
   return [...byDir.values()]

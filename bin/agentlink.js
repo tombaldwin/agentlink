@@ -13,6 +13,7 @@ const pos = []
 for (let i = 0; i < rest.length; i++) {
   const a = rest[i]
   if (a === '--') { pos.push(...rest.slice(i + 1)); break }
+  if (cmd === 'send' && pos.length) { pos.push(a); continue }    // past the address it's the message, whatever it looks like
   const eq = a.indexOf('=')
   const k = a.startsWith('--') ? a.slice(2, eq < 0 ? undefined : eq) : ''
   if (VALUE_FLAGS.includes(k)) {

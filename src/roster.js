@@ -20,14 +20,17 @@ import fs from 'node:fs'
 import crypto from 'node:crypto'
 import { signRecord, verifyRecord, newDiscoveryKey, recId, recKey } from './crypto.js'
 import { fingerprint, certDer } from './cert.js'
-import { normHost } from './config.js'
+import { normHost, writeAtomic } from './config.js'
 
-// New records stop being taken in at this size, so a roster fits in one hello request (2 MB). It
-// never applies to a removal its signer may make, so a full roster can always be cleaned up, or to
-// loading our own file, so nothing already held is lost.
+// New records stop being taken in at this size, so that a roster always fits in one hello (4 MB):
+// if it didn't, this node's removals would never reach anyone. The limit doesn't apply to loading our
+// own file, so nothing already held is lost, or to a removal that must get in (see mustTake), so a
+// full roster can always be cleaned up. Those are small and there is at most one per machine, so a
+// roster at its very worst (some 2000 machines, each removed) comes to about 2.5 MB.
 const MAX_ROSTER_BYTES = 1500 << 10
 const MAX_FUTURE_MS = 3600_000     // a record stamped further ahead than this is refused (bad clock)
 const MAX_SEEN = 4000                  // more than a full roster's adds, so no machine can make itself impossible to remove
+const SEEN_SLACK = 8                   // ids a removal may list beyond the adds we hold, and still count as small
 const MAX_DROPPED = 50                 // adds that didn't count, kept per removed machine (so their keys stay known as dropped)
 // a replaced discovery key still opens other members' gates for this long, so a machine that was
 // offline during a removal can catch up; after that it needs a new invite
@@ -36,15 +39,18 @@ export const DK_GRACE_MS = 14 * 86400_000
 /** @typedef {import('./types.js').RosterRecord} RosterRecord */
 /** @typedef {import('./types.js').Member} Member */
 
+const ASCII_KEY = /^[\w+/=-]+$/        // fingerprints and signatures: base64, in either alphabet
+
 /** @param {any} r @returns {r is RosterRecord} */
 function wellFormed(r) {
   if (!r || typeof r !== 'object') return false
   if (r.type !== 'add' && r.type !== 'remove') return false
-  if (typeof r.fp !== 'string' || r.fp.length > 64 || typeof r.by !== 'string' || r.by.length > 64) return false
-  if (typeof r.sig !== 'string' || r.sig.length > 200 || !Number.isSafeInteger(r.at) || r.at < 0) return false
+  if (typeof r.fp !== 'string' || !ASCII_KEY.test(r.fp) || r.fp.length > 64 || typeof r.by !== 'string' || !ASCII_KEY.test(r.by) || r.by.length > 64) return false
+  if (typeof r.sig !== 'string' || !ASCII_KEY.test(r.sig) || r.sig.length > 200 || !Number.isSafeInteger(r.at) || r.at < 0) return false
   if (r.dk !== undefined && (typeof r.dk !== 'string' || r.dk.length !== 44 || Buffer.from(r.dk, 'base64').length !== 32)) return false
-  if (r.seen !== undefined && (r.type !== 'remove' || !Array.isArray(r.seen) || r.seen.length > MAX_SEEN || !r.seen.every((/** @type {unknown} */ x) => typeof x === 'string' && x.length === 22))) return false
-  if (r.type === 'add' && (typeof r.host !== 'string' || r.host.length > 253 || typeof r.cert !== 'string' || r.cert.length > 1024)) return false
+  if (r.seen !== undefined && (r.type !== 'remove' || !Array.isArray(r.seen) || r.seen.length > MAX_SEEN || !r.seen.every((/** @type {unknown} */ x) => typeof x === 'string' && /^[\w-]{22}$/.test(x)))) return false
+  // strict base64: the decoder skips anything else, so a good certificate could carry padding
+  if (r.type === 'add' && (typeof r.host !== 'string' || r.host.length > 253 || typeof r.cert !== 'string' || r.cert.length > 1024 || !/^[A-Za-z0-9+/]+={0,2}$/.test(r.cert))) return false
   return true
 }
 
@@ -66,6 +72,8 @@ export class Roster {
     this.members = new Map()
     /** @type {Map<string, Member>} host -> member */
     this.byHost = new Map()
+    /** @type {Map<string, Member>} every machine that joined, removed or not */
+    this.ranked = new Map()
     /** @type {Map<string, { at: number, by: string }>} */
     this.removed = new Map()
     /** @type {string[]} discovery keys, oldest first */
@@ -88,14 +96,7 @@ export class Roster {
 
   save() {
     if (!this.file) return
-    const tmp = `${this.file}.${process.pid}.tmp`
-    // on disk before the rename: a crash must leave the old roster or the new one, never an empty file
-    const fd = fs.openSync(tmp, 'w', 0o600)
-    try {
-      fs.writeSync(fd, JSON.stringify({ net: this.net, records: this.records }, null, 1) + '\n')
-      fs.fsyncSync(fd)
-    } finally { fs.closeSync(fd) }
-    fs.renameSync(tmp, this.file)
+    writeAtomic(this.file, JSON.stringify({ net: this.net, records: this.records }, null, 1) + '\n', 0o600)
   }
 
   /** The current discovery key. */
@@ -113,22 +114,39 @@ export class Roster {
   }
 
   /**
+   * Must this removal get in even when the roster is full? It takes a current member off the network,
+   * by a machine that joined before it, so refusing it would leave the machine on here and off
+   * elsewhere, and a flooder could keep itself on. It must also be small: a real removal lists only
+   * adds its target signed, while one padded with made-up ids would fill the roster past the limit.
+   * @param {RosterRecord} r
+   */
+  mustTake(r) {
+    const s = this.ranked.get(r.by), t = this.ranked.get(r.fp)
+    if (r.type !== 'remove' || !s || !t || s.rank >= t.rank || !this.members.has(r.fp)) return false
+    return (r.seen?.length ?? 0) <= this.records.filter(x => x.type === 'add' && x.by === r.fp).length + SEEN_SLACK
+  }
+
+  /**
    * Add records we were sent (or made). Returns true if the set of records changed.
    * @param {unknown} list @param {{ trustClock?: boolean }} [opts]
    */
   merge(list, { trustClock = false } = {}) {
     let added = false
     const before = this.ids
-    let bytes = trustClock ? 0 : JSON.stringify(this.records).length
+    let bytes = trustClock ? 0 : Buffer.byteLength(JSON.stringify(this.records))
+    /** @type {Set<string>} machines taken off past the limit in this batch: once is enough */
+    const over = new Set()
     for (const r of Array.isArray(list) ? list : []) {
       if (!wellFormed(r) || this.ids.has(recId(r))) continue
       if (!trustClock && r.at > Date.now() + MAX_FUTURE_MS) continue
-      const size = JSON.stringify(r).length
-      const cleansUp = r.type === 'remove' && this.canRemove(r.by, r.fp)
-      if (!trustClock && !cleansUp && bytes + size > MAX_ROSTER_BYTES) continue
-      bytes += size
       const o = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (r))
       const clean = /** @type {RosterRecord} */ (/** @type {unknown} */ (Object.fromEntries(['type', 'host', 'fp', 'cert', 'at', 'by', 'dk', 'seen', 'sig'].filter(k => o[k] !== undefined).map(k => [k, o[k]]))))
+      const size = Buffer.byteLength(JSON.stringify(clean))
+      if (!trustClock && bytes + size > MAX_ROSTER_BYTES) {
+        if (over.has(clean.fp) || !this.mustTake(clean)) continue
+        over.add(clean.fp)
+      }
+      bytes += size
       this.records.push(clean)
       added = true
     }
@@ -314,7 +332,7 @@ export class Roster {
       }
     }
     this.parsed = new Map(kept.filter(r => r.type === 'add').map(r => [recKey(r), this.parsed.get(recKey(r)) ?? null]))
-    Object.assign(this, { members, byHost, removed, dropped, dks, dkAt, records: kept, ids: new Set(kept.map(recId)) })
+    Object.assign(this, { members, byHost, ranked, removed, dropped, dks, dkAt, records: kept, ids: new Set(kept.map(recId)) })
   }
 
   /** A timestamp later than every record we hold, so our records sort after what we've seen

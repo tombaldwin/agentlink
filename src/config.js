@@ -15,6 +15,21 @@ export const keyPath = (dir = homeDir()) => path.join(dir, 'node.key')
 export const certPath = (dir = homeDir()) => path.join(dir, 'node.crt')
 export const rosterPath = (dir = homeDir()) => path.join(dir, 'roster.json')
 
+/**
+ * Replace `file` in one step, on disk before the rename: a crash or a full disk leaves the old file
+ * or the new one, never part of one.
+ * @param {string} file @param {string} data @param {number} mode
+ */
+export function writeAtomic(file, data, mode) {
+  const tmp = `${file}.${process.pid}.tmp`
+  try {
+    const fd = fs.openSync(tmp, 'w', mode)
+    // writeFileSync, not writeSync: writeSync can write part of the data and report no error
+    try { fs.writeFileSync(fd, data); fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
+    fs.renameSync(tmp, file)
+  } catch (e) { fs.rmSync(tmp, { force: true }); throw e }
+}
+
 /** Create the agentlink home directory, private to this user even if something (an older installer,
  * a umask-created parent) made it before us: it holds this machine's private key, messages and logs. */
 export function ensureHomeDir(dir = homeDir()) {
@@ -126,15 +141,15 @@ export function readIdentity(dir = homeDir()) {
   }
   const pub = crypto.createPublicKey(key)
   const x = new crypto.X509Certificate(cert)
-  if (!x.publicKey.equals(pub)) throw new Error(`${certPath(dir)} does not match ${keyPath(dir)} — run agentlink setup --new-network to start over`)
+  if (!x.publicKey.equals(pub)) throw new Error(`${certPath(dir)} does not match ${keyPath(dir)}: restore the right file, or run agentlink setup --new-network to start over`)
   return { key, cert, fp: crypto.createHash('sha256').update(pub.export({ type: 'spki', format: 'der' })).digest('base64') }
 }
 
 /** @param {import('./types.js').Identity} id */
 export function writeIdentity(id, dir = homeDir()) {
   ensureHomeDir(dir)
-  fs.writeFileSync(keyPath(dir), id.key, { mode: 0o600 })
-  fs.writeFileSync(certPath(dir), id.cert, { mode: 0o644 })
+  writeAtomic(keyPath(dir), id.key, 0o600)
+  writeAtomic(certPath(dir), id.cert, 0o644)
 }
 
 /** The network this machine belongs to (the founding machine's fingerprint), or null. */
@@ -181,7 +196,7 @@ export function loadConfig() {
 export function writeConfig(obj) {
   ensureHomeDir()
   const next = { ...readConfigFile(), ...obj }
-  fs.writeFileSync(configPath(), JSON.stringify(next, null, 2) + '\n', { mode: 0o600 })
+  writeAtomic(configPath(), JSON.stringify(next, null, 2) + '\n', 0o600)
   return next
 }
 

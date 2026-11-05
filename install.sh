@@ -91,8 +91,13 @@ install_app() {
   codesign --verify --strict -R="anchor apple generic and certificate leaf[subject.OU] = \"$TEAM\"" "$A" 2>/dev/null ||
     { echo "agentlink: the app isn't validly signed by agentlink's team ($TEAM) — aborting"; exit 1; }
   mkdir -p "$APPS"
+  # copied beside the old app first: a copy that fails leaves the old one in place. (This function
+  # runs as an if condition, where set -e is off, so each step says what happens if it fails.)
+  NEW="$APPS/.agentlink.app.new"
+  rm -rf "$NEW"
+  ditto "$A" "$NEW" || { echo "agentlink: could not copy the app to $APPS — aborting"; exit 1; }
   rm -rf "$APPS/agentlink.app"
-  ditto "$A" "$APPS/agentlink.app"
+  mv "$NEW" "$APPS/agentlink.app" || { echo "agentlink: could not put the app in $APPS — aborting"; exit 1; }
   mkdir -p "$AL/bin"
   ln -sf "$APPS/agentlink.app/Contents/MacOS/agentlink" "$AL/bin/agentlink"
   echo "Installed agentlink.app in $APPS"
@@ -155,6 +160,7 @@ if [ "$USE_PRIV" = 1 ]; then
   BINDIR="$AL/bin"
   mkdir -p "$BINDIR"
   q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+  rm -f "$BINDIR/agentlink"      # it may be the link to an earlier app: writing through it would replace the app
   # shellcheck disable=SC2016 # "$@" is meant literally: it's the wrapper's own arguments
   printf '#!/bin/sh\nexec %s --no-warnings %s "$@"\n' "$(q "$PRIV/bin/node")" "$(q "$JS")" > "$BINDIR/agentlink"
   chmod 755 "$BINDIR/agentlink"

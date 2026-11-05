@@ -8,15 +8,18 @@ Each machine has its own ECDSA P-256 key pair, created by `agentlink setup` and 
 member" or "this key was removed". Members exchange and merge these records; every member computes
 the same membership from the same records.
 
-- **Transport.** Every connection is TLS 1.3. The certificate a node presents is a throwaway (a new
-  key for each connection), so connecting to a node's port shows nothing that identifies the
-  machine. Machines prove who they are inside the encrypted connection. The client first shows it
+- **Transport.** Connections between machines are TLS 1.3. (The installer download also accepts TLS
+  1.2, for macOS's curl; that's protected by the key pinned in the invite line.) The certificate a
+  node presents is a throwaway (a new key for each connection, or each second at the most), so
+  connecting to a node's port shows nothing that identifies the machine, unless an invite is open:
+  see *Known limitations*. Machines prove who they are inside the encrypted connection. The client first shows it
   holds the network's discovery key; without it, other paths get a 404 (the join paths answer
   separately, see *The open port is visible*). The server then signs the connection
   with its machine key. The client checks that this is the machine the roster says should be there,
   and only then signs the connection with its own key and sends its request. If anyone else answers
-  at the address, they get nothing but that first, anonymous step. Both signatures cover that one
-  TLS session, so they can't be replayed, or relayed by someone sitting in the middle.
+  at the address, they get nothing but that first, anonymous step, which has a time limit however
+  slowly they answer. Both signatures cover that one TLS session, so they can't be replayed, or
+  relayed by someone sitting in the middle.
 - **Addresses are only hints.** LAN beacons, gossiped addresses, configured names and the source
   IPs of requests can all be wrong or stale (DHCP reuse, a laptop on another network, spoofed
   name resolution). An address is used for a machine only once the machine there proves it holds
@@ -26,20 +29,24 @@ the same membership from the same records.
   Before a machine has proved its key, the only membership records it can submit are the ones that
   add it. Any member can add a machine by inviting it. A record counts, and is kept and passed on,
   only if its signature checks out against the signer it names. A roster stops taking new records
-  at about 1.5 MB, except removals their signer is entitled to make, so nothing can fill it to stop
-  a removal.
+  at about 1.5 MB, so it always fits in the one request (4 MB) that carries it between machines. The
+  exception is a removal of a current member by a machine that joined before it, unless it's
+  padded with more ids than the removed machine has records. So nothing can fill a roster to stop a
+  removal, or stop one leaving a machine.
 - **Removal.** Machines are ranked in the order they joined, and a machine can remove only machines
   that joined after it. The founding machine can remove anyone, and two machines can never remove
   each other. A removal can't be undone: removing the remover doesn't bring a machine back, and
-  removals made at the same time all stand. A removed key is gone for good (the machine re-joins
-  with a new key), and a key made by a removed machine never becomes the discovery key.
+  removals made at the same time all stand. A removed key is gone for good (the machine isn't told,
+  and re-joins with an invite and a new key), and a key made by a removed machine never becomes the
+  discovery key.
 - **A removed machine can't add machines.** A removal lists the removed machine's records the
   remover had. Machines it added stay if every remover had seen the add. An add the remover hadn't
   seen doesn't count, whatever date it carries, and that machine needs a new invite. Every member
   computes the same membership from the same records, whatever order they arrived in.
 - **Messages.** Each message is signed by the machine that sent it. A node accepts a message only
   if the signer is a current member and is the machine named in the sender address, so holders
-  relaying copies can't alter messages and a member can't send as another machine. Messages are
+  relaying copies can't alter messages and a member can't send as another machine. A sender address
+  must be exactly `name@host` as a node writes it, so nothing can be hidden in it. Messages are
   encrypted between machines but not end to end: see *Known limitations*.
 - **Joining.** `agentlink invite` makes a one-time token (stored hashed, expires after 24 hours)
   and prints a `curl -k --pinnedpubkey "sha256//<key>" https://…` line. The key is an invite key,
@@ -48,7 +55,7 @@ the same membership from the same records.
   installer, the package and the token can't be intercepted or replaced. The joining machine checks
   the same key again before it sends its join request. The token is consumed by the join.
   `agentlink invite --revoke` cancels unused tokens. Starting or joining another network deletes the
-  old network's invites.
+  old network's invites and its undelivered messages.
 - **Discovery.** LAN beacons are encrypted under a discovery key that members share only over
   their TLS connections, so other people on the network can't read machine names from them. The
   discovery key is replaced whenever a machine is removed. A replaced key still opens other
@@ -60,8 +67,9 @@ the same membership from the same records.
   on the port is sent nothing. `/health` answers only them.
 - **Prompt injection.** Messages come from other AI agents. The MCP adapter instructs Claude to
   treat them as requests from a colleague — never as instructions from its user — and not to
-  take destructive or security-sensitive actions solely because a peer asked. Only invite
-  machines and agents you trust.
+  take destructive or security-sensitive actions solely because a peer asked. Each message is framed
+  with a tag made for that read, so its text can't pass for another message from someone else. Only
+  invite machines and agents you trust.
 - **Waking a session.** Setup adds a Claude Code hook that waits in the background and wakes an idle
   session when a message arrives. What it shows Claude is fixed text saying a message is waiting:
   nothing another agent wrote comes through the hook. Claude reads the message with the `inbox` tool,
@@ -77,9 +85,7 @@ the same membership from the same records.
   `agentlink status` lists machines in joining order and shows which member added each one:
   remove any you don't recognise, or start a new network with `agentlink setup --new-network`
   and re-join your machines. One thing it won't show: a member can sign a second key under its own
-  name, which stays hidden until that member is removed and then takes over the name. If you
-  remove a compromised machine, check `agentlink status` again afterwards, and remove the name
-  again if it's still listed.
+  name. That key never becomes a member, and it's dropped when the member is removed.
 - **Messages aren't end-to-end encrypted.** While the recipient's machine is off, copies wait on
   other members, which can read them. They can't alter them. Don't send anything through
   agentlink that you wouldn't want your other machines to hold.
@@ -95,7 +101,9 @@ the same membership from the same records.
   (which it knew already). It still can't send, receive or change the member list.
 - **A member can flood the roster.** Until you remove it, a compromised member can fill the roster
   so that no new machine can join, and machines may disagree about the last records to arrive.
-  Removing it clears what it signed, apart from machines it really added.
+  Removing it clears what it signed, apart from machines it really added and removals it made. While
+  a roster is full, a second removal of a machine already removed can wait until there's room, so
+  machines can disagree about it until then.
 - **Agents on a machine aren't separately authenticated.** Any process running as your user can
   send as any session name on that machine.
 - **Invites are credentials until used.** Anyone who gets an unused invite line within 24 hours can

@@ -66,8 +66,9 @@ your laptop in the same way.
   Messages expire after 7 days.
 - **Zero-config discovery.** Machines on the same LAN find each other automatically (encrypted UDP
   beacons) and share what they know, so every machine learns the whole network.
-- **Multiple Claude accounts.** Every `CLAUDE_CONFIG_DIR` account on a machine is enabled
-  (`~/.claude*` dirs and shell aliases); run `agentlink setup` again to add new accounts.
+- **Multiple Claude accounts.** Every `CLAUDE_CONFIG_DIR` account setup can find is enabled
+  (`~/.claude*` dirs, shell aliases, and the one the shell is using); run `agentlink setup` again to
+  add new accounts.
 - **Beyond the LAN.** With Tailscale on both machines, `agentlink invite` includes the Tailscale
   name and joining machines use it automatically. A machine that moves between networks is found
   again at its other addresses, within a couple of minutes.
@@ -136,8 +137,11 @@ See [SECURITY.md](SECURITY.md) for details and known limitations.
   `security unlock-keychain` first.
 - Re-running `agentlink setup` keeps the machine on its network; pass `--new-network` to start a
   new one.
-- A machine's name is fixed when it joins. To rename it, remove it and join again under the new
-  name (`--host`). Messages already queued for its old name wait until they expire.
+- A machine's name is fixed when it joins. To rename it, run `agentlink remove <old name>` on a
+  machine that joined before it, then run a new invite line with `| sh -s -- --host <new name>` in
+  place of `| sh`. Messages already queued for its old name wait until they expire.
+- A removed machine comes back with a new invite: it gets a new key, and anything it still had
+  queued is dropped. Joining another network drops queued messages too.
 - Apple silicon Macs and Linux. Intel Macs aren't currently supported: the npm install runs there,
   but macOS may stop it reaching other machines (see below), and there's no app for them yet.
 - On Linux, `.local` names need mDNS (`avahi-daemon` and `libnss-mdns`); without it, use the IP

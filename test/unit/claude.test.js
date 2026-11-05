@@ -150,6 +150,13 @@ test('only an interactive session waits: a script must never hang on the hook', 
   assert.ok(!interactive('claude --print hello', 'ttys003', env))
   assert.ok(!interactive('claude --output-format=stream-json', 'ttys003', env))
   assert.ok(!interactive('claude --input-format stream-json', 'ttys003', env))
+  // ps loses the quotes: these are prompts, and Claude treats these sessions as interactive
+  assert.ok(interactive('claude run mkdir -p src/foo and add a file', 'ttys003', env))
+  assert.ok(interactive('claude --continue why does docker run -p 8080:80 fail', 'ttys003', env))
+  assert.ok(interactive('/usr/bin/node /x/claude-code/cli.js fix --print', 'ttys003', env))
+  assert.ok(!interactive('/usr/bin/node /x/claude-code/cli.js -p hello', 'ttys003', env))
+  // an option after a value isn't seen here: Claude Code's own marker catches those
+  assert.ok(!interactive('claude --model opus -p hello', 'ttys003', { CLAUDE_CODE_ENTRYPOINT: 'sdk-cli' }))
   assert.ok(!interactive('claude', '??', env), 'no terminal')
   assert.ok(!interactive('claude', '?', env))
   assert.ok(!interactive('claude', '', env))
@@ -162,4 +169,26 @@ test('only an interactive session waits: a script must never hang on the hook', 
 test('the installer and the program agree on the oldest Claude Code', () => {
   const sh = fs.readFileSync(new URL('../../install.sh', import.meta.url), 'utf8')
   assert.equal(sh.match(/^MIN_CLAUDE=(\S+)/m)?.[1], c.WAKE_MIN_CLAUDE)
+})
+
+test('claude is found where the installer finds it, and the shell block goes where the shell reads it', async () => {
+  const bin = path.join(HOME, '.local', 'bin')
+  fs.mkdirSync(bin, { recursive: true })
+  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\n', { mode: 0o755 })
+  const PATH = process.env.PATH
+  process.env.PATH = '/usr/bin:/bin'
+  try { assert.equal(c.claudeBin(), path.join(bin, 'claude')) } finally { process.env.PATH = PATH; fs.rmSync(path.join(bin, 'claude')) }
+  const SHELL = process.env.SHELL
+  try {
+    process.env.SHELL = '/opt/homebrew/bin/fish'
+    assert.equal(c.primaryRc(), path.join(HOME, '.profile'), 'not a stray .zshrc')
+    process.env.SHELL = '/bin/zsh'
+    assert.equal(c.primaryRc(), path.join(HOME, '.zshrc'))
+  } finally { process.env.SHELL = SHELL }
+})
+
+test('the account a shell is using is enabled even if nothing else names it', () => {
+  const dir = path.join(HOME, 'elsewhere', 'claude-config')
+  process.env.CLAUDE_CONFIG_DIR = dir
+  try { assert.ok(c.claudeAccounts().some(a => a.dir === dir)) } finally { delete process.env.CLAUDE_CONFIG_DIR }
 })
