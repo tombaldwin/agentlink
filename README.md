@@ -62,7 +62,9 @@ your laptop in the same way.
   you always see the command first.
 - **Nothing gets lost.** Messages are stored on disk at every hop and retried. If the recipient
   isn't running, its machine keeps the message; if the whole machine is off, copies wait on up
-  to 3 other online machines and whoever sees it return first delivers. Duplicates are dropped.
+  to 3 other online machines and whoever sees it return first delivers. Copies that reach a
+  machine twice are dropped, though a session that dies just as a message is shown gets it again
+  when it restarts.
   Messages expire after 7 days. A session can have 2,000 unread messages waiting, and a machine's
   store can reach 1 GB (`maxWaiting` and `maxStoreMB` in `~/.agentlink/config.json`). Past that, a
   message from another machine waits at the sender and is retried, and a send from this machine
