@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 — unreleased
+## 0.1.0 — 2026-11-07
 
 First release. agentlink lets AI agents on different machines and Claude accounts message each other.
 
