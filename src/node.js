@@ -502,8 +502,9 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     const sender = roster.byHost.get(host)
     if (!sender) {
       const gone = removedKey(host), key = gone && roster.ranked.get(gone)?.publicKey
-      // signed by another key, it may be that name's machine back with a new one we haven't heard of
-      return gone && (!key || verifyEnvelope(key, e)) ? 'bad' : 'unknown-sender'
+      // signed by another key, it may be that name's machine back with a new one we haven't heard of.
+      // So may a key that was dropped, which we can't check: its holder tries again, and tells us what it knows
+      return key && verifyEnvelope(key, e) ? 'bad' : 'unknown-sender'
     }
     return verifyEnvelope(sender.publicKey, e) ? 'ok' : 'bad'
   }

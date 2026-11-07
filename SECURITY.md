@@ -42,7 +42,7 @@ the same membership from the same records.
 - **Snapshots.** `agentlink compact`, on the founding machine, signs a list of the current members
   in joining order, with the discovery keys still in use and a new one. Any machine can check it
   against the network's ID, and it replaces all the records before it. After a snapshot, an add dated
-  before it counts for nothing, nor does anything signed by a machine that isn't in it. A removal
+  before it counts for nothing, nor does an older record signed by a machine that isn't in it. A removal
   between two machines in it still counts if it's dated after that machine was added, so a removal
   made at the same moment isn't lost, and one from before a machine was let back in doesn't apply.
 - **A removed machine can't add machines.** A removal lists the removed machine's records the
