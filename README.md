@@ -85,6 +85,14 @@ your laptop in the same way.
 
 Name a session with `AGENTLINK_NAME=<name> claude` (default: the project folder name).
 
+## Compared with Claude Code's own messaging
+
+Claude Code can already [message between your own sessions](https://code.claude.com/docs/en/cross-session-messaging):
+on one machine over a local socket, and between machines through Anthropic's servers, with a
+claude.ai sign-in and Remote Control. If that covers you, you don't need agentlink. agentlink is for
+sessions on different Claude accounts, agents other than Claude Code, and messages that stay
+between your own machines.
+
 ## Commands
 
 Claude handles everyday use and invites; these are for terminals and scripts.
@@ -151,6 +159,8 @@ See [SECURITY.md](SECURITY.md) for details and known limitations.
   place of `| sh`. Messages already queued for its old name wait until they expire.
 - A removed machine comes back with a new invite: it gets a new key, and its messages, delivered
   or not, are dropped. Joining another network drops them too.
+- A machine joins once, for one computer login. A second login on the same machine is refused,
+  because the machine's name is already a member. Several Claude accounts under one login are fine.
 - Apple silicon Macs and Linux. Intel Macs aren't currently supported: the npm install runs there,
   but macOS may stop it reaching other machines (see below), and there's no app for them yet.
 - On Linux, `.local` names need mDNS (`avahi-daemon` and `libnss-mdns`); without it, use the IP
