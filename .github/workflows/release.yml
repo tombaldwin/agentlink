@@ -3,6 +3,8 @@ name: Release
 # Pushing a tag vX.Y.Z builds agentlink.app (signed with Developer ID, notarized, stapled) and
 # creates a DRAFT GitHub Release with it and the npm package. Check the draft, then publish it:
 # the installer downloads the app from the latest published release.
+# Publishing that release then publishes the same npm package to npm, through npm's trusted
+# publishing (no token: npm trusts this workflow file in this repo).
 # Running the workflow by hand (Actions → Release → Run workflow) does the same build and
 # notarization without creating a release: use it to check the signing secrets.
 # Setup: docs/releasing.md.
@@ -10,6 +12,8 @@ name: Release
 on:
   push:
     tags: ['v*']
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -17,6 +21,7 @@ permissions:
 
 jobs:
   macos-app:
+    if: github.event_name != 'release'
     runs-on: macos-latest          # Apple silicon
     timeout-minutes: 45
     steps:
@@ -111,3 +116,29 @@ jobs:
       - name: Remove the signing keychain
         if: always()
         run: security delete-keychain "$KEYCHAIN" 2>/dev/null || true
+
+  npm:
+    # the package attached to the release just published, so npm gets exactly what was checked
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write              # trusted publishing and provenance
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@^11.5.1   # trusted publishing needs 11.5.1 or later
+      - name: Publish the release's package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          V=${TAG#v}
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "tombaldwin-agentlink-$V.tgz"
+          if npm view "@tombaldwin/agentlink@$V" version >/dev/null 2>&1; then
+            echo "@tombaldwin/agentlink@$V is already on npm"; exit 0
+          fi
+          npm publish "./tombaldwin-agentlink-$V.tgz" --provenance --access public

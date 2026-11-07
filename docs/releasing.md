@@ -47,6 +47,14 @@ Delete the exported `.p12` afterwards. To check the secrets, run **Actions → R
 workflow**: it builds, signs, notarizes and tests the app without making a release, and keeps the
 files as a workflow artifact.
 
+### 4. npm trusted publishing
+
+On [npmjs.com](https://www.npmjs.com/package/@tombaldwin/agentlink/access), open the package's
+**Settings → Trusted publishing**, choose **GitHub Actions**, and enter owner `tombaldwin`,
+repository `agentlink` and workflow `release.yml` (no environment). The workflow then publishes to
+npm without a token, with provenance. A package must exist on npm before it can be set up, so the
+first version (0.1.0) was published by hand.
+
 ## Each release
 
 1. Set the version in `package.json` and `src/config.js` (`VERSION`), and date its section in
@@ -54,8 +62,12 @@ files as a workflow artifact.
 2. Commit, then tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 3. The **Release** workflow builds, signs, notarizes and staples the app, runs the end-to-end tests
    against it, and creates a **draft** release with the CHANGELOG section as its notes.
-4. Check the draft, then publish it. New installs on Apple silicon Macs get this app from then on.
-5. Publishing to npm is separate: `npm publish` (the release has the same package attached).
+4. Check the draft, then publish it (`gh release edit vX.Y.Z --draft=false --latest`). New installs
+   on Apple silicon Macs get this app from then on.
+5. Publishing the release runs the workflow again, which publishes the package attached to the
+   release to npm. Check it with `npm view @tombaldwin/agentlink version`. Publish the release
+   with your own account (the web page or `gh`): GitHub doesn't start workflows for a release
+   published by a workflow's own token.
 
 The bundle ID (`io.github.tombaldwin.agentlink`, in `scripts/build-app.mjs`) must never change:
 macOS ties each user's Local Network permission to it.
