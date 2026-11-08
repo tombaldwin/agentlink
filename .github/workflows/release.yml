@@ -4,7 +4,8 @@ name: Release
 # creates a DRAFT GitHub Release with it and the npm package. Check the draft, then publish it:
 # the installer downloads the app from the latest published release.
 # Publishing that release then publishes the same npm package to npm, through npm's trusted
-# publishing (no token: npm trusts this workflow file in this repo).
+# publishing (no token: npm trusts this workflow file in this repo), and then lists that version in
+# the official MCP Registry (server.json, through GitHub OIDC).
 # Running the workflow by hand (Actions → Release → Run workflow) does the same build and
 # notarization without creating a release: use it to check the signing secrets.
 # Setup: docs/releasing.md.
@@ -142,3 +143,36 @@ jobs:
             echo "@tombaldwin/agentlink@$V is already on npm"; exit 0
           fi
           npm publish "./tombaldwin-agentlink-$V.tgz" --provenance --access public
+
+  mcp-registry:
+    # the MCP Registry entry (server.json) for the version just published to npm: the registry checks
+    # the package's mcpName against it, so npm comes first. GitHub OIDC proves the io.github.tombaldwin
+    # namespace, so there's no token.
+    needs: npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PUBLISHER: v1.8.4            # pinned, with its checksum from the release's checksums file
+      PUBLISHER_SHA256: 5dc2fd415369c73551259f31cd33e2aacc9e0d1021e7f08fef1492d93b781628
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Check server.json is for this release
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          V=$(node -p 'require("./server.json").version')
+          [ "$TAG" = "v$V" ] || { echo "server.json is for $V, not $TAG"; exit 1; }
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSLo publisher.tar.gz "https://github.com/modelcontextprotocol/registry/releases/download/$PUBLISHER/mcp-publisher_linux_amd64.tar.gz"
+          echo "$PUBLISHER_SHA256  publisher.tar.gz" | sha256sum -c -
+          tar xzf publisher.tar.gz mcp-publisher
+      - name: Publish to the MCP Registry
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish

@@ -57,15 +57,19 @@ first version (0.1.0) was published by hand.
 
 ## Each release
 
-1. Set the version in `package.json` and `src/config.js` (`VERSION`), and date its section in
-   `CHANGELOG.md` (`## X.Y.Z — YYYY-MM-DD`).
+1. Set the version in `package.json`, `src/config.js` (`VERSION`), `server.json` (both
+   `version`s), `plugins/agentlink/.claude-plugin/plugin.json` and
+   `.claude-plugin/marketplace.json`, and date its section in `CHANGELOG.md`
+   (`## X.Y.Z — YYYY-MM-DD`). `npm run test:unit` fails if one is left behind.
 2. Commit, then tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 3. The **Release** workflow builds, signs, notarizes and staples the app, runs the end-to-end tests
    against it, and creates a **draft** release with the CHANGELOG section as its notes.
 4. Check the draft, then publish it (`gh release edit vX.Y.Z --draft=false --latest`). New installs
    on Apple silicon Macs get this app from then on.
 5. Publishing the release runs the workflow again, which publishes the package attached to the
-   release to npm. Check it with `npm view @tombaldwin/agentlink version`. Publish the release
+   release to npm, then `server.json` to the official MCP Registry. Check them with
+   `npm view @tombaldwin/agentlink version` and
+   `curl -s 'https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.tombaldwin/agentlink'`. Publish the release
    with your own account (the web page or `gh`): GitHub doesn't start workflows for a release
    published by a workflow's own token.
 

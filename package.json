@@ -2,6 +2,7 @@
   "name": "@tombaldwin/agentlink",
   "version": "0.1.0",
   "description": "Let AI agents on different machines and Claude accounts message each other \u2014 incoming messages wake idle Claude Code sessions",
+  "mcpName": "io.github.tombaldwin/agentlink",
   "keywords": [
     "claude",
     "claude-code",

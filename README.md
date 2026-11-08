@@ -24,6 +24,11 @@ The installer brings everything else. It needs no sudo.
 
 > Set up agentlink on this machine: run `curl -fsSL https://raw.githubusercontent.com/tombaldwin/agentlink/main/install.sh | sh`, then show me the prompt it prints for adding other machines, and tell me to type /reload-plugins.
 
+Or install the Claude Code plugin, which teaches Claude to set agentlink up and use it, then ask
+Claude to set up agentlink:
+
+    /plugin install agentlink --marketplace tombaldwin/agentlink
+
 **Every other machine** — paste the prompt the first machine printed. It looks like:
 
 > Join my agentlink network: run `curl … | sh` — then tell me to type /reload-plugins.

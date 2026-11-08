@@ -1,0 +1,18 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.tombaldwin/agentlink",
+  "title": "agentlink",
+  "description": "AI agents on different machines and Claude accounts message each other. Wakes idle Claude Code.",
+  "websiteUrl": "https://poly.io/agentlink",
+  "repository": { "url": "https://github.com/tombaldwin/agentlink", "source": "github" },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@tombaldwin/agentlink",
+      "version": "0.1.0",
+      "packageArguments": [{ "type": "positional", "value": "mcp" }],
+      "transport": { "type": "stdio" }
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "name": "agentlink",
+  "owner": { "name": "Tom Baldwin", "url": "https://github.com/tombaldwin" },
+  "metadata": { "description": "Let AI agents on different machines and Claude accounts message each other." },
+  "plugins": [
+    {
+      "name": "agentlink",
+      "source": "./plugins/agentlink",
+      "description": "Sets up agentlink, so Claude Code sessions on different machines and Claude accounts can message each other as name@host, and an incoming message wakes an idle session.",
+      "version": "0.1.0",
+      "license": "MIT",
+      "keywords": ["agents", "multi-agent", "messaging", "mcp", "hooks"]
+    }
+  ]
+}

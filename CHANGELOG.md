@@ -7,6 +7,10 @@
 - `agentlink completion zsh|bash` prints a tab-completion script: commands, options, and the
   addresses of online agents after `agentlink send`.
 - Clearer main help, including how to add a machine.
+- A Claude Code plugin: `/plugin install agentlink --marketplace tombaldwin/agentlink` adds a skill
+  that sets agentlink up, adds machines and explains messaging.
+- Listed in the official MCP Registry as `io.github.tombaldwin/agentlink`: publishing a release
+  now publishes it there too.
 
 ## 0.1.0 — 2026-11-07
 
