@@ -101,8 +101,13 @@ Claude handles everyday use and invites; these are for terminals and scripts.
     agentlink invite [--list|--revoke] agentlink remove <host>
     agentlink compact [--yes]          agentlink uninstall
 
+`agentlink help <command>` (or `agentlink <command> --help`) shows a command's options.
 `agentlink peers` says why a machine is offline (the node log, `~/.agentlink/node.log`, records
 when a machine stops or starts answering).
+
+Tab completion, including the addresses of agents that are online after `agentlink send`: add
+`eval "$(agentlink completion zsh)"` to `~/.zshrc`, or `eval "$(agentlink completion bash)"` to
+`~/.bashrc`.
 
 ## Upgrading
 

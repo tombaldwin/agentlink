@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 import { loadConfig, VERSION } from '../src/config.js'
+import { resolve, findCommand, mainHelp, commandHelp, suggest, completionScript } from '../src/cli.js'
 
 // (not --no-warnings on the line above: env -S isn't everywhere.) node:sqlite warns when it's loaded
 process.removeAllListeners('warning')
 
-const [cmd, ...rest] = process.argv.slice(2)
+const [first, ...rest] = process.argv.slice(2)
+const cmd = resolve(first)
 // Only these are flags; anything else (a message that happens to start with "--") is an argument,
 // and "--" ends the flags.
 const VALUE_FLAGS = ['name', 'from', 'host', 'peer', 'join', 'pin', 'net', 'token']
@@ -28,27 +30,24 @@ for (let i = 0; i < rest.length; i++) {
   else pos.push(a)
 }
 function usage(/** @type {string} */ m) { console.error(`agentlink: ${m}`); process.exit(2) }
-// a mistyped option (e.g. \`invite --lsit\`) must not run the command as if it weren't there; send
+/** @param {string} name */
+function unknownCommand(name) {
+  const s = suggest(name)
+  usage(`unknown command '${name}'${s ? ` (did you mean ${s}?)` : ''}: see agentlink help`)
+}
+if (!findCommand(cmd)) unknownCommand(first)
+// `agentlink <command> --help` shows that command's help instead of running it. Not for claude
+// (its options go to Claude Code), and for send only in place of the address: after it, it's message text.
+const helpAsked = cmd === 'send' ? ['--help', '-h'].includes(rest[0])
+  : cmd !== 'claude' && rest.slice(0, rest.includes('--') ? rest.indexOf('--') : undefined).some(a => a === '--help' || a === '-h')
+if (helpAsked) {
+  const c = findCommand(cmd)
+  if (!c || c.hidden) unknownCommand(cmd)
+  else { console.log(commandHelp(c)); process.exit(0) }
+}
+// a mistyped option (e.g. `invite --lsit`) must not run the command as if it weren't there; send
 // takes free text and claude passes everything on to Claude Code
-if (!['send', 'claude'].includes(cmd)) { const bad = pos.find(a => a.startsWith('-')); if (bad) usage(`unknown option ${bad} (see agentlink help)`) }
-
-const HELP = `agentlink ${VERSION} — wake-on-message networking for AI agents
-
-  agentlink setup               set up this machine (keeps its network, or creates one if it has
-                                none; --new-network to start over). Joining uses the invite line.
-  agentlink claude [args...]    start Claude Code with channels instead of the wake hook (optional)
-  agentlink send <to> <msg...>  send a message, e.g. agentlink send reviewer@laptop.local "hi"
-  agentlink peers               who's online
-  agentlink status              node status, queues, known machines
-  agentlink invite [--list|--revoke]  print a one-time line to add another machine
-                                (--list: show unused ones; --revoke: cancel them)
-  agentlink remove <host>       remove a machine from the network (it can no longer send or receive)
-  agentlink compact [--yes]     on the founding machine: shrink the member list to current members
-                                (--force: go ahead even if machines couldn't be checked in time)
-  agentlink uninstall           remove service and Claude Code registration
-
-  agentlink node                run the node (normally run by the background service)
-  agentlink mcp [--poll|--channel] [--name N]   MCP adapter (normally run by Claude Code)`
+if (!['send', 'claude'].includes(cmd)) { const bad = pos.find(a => a.startsWith('-')); if (bad) usage(`unknown option ${bad} (see agentlink ${cmd} --help)`) }
 
 async function main() {
   switch (cmd) {
@@ -145,8 +144,31 @@ async function main() {
       const { uninstall } = await import('../src/setup.js')
       return await uninstall()
     }
-    case '--version': case 'version': return console.log(VERSION)
-    default: console.log(HELP)
+    case 'version': return console.log(VERSION)
+    case 'help': {
+      if (!pos.length) return console.log(mainHelp(VERSION))
+      const c = findCommand(pos[0])
+      if (!c || c.hidden) return unknownCommand(pos[0])
+      return console.log(commandHelp(c))
+    }
+    case 'completion': {
+      if (pos.length !== 1) throw new Error('usage: agentlink completion <zsh | bash>')
+      return process.stdout.write(completionScript(pos[0]))
+    }
+    case '__complete': {                         // for the completion scripts: never starts a node
+      const { Local } = await import('../src/local.js')
+      let local
+      try { local = new Local(loadConfig()) } catch { return }
+      const h = await local.health()
+      if (!h || 'foreign' in h) return
+      const p = await local.req('GET', '/local/peers', undefined, '', 3000).catch(() => null)
+      if (!p) return
+      if (pos[0] === 'hosts') return console.log(p.remote.map((/** @type {any} */ r) => r.host).join('\n'))
+      const out = [...p.local.map((/** @type {string} */ n) => `${n}@${p.self}`),
+        ...p.remote.flatMap((/** @type {any} */ r) => r.sessions.map((/** @type {string} */ n) => `${n}@${r.host}`))]
+      return out.length && console.log(out.join('\n'))
+    }
+    default: return unknownCommand(first)
   }
 }
 

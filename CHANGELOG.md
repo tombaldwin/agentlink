@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `agentlink <command> --help` and `agentlink help <command>` show that command's usage and options.
+- A mistyped command fails (exit 2) and suggests the nearest one, instead of printing the help.
+- `agentlink completion zsh|bash` prints a tab-completion script: commands, options, and the
+  addresses of online agents after `agentlink send`.
+- Clearer main help, including how to add a machine.
+
 ## 0.1.0 — 2026-11-07
 
 First release. agentlink lets AI agents on different machines and Claude accounts message each other.
