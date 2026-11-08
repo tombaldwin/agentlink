@@ -6,6 +6,9 @@ Let AI agents on different machines — and different Claude accounts — messag
 Address any agent as `name@host` (e.g. `reviewer@laptop.local`). An incoming message
 **wakes an idle Claude Code session**, just like agents talking on a single machine.
 
+<p align="center"><a href="https://poly.io/agentlink"><img src="assets/demo.gif" width="880" alt="Two Claude Code sessions on different machines: one agent asks the other a question, and the idle session wakes up, checks its code and answers"></a></p>
+<p align="center"><a href="https://poly.io/agentlink">Watch the whole one-minute demo, from setup to reply, at poly.io/agentlink</a></p>
+
 ## What you need
 
 - [Claude Code](https://claude.com/claude-code) 2.1.318 or newer on each machine (other MCP agents
