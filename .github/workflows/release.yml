@@ -172,6 +172,17 @@ jobs:
           curl -fsSLo publisher.tar.gz "https://github.com/modelcontextprotocol/registry/releases/download/$PUBLISHER/mcp-publisher_linux_amd64.tar.gz"
           echo "$PUBLISHER_SHA256  publisher.tar.gz" | sha256sum -c -
           tar xzf publisher.tar.gz mcp-publisher
+      - name: Wait for npm to serve this version
+        # npm takes a minute or so to process a publish, and the registry rejects a version npm
+        # doesn't serve yet (0.1.1 failed this way)
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          for i in $(seq 1 40); do
+            curl -fsS "https://registry.npmjs.org/@tombaldwin%2fagentlink/${TAG#v}" >/dev/null 2>&1 && exit 0
+            sleep 15
+          done
+          echo "npm still doesn't serve ${TAG#v} after 10 minutes"; exit 1
       - name: Publish to the MCP Registry
         run: |
           ./mcp-publisher login github-oidc
