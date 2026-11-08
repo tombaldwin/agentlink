@@ -5,7 +5,7 @@ import crypto from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { fingerprint } from './cert.js'
 
-export const VERSION = '0.1.0'
+export const VERSION = '0.1.1'
 
 export function homeDir() {
   return process.env.AGENTLINK_HOME || path.join(os.homedir(), '.agentlink')

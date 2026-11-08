@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 — 2026-11-08
 
 - `agentlink <command> --help` and `agentlink help <command>` show that command's usage and options.
 - A mistyped command fails (exit 2) and suggests the nearest one, instead of printing the help.
