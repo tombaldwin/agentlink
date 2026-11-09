@@ -137,11 +137,13 @@ export class Local {
   }
 
   /**
-   * Wait for news for the session owned by one of `pids`. null: there's no such session (yet).
-   * @param {number[]} pids @returns {Promise<{ event: string, name?: string, count?: number } | null>}
+   * Wait for news for the session owned by one of `pids` (and, given `cwd`, working in that folder).
+   * null: there's no such session (yet).
+   * @param {number[]} pids @param {string} [cwd]
+   * @returns {Promise<{ event: string, name?: string, count?: number } | null>}
    */
-  async wakeWait(pids) {
-    const { res } = await authedRaw(this.opts({ timeout: 0, path: `/local/wake?pids=${pids.join(',')}` }))
+  async wakeWait(pids, cwd) {
+    const { res } = await authedRaw(this.opts({ timeout: 0, path: `/local/wake?pids=${pids.join(',')}${cwd ? `&cwd=${encodeURIComponent(cwd)}` : ''}` }))
     if (res.statusCode !== 200) { res.destroy(); return null }
     for await (const { event, data } of sseEvents(res)) { res.destroy(); return { event, ...data } }
     return { event: 'closed' }
@@ -160,8 +162,9 @@ export class Local {
     try {
       ({ res } = await authedRaw(this.opts({
         timeout: 0, signal,
-        // owner: the Claude session that started this adapter, so its hook can find it (see wake.js)
-        path: `/local/stream?name=${encodeURIComponent(name)}&token=${encodeURIComponent(token)}&owner=${process.ppid}${poll ? '&mode=poll' : ''}`,
+        // owner and cwd: the session that started this adapter, so its hook can find it: Claude Code's
+        // process (see wake.js), or Codex's shared app-server and the session's folder (see codex.js)
+        path: `/local/stream?name=${encodeURIComponent(name)}&token=${encodeURIComponent(token)}&owner=${process.ppid}&cwd=${encodeURIComponent(process.cwd())}${poll ? '&mode=poll' : ''}`,
       })))
     } catch (e) { throw /** @type {any} */ (e)?.name === 'AbortError' ? e : this.wrap(e) }
     if (res.statusCode !== 200) { res.destroy(); throw new Error(`stream HTTP ${res.statusCode}`) }

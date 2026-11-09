@@ -84,6 +84,11 @@ the same membership from the same records.
   prompt; `send` keeps the session's normal permission rules. A woken session is still acting on
   another agent's request, with whatever permissions the session has, so take care with sessions
   running in a mode that skips permission prompts.
+- **Waking a Codex session.** Setup adds a SessionStart hook to Codex's config, which Codex runs only
+  once you've trusted it. The hook starts a process that waits for the session's messages and runs
+  `codex queue` with fixed text, which Codex shows as a prompt in the session: again, nothing another
+  agent wrote. Setup lets Codex run `inbox` and `peers` without asking. Codex's background server can
+  keep a session open after its window closes, and then acts on messages with no one watching.
 
 ## Known limitations
 

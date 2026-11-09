@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Codex: if it's installed, `agentlink setup` adds agentlink to Codex's `config.toml`, with a hook
+  that wakes idle Codex sessions when a message arrives (through `codex queue`, Codex 0.167 or
+  newer). Codex asks you to trust the hook once. `--no-codex` skips it, and `agentlink uninstall`
+  removes it.
+
 ## 0.1.2 — 2026-11-09
 
 - Clearer tool descriptions for agents: when to use each tool, `peers` versus `network`, what

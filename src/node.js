@@ -100,7 +100,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     cfg.host = rosterName
   }
   if (!roster.members.has(me.fp)) log(roster.removed.has(me.fp) ? 'this machine has been removed from the network' : 'this machine is not (yet) a member of its network')
-  /** @type {Map<string, { res: Res, sent: Set<string>, token: string, live: boolean, owner: number, notified: Set<string>, waiter: Res | null, more: boolean, draining: boolean }>} name -> session stream (live: woken by channel pushes; sent: offered, not yet acknowledged) */
+  /** @type {Map<string, { res: Res, sent: Set<string>, token: string, live: boolean, owner: number, cwd: string, notified: Set<string>, waiter: Res | null, more: boolean, draining: boolean }>} name -> session stream (live: woken by channel pushes; sent: offered, not yet acknowledged) */
   const sessions = new Map()
 
   const q = {
@@ -1135,7 +1135,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
         for (let i = 2; sessions.has(name); i++) name = `${want.slice(0, 47 - String(i).length)}-${i}`   // stays within the 48-char name limit
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
         const s = {
-          res, sent: new Set(), token, live: u.searchParams.get('mode') !== 'poll', owner: Number(u.searchParams.get('owner')) || 0,
+          res, sent: new Set(), token, live: u.searchParams.get('mode') !== 'poll', owner: Number(u.searchParams.get('owner')) || 0, cwd: u.searchParams.get('cwd') || '',
           // told about already, so a session that doesn't read a message isn't woken for it again and again
           notified: reconnecting?.notified ?? new Set(), waiter: /** @type {Res | null} */ (null), more: false, draining: false,
         }
@@ -1149,8 +1149,12 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
       }
       case 'GET /local/wake': {                 // the wait behind `agentlink wake`: answers once, when there's news
         const pids = String(u.searchParams.get('pids') || '').split(',').map(Number).filter(Boolean)
-        // nearest first: a Claude started from inside another Claude's session belongs to the inner one
-        const found = pids.map(pid => [...sessions].find(([, x]) => x.owner === pid)).find(Boolean)
+        // by process, nearest first: a Claude started from inside another Claude's session belongs to
+        // the inner one. Codex starts every session's adapter from one shared app-server, so its waiter
+        // also says which folder: the newest session there, if there are several
+        const cwd = u.searchParams.get('cwd')
+        const found = cwd ? [...sessions].reverse().find(([, x]) => pids.includes(x.owner) && x.cwd === cwd)
+          : pids.map(pid => [...sessions].find(([, x]) => x.owner === pid)).find(Boolean)
         if (!found) return reply(res, 404, { error: 'no session' })
         const [name, s] = found
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })

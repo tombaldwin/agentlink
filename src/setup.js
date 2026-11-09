@@ -12,6 +12,7 @@ import { peerCertificate, pinnedRequest } from './tls.js'
 import { Local } from './local.js'
 import { openStore } from './store.js'
 import { appBundle, SEA } from './self.js'
+import { codexPresent, installCodex, removeCodex, codexConfigFile } from './codex.js'
 import { claudeAccounts, register, unregister, writeShellBlock, removeShellBlock, primaryRc, claudeBin, selfCmd, checkAdapter, wakeSupport, WAKE_MIN_CLAUDE } from './claude.js'
 
 /**
@@ -33,15 +34,15 @@ const ok = (/** @type {string} */ m) => console.log(`  ✓ ${m}`)
 const warn = (/** @type {string} */ m) => console.log(`  ! ${m}`)
 
 /**
- * @param {{ host?: string, peers?: string[], noService?: boolean, noClaude?: boolean, noAlias?: boolean, newNetwork?: boolean,
+ * @param {{ host?: string, peers?: string[], noService?: boolean, noClaude?: boolean, noCodex?: boolean, noAlias?: boolean, newNetwork?: boolean,
  *           join?: string, pin?: string, net?: string, token?: string }} opts
  */
-export async function setup({ host, peers = [], noService, noClaude, noAlias, newNetwork, join, pin, net: netFp, token }) {
+export async function setup({ host, peers = [], noService, noClaude, noCodex, noAlias, newNetwork, join, pin, net: netFp, token }) {
   noService ||= process.env.AGENTLINK_NO_SERVICE === '1'
   // what's registered with Claude Code doesn't carry a home with it: it would be this user's usual one
-  if (homeElsewhere() && !(noClaude && noAlias)) {
-    warn(`AGENTLINK_HOME is ${homeDir()}, so the Claude accounts and shell files of ${os.homedir()} are left alone`)
-    noClaude = noAlias = true
+  if (homeElsewhere() && !(noClaude && noCodex && noAlias)) {
+    warn(`AGENTLINK_HOME is ${homeDir()}, so the Claude accounts, Codex and shell files of ${os.homedir()} are left alone`)
+    noClaude = noCodex = noAlias = true
   }
   if (host) host = normHost(host)   // throws before anything is written
   delete process.env.AGENTLINK_TOKEN            // spent by the join: not for the processes setup starts
@@ -174,6 +175,15 @@ export async function setup({ host, peers = [], noService, noClaude, noAlias, ne
     broken = registerClaude() || checkAdapter()
     if (broken) warn(`Claude Code can't start agentlink, so sessions won't have it until this is fixed: ${broken}`)
   }
+  let codexNote = ''
+  if (!noCodex && codexPresent()) {
+    try {
+      const c = installCodex()
+      ok(`Codex: agentlink added to ${codexConfigFile()}`)
+      if (!c.hook) codexNote = '\nCodex sessions read messages with the inbox tool. Update Codex (it needs `codex queue`) and run agentlink setup again, so they\'re woken too.'
+      else if (c.approve) codexNote = '\nCodex asks you to trust agentlink\'s hook the next time it starts: trust it, so Codex sessions are woken by messages.'
+    } catch (e) { warn(`Codex: ${errMsg(e)}`) }
+  }
   const binDir = process.env.AGENTLINK_BIN_DIR
   if (!noAlias) {
     // agentlink works without this: it mustn't stop setup before it prints the invite
@@ -191,7 +201,7 @@ export async function setup({ host, peers = [], noService, noClaude, noAlias, ne
 ${broken ? 'Done, but see the warning above.' : 'Done.'} In any Claude Code session that's already running, type /reload-plugins to join
 (or start it again: \`claude --continue\` picks up where it left off). New sessions join by themselves.
 Agents address each other as name@host, e.g. "send the test results to reviewer@laptop.local".
-Name a session with AGENTLINK_NAME=<name> (default: the project folder name).`)
+Name a session with AGENTLINK_NAME=<name> (default: the project folder name).${codexNote}`)
   if (banner) console.log(`\n${banner}`)
   if (running && invite) {
     try { console.log(`\n${invitePrompt(await local.req('POST', '/local/invite'))}`) }
@@ -410,10 +420,11 @@ export async function uninstall() {
       try { unregister(acct.dir) } catch (e) { warn(errMsg(e)) }     // one account's settings mustn't stop the rest
     }
     removeShellBlock().forEach(warn)
+    try { removeCodex() } catch (e) { warn(`Codex: ${errMsg(e)}`) }
   }
   let host = ''
   try { host = loadConfig().host } catch {}
-  console.log(`Stopped agentlink and removed its service and Claude Code registrations.
+  console.log(`Stopped agentlink and removed its service, its Claude Code registrations and its Codex settings.
 Its key, messages and settings remain in ${homeDir()}: \`agentlink setup\` turns it back on as before.
 To remove it completely:
   - take this machine off the network: on another member, run  agentlink remove ${host || '<this machine>'}

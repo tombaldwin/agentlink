@@ -4,15 +4,16 @@
 
 Let AI agents on different machines — and different Claude accounts — message each other.
 Address any agent as `name@host` (e.g. `reviewer@laptop.local`). An incoming message
-**wakes an idle Claude Code session**, just like agents talking on a single machine.
+**wakes an idle Claude Code or Codex session**, just like agents talking on a single machine.
 
 <p align="center"><a href="https://poly.io/agentlink"><img src="assets/demo.gif" width="880" alt="Two Claude Code sessions on different machines: one agent asks the other a question, and the idle session wakes up, checks its code and answers"></a></p>
 <p align="center"><a href="https://poly.io/agentlink">Watch the whole one-minute demo, from setup to reply, at poly.io/agentlink</a></p>
 
 ## What you need
 
-- [Claude Code](https://claude.com/claude-code) 2.1.318 or newer on each machine (other MCP agents
-  can [join too](#what-you-get): set `AGENTLINK_SKIP_CHECKS=1` for the installer).
+- [Claude Code](https://claude.com/claude-code) 2.1.318 or newer on each machine. Codex 0.167 or
+  newer is woken too, and other MCP agents can [join](#what-you-get) (for a machine without Claude
+  Code, set `AGENTLINK_SKIP_CHECKS=1` for the installer).
 - An Apple silicon Mac or Linux. Intel Macs aren't currently supported.
 - Machines on the same network, or Tailscale on each of them.
 
@@ -42,7 +43,8 @@ for a new one.
 new one. (If that doesn't work, restart it: `claude --continue` picks up where you left off.)
 
 That's it: no config files, no accounts, no server to run. Setup adds agentlink's tools and a small
-background hook to Claude Code's settings, and `agentlink uninstall` takes them out again. On Apple
+background hook to Claude Code's settings (and Codex's, if it's installed), and `agentlink uninstall`
+takes them out again. On Apple
 silicon Macs it installs
 agentlink as a signed app (`~/Applications/agentlink.app`, from the inviting machine or the latest
 release, refused unless Apple's certificate for agentlink's team signed it); macOS asks once to
@@ -88,6 +90,10 @@ job that reports in the morning, are in [Recipes](docs/recipes.md).
 - **Beyond the LAN.** With Tailscale on both machines, `agentlink invite` includes the Tailscale
   name and joining machines use it automatically. A machine that moves between networks is found
   again at its other addresses, within a couple of minutes.
+- **Codex.** If Codex is installed, setup adds agentlink to `~/.codex/config.toml` too. The next
+  time Codex starts, it asks you to trust agentlink's hook: trust it, and a message gives an idle
+  Codex session a turn (through `codex queue`, Codex 0.167 or newer). Codex sessions are named after
+  their project folder.
 - **Other agents.** Any MCP agent can join with `agentlink mcp --poll` (it reads with `inbox`
   instead of being woken).
 - **Channels and managed accounts.** If your organisation's policy turns channels off, `agentlink
@@ -158,6 +164,10 @@ See [SECURITY.md](SECURITY.md) for details and known limitations.
 
 - Only interactive sessions are woken. `claude -p` runs and SDK sessions aren't, and nothing about
   them changes: their messages wait for the `inbox` tool.
+- A Codex session is woken from its first prompt on, when Codex runs agentlink's hook. After you
+  close a Codex window, Codex's background server can keep the session open, and then answers its
+  messages by itself. Two Codex sessions in the same folder can't be told apart: only the newer one
+  is woken. A Codex turn you stop with Esc holds messages back until your next prompt.
 - A woken session reads messages by itself, but stops at permission prompts as usual, so replying
   may wait for you. Setup allows only the `inbox` and `peers` tools to run unattended.
 - Senders see "pushed to … live session" when the session has been told, not when Claude has read

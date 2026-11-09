@@ -9,8 +9,8 @@ const [first, ...rest] = process.argv.slice(2)
 const cmd = resolve(first)
 // Only these are flags; anything else (a message that happens to start with "--") is an argument,
 // and "--" ends the flags.
-const VALUE_FLAGS = ['name', 'from', 'host', 'peer', 'join', 'pin', 'net', 'token']
-const BOOL_FLAGS = ['yes', 'force', 'no-service', 'no-claude', 'no-alias', 'new-network', 'poll', 'channel', 'on-demand', 'revoke', 'list', 'check']
+const VALUE_FLAGS = ['name', 'from', 'host', 'peer', 'join', 'pin', 'net', 'token', 'thread', 'codex', 'pids', 'cwd']
+const BOOL_FLAGS = ['yes', 'force', 'no-service', 'no-claude', 'no-codex', 'no-alias', 'new-network', 'poll', 'channel', 'on-demand', 'revoke', 'list', 'check']
 /** @type {Record<string, any>} */
 const flags = {}
 /** @type {string[]} */
@@ -54,7 +54,7 @@ async function main() {
     case 'setup': {
       const { setup } = await import('../src/setup.js')
       if (pos.length) throw new Error('agentlink no longer uses a shared network secret: to join a network, run the line printed by `agentlink invite` on a member')
-      return setup({ host: flags.host, peers: flags.peer || [], noService: flags['no-service'], noClaude: flags['no-claude'], noAlias: flags['no-alias'], newNetwork: flags['new-network'], join: flags.join, pin: flags.pin, net: flags.net, token: flags.token || process.env.AGENTLINK_TOKEN })
+      return setup({ host: flags.host, peers: flags.peer || [], noService: flags['no-service'], noClaude: flags['no-claude'], noCodex: flags['no-codex'], noAlias: flags['no-alias'], newNetwork: flags['new-network'], join: flags.join, pin: flags.pin, net: flags.net, token: flags.token || process.env.AGENTLINK_TOKEN })
     }
     case 'node': {
       const { runNode } = await import('../src/node.js')
@@ -89,6 +89,14 @@ async function main() {
     case 'wake': {                              // run by the Claude Code hook, not by people
       const { runWake } = await import('../src/wake.js')
       process.exit(await runWake())
+    }
+    case 'codex-hook': {                        // run by Codex's SessionStart hook
+      const { runCodexHook } = await import('../src/codex.js')
+      process.exit(await runCodexHook())
+    }
+    case 'codex-wake': {                        // started by codex-hook, in the background
+      const { runCodexWake } = await import('../src/codex.js')
+      process.exit(await runCodexWake({ thread: flags.thread, pids: flags.pids, cwd: flags.cwd, codex: flags.codex }))
     }
     case 'claude': {
       const { launchClaude } = await import('../src/claude.js')

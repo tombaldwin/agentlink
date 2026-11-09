@@ -71,6 +71,18 @@ bare name means this machine:
 
 Run `agentlink setup` again after adding a new account, so it's included.
 
+## Claude Code and Codex together
+
+If Codex is installed when you run `agentlink setup`, its sessions join the network and are woken by
+messages like Claude Code's. Trust agentlink's hook the first time Codex asks. A Codex session is
+named after its folder, so with a Claude Code session already in `~/code/api`, a Codex session there
+is `api-2` (ask either one who's online to check):
+
+> **You, to Claude:** Ask api-2@desktop.local to review the migration in this branch, and fix what it
+> finds.
+
+Codex wakes, reviews it and replies, and its answer wakes Claude.
+
 ## A second opinion from Gemini
 
 Any MCP agent can join. Add agentlink to Gemini CLI in poll mode, in `~/.gemini/settings.json`:

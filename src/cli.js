@@ -13,12 +13,13 @@ export const COMMANDS = [
     help: `Starts a new network if this machine has none, and keeps its network if it has one.
 To add a machine to an existing network, don't run this: run \`agentlink invite\` on a machine
 that's already a member, and run the line it prints on the new one.
-Also enables agentlink for every Claude Code account on this machine.`,
+Also enables agentlink for every Claude Code account on this machine, and for Codex if it's installed.`,
     flags: [
       ['--new-network', 'leave this machine\'s network and start a new one'],
       ['--host <name>', 'the name other machines use for this one (default: its .local name)'],
       ['--no-service', 'don\'t install the background service'],
       ['--no-claude', 'don\'t enable agentlink in Claude Code'],
+      ['--no-codex', 'don\'t enable agentlink in Codex'],
     ],
   },
   {
@@ -59,7 +60,7 @@ Only needed if the list nears its size limit after many machines have come and g
 This starts Claude Code with agentlink as a channel, so messages appear in the session as they
 arrive. Arguments are passed to claude.`,
   },
-  { name: 'uninstall', summary: 'remove the background service and the Claude Code setup' },
+  { name: 'uninstall', summary: 'remove the background service and the Claude Code and Codex setup' },
   {
     name: 'completion', args: '<zsh | bash>', summary: 'print a shell completion script',
     help: `zsh: add this line to ~/.zshrc (after compinit, if you call it):
@@ -84,6 +85,8 @@ tool rather than being woken (use this for agents other than Claude Code).`,
     ],
   },
   { name: 'wake', summary: 'run by the Claude Code hook', hidden: true },
+  { name: 'codex-hook', summary: 'run by the Codex hook', hidden: true },
+  { name: 'codex-wake', summary: 'started by the Codex hook', hidden: true },
   { name: '__complete', summary: 'used by the completion scripts', hidden: true },
 ]
 

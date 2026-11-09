@@ -7,7 +7,8 @@ description: Set up agentlink, add machines to an agentlink network, and message
 
 agentlink lets AI agents on different machines and Claude accounts message each other. Each
 machine runs a small node, and every agent has an address, `<project folder>@<host>.local`. An
-incoming message wakes an idle Claude Code session through a background hook.
+incoming message wakes an idle Claude Code session through a background hook (and an idle Codex
+session, if Codex is installed).
 
 ## Is it installed?
 
