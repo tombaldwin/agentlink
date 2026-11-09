@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 — 2026-11-09
 
 - Clearer tool descriptions for agents: when to use each tool, `peers` versus `network`, what
   `send` returns, and what `inbox` does in each kind of session.

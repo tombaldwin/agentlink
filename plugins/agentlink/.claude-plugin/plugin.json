@@ -1,6 +1,6 @@
 {
   "name": "agentlink",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Let Claude Code sessions on different machines and Claude accounts message each other, and wake idle ones.",
   "author": { "name": "Tom Baldwin", "url": "https://github.com/tombaldwin" },
   "homepage": "https://poly.io/agentlink",

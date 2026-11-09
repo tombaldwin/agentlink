@@ -7,7 +7,7 @@
       "name": "agentlink",
       "source": "./plugins/agentlink",
       "description": "Sets up agentlink, so Claude Code sessions on different machines and Claude accounts can message each other as name@host, and an incoming message wakes an idle session.",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "license": "MIT",
       "keywords": ["agents", "multi-agent", "messaging", "mcp", "hooks"]
     }
