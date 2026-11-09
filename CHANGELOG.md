@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.3 — 2026-11-09
 
 - Codex: if it's installed, `agentlink setup` adds agentlink to Codex's `config.toml`, with a hook
   that wakes idle Codex sessions when a message arrives (through `codex queue`, Codex 0.167 or

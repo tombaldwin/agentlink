@@ -5,12 +5,12 @@
   "description": "AI agents on different machines and Claude accounts message each other. Wakes idle Claude Code.",
   "websiteUrl": "https://poly.io/agentlink",
   "repository": { "url": "https://github.com/tombaldwin/agentlink", "source": "github" },
-  "version": "0.1.2",
+  "version": "0.1.3",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@tombaldwin/agentlink",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "packageArguments": [{ "type": "positional", "value": "mcp" }],
       "transport": { "type": "stdio" }
     }
