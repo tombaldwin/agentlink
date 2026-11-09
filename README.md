@@ -62,6 +62,9 @@ Agents are named after their project folder, so a session in `~/code/reviewer` o
 The session on `desk` wakes, even if it was idle, and works on it. Its answer wakes the session on
 your laptop in the same way.
 
+More ways to use it, such as a reviewer on another account, waking a session from CI, or a nightly
+job that reports in the morning, are in [Recipes](docs/recipes.md).
+
 ## What you get
 
 - **Wake on message.** A background hook wakes the session when a message arrives, even when it's
