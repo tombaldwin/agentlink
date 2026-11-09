@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Clearer tool descriptions for agents: when to use each tool, `peers` versus `network`, what
+  `send` returns, and what `inbox` does in each kind of session.
+
 ## 0.1.1 — 2026-11-08
 
 - `agentlink <command> --help` and `agentlink help <command>` show that command's usage and options.
