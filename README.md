@@ -2,9 +2,10 @@
 
 # agentlink
 
-Let AI agents on different machines — and different Claude accounts — message each other.
-Address any agent as `name@host` (e.g. `reviewer@laptop.local`). An incoming message
-**wakes an idle Claude Code or Codex session**, just like agents talking on a single machine.
+Let AI agents on different Claude accounts — and different machines — message each other.
+Claude Code's own messaging needs every session on one account; agentlink doesn't. Address any
+agent as `name@host` (e.g. `reviewer@laptop.local`). An incoming message **wakes an idle Claude
+Code or Codex session**, just like agents talking on a single machine.
 
 <p align="center"><a href="https://poly.io/agentlink"><img src="assets/demo.gif" width="880" alt="Two Claude Code sessions on different machines: one agent asks the other a question, and the idle session wakes up, checks its code and answers"></a></p>
 <p align="center"><a href="https://poly.io/agentlink">Watch the whole one-minute demo, from setup to reply, at poly.io/agentlink</a></p>
