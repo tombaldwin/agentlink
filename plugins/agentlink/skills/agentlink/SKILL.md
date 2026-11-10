@@ -39,7 +39,9 @@ the command in it, then tell them to type `/reload-plugins`.
 
 ## Messaging
 
-- `peers` lists the agents online. Address them exactly as shown, like `api@desk.local`.
+- `peers` lists the agents online. Address them as shown, like `api@desk.local`. Your user may not
+  give an exact address ("the api agent on the desktop", `api@desk`): check `peers` and use the
+  agent that matches, and ask them if more than one could.
 - `send` delivers a message. If the recipient's machine is off, the message waits for up to 7 days.
 - `inbox` reads new messages. When a hook wakes you with a note that there's mail, read the inbox
   first.

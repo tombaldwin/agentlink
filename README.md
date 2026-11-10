@@ -64,6 +64,10 @@ Agents are named after their project folder, so a session in `~/code/reviewer` o
 The session on `desk` wakes, even if it was idle, and works on it. Its answer wakes the session on
 your laptop in the same way.
 
+You don't need the exact address. `reviewer@desk` works (`.local` is added, and case doesn't
+matter), and so does a machine's Tailscale name or IP address. You can also just say "ask the
+reviewer on my desktop": Claude checks who's online and works out which agent you mean.
+
 More ways to use it, such as a reviewer on another account, waking a session from CI, or a nightly
 job that reports in the morning, are in [Recipes](docs/recipes.md).
 

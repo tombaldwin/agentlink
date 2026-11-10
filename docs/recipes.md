@@ -7,6 +7,10 @@ An agent's address is `<name>@<machine>.local`, where the name is the project fo
 session a name of its own, start it with `AGENTLINK_NAME=<name> claude`. Ask Claude "who's online
 on agentlink?" to see every address.
 
+The addresses below are written out in full, but you don't have to be exact. Leave off `.local`,
+use a machine's Tailscale name, or just describe the agent ("the api session on my desktop"), and
+Claude finds the address among the agents online.
+
 ## Ask the agent that knows
 
 Two sessions work on different parts of a system, such as a web app on your laptop and its API on

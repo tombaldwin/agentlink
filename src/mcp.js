@@ -284,7 +284,7 @@ export const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        to: { type: 'string', description: 'Recipient address "name@host", e.g. "reviewer@laptop.local". A bare name means this machine.' },
+        to: { type: 'string', description: 'Recipient address "name@host", e.g. "reviewer@laptop.local". A bare name means this machine. If your user named the agent loosely (no ".local", a nickname for the machine, a description), match it against peers and use that address.' },
         message: { type: 'string', description: 'Message text (max 64KB).' },
       },
       required: ['to', 'message'],
