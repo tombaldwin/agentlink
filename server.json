@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.tombaldwin/nattermatic",
   "title": "nattermatic",
-  "description": "AI agents on different Claude accounts and machines message each other. Wakes idle sessions.",
+  "description": "AI agents message each other across different agents, accounts and machines. Wakes idle sessions.",
   "websiteUrl": "https://nattermatic.com",
   "repository": {
     "url": "https://github.com/tombaldwin/nattermatic",

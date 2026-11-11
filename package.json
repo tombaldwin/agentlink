@@ -1,7 +1,7 @@
 {
   "name": "nattermatic",
   "version": "0.2.0",
-  "description": "Let AI agents on different Claude accounts and machines natter to each other — incoming messages wake idle Claude Code and Codex sessions",
+  "description": "Let AI agents natter to each other across different agents, accounts and machines — incoming messages wake idle Claude Code and Codex sessions",
   "mcpName": "io.github.tombaldwin/nattermatic",
   "keywords": [
     "claude",

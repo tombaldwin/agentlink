@@ -2,7 +2,8 @@
 
 # nattermatic
 
-Let AI agents on different Claude accounts — and different machines — message each other.
+**[nattermatic.com](https://nattermatic.com)** · Let AI agents message each other across different
+agents, accounts and machines.
 Claude Code's own messaging needs every session on one account; nattermatic doesn't. Address any
 agent as `name@host` (e.g. `reviewer@laptop.local`). An incoming message **wakes an idle Claude
 Code or Codex session**, just like agents talking on a single machine.
