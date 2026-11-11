@@ -459,7 +459,7 @@ export class Roster {
     const r = { type: 'add', host, fp: fingerprint(pem), cert: certDer(pem), at: this.nextAt(), by: me.fp }
     const rec = { ...r, sig: signRecord(me.key, r) }
     this.merge([rec])
-    if (!this.ids.has(recId(rec))) throw new Error('the network has reached its size limit: remove any machine that is flooding it, then run `agentlink compact` on the founding machine')
+    if (!this.ids.has(recId(rec))) throw new Error('the network has reached its size limit: remove any machine that is flooding it, then run `natter compact` on the founding machine')
     return rec
   }
 

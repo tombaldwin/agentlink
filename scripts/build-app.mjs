@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-// Builds agentlink.app for macOS: agentlink as a single executable (Node's single-executable
+// Builds nattermatic.app for macOS: nattermatic as a single executable (Node's single-executable
 // feature, on the official Node.js binary), in an app bundle signed with hardened runtime.
 //
 // Why an app: macOS asks before a program may reach other machines on the local network, and a
-// background `node` started at login is blocked without being asked. As a signed app, agentlink
-// gets its own prompt ("Allow agentlink to find devices on local networks?"), and the permission
-// covers agentlink only, not every program run by node.
+// background `node` started at login is blocked without being asked. As a signed app, nattermatic
+// gets its own prompt ("Allow nattermatic to find devices on local networks?"), and the permission
+// covers nattermatic only, not every program run by node.
 //
 //   npm run build:app                                    this Mac's architecture
 //   npm run build:app -- --arch x64                      the other one (runs under Rosetta to build)
@@ -14,11 +14,11 @@
 // --sign defaults to the first "Developer ID Application" identity in the keychain, else the first
 // "Apple Development" one (fine for your own Macs; others need Developer ID and notarization).
 // --notarize takes a profile saved with `xcrun notarytool store-credentials`.
-// Output: dist/agentlink-<version>-macos-<arch>.zip (and .sha256), with the app in dist/<arch>/.
+// Output: dist/nattermatic-<version>-macos-<arch>.zip (and .sha256), with the app in dist/<arch>/.
 //
-// The icon is edited in Icon Composer (assets/app-icon/agentlink.icon). Its compiled forms are committed,
+// The icon is edited in Icon Composer (assets/app-icon/nattermatic.icon). Its compiled forms are committed,
 // so building needs no particular Xcode; after changing it, rebuild them with:
-//   xcrun actool assets/app-icon/agentlink.icon --compile assets/app-icon --app-icon agentlink \
+//   xcrun actool assets/app-icon/nattermatic.icon --compile assets/app-icon --app-icon nattermatic \
 //     --include-all-app-icons --platform macosx --target-device mac --minimum-deployment-target 13.5 \
 //     --output-partial-info-plist /tmp/icon.plist
 import fs from 'node:fs'
@@ -35,7 +35,7 @@ const PKG = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
 const NODE_VERSION = 'v24.22.2'
 const NODE_TEAM = 'HX7739G8FX'      // the Node.js project's Apple Developer team
 // Permanent: macOS keys the Local Network permission (and the keychain) to it.
-const BUNDLE_ID = 'io.github.tombaldwin.agentlink'
+const BUNDLE_ID = 'io.github.tombaldwin.nattermatic'
 const SEA_FUSE = 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2'
 
 const args = process.argv.slice(2)
@@ -80,14 +80,14 @@ step(`Node.js ${NODE_VERSION} (${arch}) verified`)
 // The npm package is what this machine hands to machines that join through one of its invites.
 step('packing the npm package')
 const tgzName = run('npm', ['pack', '--silent', '--pack-destination', WORK], true).trim().split('\n').pop() || ''
-fs.renameSync(path.join(WORK, tgzName), path.join(WORK, 'agentlink.tgz'))
+fs.renameSync(path.join(WORK, tgzName), path.join(WORK, 'nattermatic.tgz'))
 
 step('bundling')
 const esbuild = await import('esbuild')
-const mainJs = path.join(WORK, 'agentlink.cjs')
+const mainJs = path.join(WORK, 'nattermatic.cjs')
 const { metafile } = await esbuild.build({
   metafile: true,
-  entryPoints: [path.join(ROOT, 'bin', 'agentlink.js')],
+  entryPoints: [path.join(ROOT, 'bin', 'natter.js')],
   bundle: true, platform: 'node', format: 'cjs', target: 'node24', outfile: mainJs,
   // import.meta is only used when running from an npm install (src/self.js), never in the executable
   logOverride: { 'empty-import-meta': 'silent' },
@@ -99,16 +99,16 @@ fs.writeFileSync(mainJs, fs.readFileSync(mainJs, 'utf8').replace(/^#!.*\n/, ''))
 const blob = path.join(WORK, 'sea.blob')
 fs.writeFileSync(path.join(WORK, 'sea-config.json'), JSON.stringify({
   main: mainJs, output: blob, disableExperimentalSEAWarning: true, useCodeCache: false,
-  assets: { 'install.sh': path.join(ROOT, 'install.sh'), 'agentlink.tgz': path.join(WORK, 'agentlink.tgz') },
+  assets: { 'install.sh': path.join(ROOT, 'install.sh'), 'nattermatic.tgz': path.join(WORK, 'nattermatic.tgz') },
 }))
 // the blob must be made by the same Node binary it goes into (x64 runs under Rosetta)
 run(nodeBin, ['--experimental-sea-config', path.join(WORK, 'sea-config.json')], true)
 
 // ---- 3. the app bundle ----
-const appDir = path.join(DIST, arch, 'agentlink.app')
+const appDir = path.join(DIST, arch, 'nattermatic.app')
 fs.rmSync(path.dirname(appDir), { recursive: true, force: true })
 fs.mkdirSync(path.join(appDir, 'Contents', 'MacOS'), { recursive: true })
-const exe = path.join(appDir, 'Contents', 'MacOS', 'agentlink')
+const exe = path.join(appDir, 'Contents', 'MacOS', 'nattermatic')
 fs.copyFileSync(nodeBin, exe)
 fs.chmodSync(exe, 0o755)
 run('codesign', ['--remove-signature', exe])
@@ -126,9 +126,9 @@ const packages = [...new Set(Object.keys(metafile.inputs).map(f => f.match(/^(.*
 const line = '-'.repeat(72)
 const resources = path.join(appDir, 'Contents', 'Resources')
 fs.mkdirSync(resources)
-for (const f of ['Assets.car', 'agentlink.icns']) fs.copyFileSync(path.join(ROOT, 'assets', 'app-icon', f), path.join(resources, f))
+for (const f of ['Assets.car', 'nattermatic.icns']) fs.copyFileSync(path.join(ROOT, 'assets', 'app-icon', f), path.join(resources, f))
 fs.writeFileSync(path.join(appDir, 'Contents', 'Resources', 'THIRD_PARTY_NOTICES.txt'), [
-  `agentlink ${PKG.version}\n\n${licenceOf(ROOT)}`,
+  `nattermatic ${PKG.version}\n\n${licenceOf(ROOT)}`,
   `Node.js ${NODE_VERSION}\n\n${fs.readFileSync(path.join(WORK, nodeName, 'LICENSE'), 'utf8').trim()}`,
   ...packages.map(d => {
     const p = JSON.parse(fs.readFileSync(path.join(ROOT, d, 'package.json'), 'utf8'))
@@ -146,18 +146,18 @@ ${Object.entries(d).map(([k, v]) => `  <key>${k}</key>${typeof v === 'boolean' ?
 `
 fs.writeFileSync(path.join(appDir, 'Contents', 'Info.plist'), plist({
   CFBundleIdentifier: BUNDLE_ID,
-  CFBundleName: 'agentlink',
-  CFBundleDisplayName: 'agentlink',
-  CFBundleExecutable: 'agentlink',
-  CFBundleIconFile: 'agentlink',           // agentlink.icns, for macOS before Liquid Glass
-  CFBundleIconName: 'agentlink',           // in Assets.car, the layered icon
+  CFBundleName: 'nattermatic',
+  CFBundleDisplayName: 'nattermatic',
+  CFBundleExecutable: 'nattermatic',
+  CFBundleIconFile: 'nattermatic',           // nattermatic.icns, for macOS before Liquid Glass
+  CFBundleIconName: 'nattermatic',           // in Assets.car, the layered icon
   CFBundlePackageType: 'APPL',
   CFBundleShortVersionString: PKG.version,
   CFBundleVersion: PKG.version,
   CFBundleInfoDictionaryVersion: '6.0',
   LSMinimumSystemVersion: '13.5',          // Node.js 24's minimum
   LSUIElement: true,                       // no Dock icon or menu bar: it's a background tool
-  NSLocalNetworkUsageDescription: 'agentlink connects to your other machines on this network so the AI agents on them can message each other.',
+  NSLocalNetworkUsageDescription: 'nattermatic connects to your other machines on this network so the AI agents on them can message each other.',
 }))
 
 // ---- 4. sign (hardened runtime; V8 needs JIT and writable-executable memory) ----
@@ -179,7 +179,7 @@ const check = run(exe, ['mcp', '--check'], true).trim()
 if (check !== 'ok') throw new Error(`the built app's adapter check failed: ${check}`)
 
 // ---- 5. notarize and staple (Developer ID only), then the release zip ----
-const zip = path.join(DIST, `agentlink-${PKG.version}-macos-${arch}.zip`)
+const zip = path.join(DIST, `nattermatic-${PKG.version}-macos-${arch}.zip`)
 const ditto = () => { fs.rmSync(zip, { force: true }); run('ditto', ['-c', '-k', '--keepParent', appDir, zip]) }
 ditto()
 const profile = opt('notarize')

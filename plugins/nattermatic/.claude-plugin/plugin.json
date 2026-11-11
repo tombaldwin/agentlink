@@ -1,0 +1,10 @@
+{
+  "name": "nattermatic",
+  "version": "0.2.0",
+  "description": "Let Claude Code sessions on different Claude accounts and machines message each other, and wake idle ones.",
+  "author": { "name": "Tom Baldwin", "url": "https://github.com/tombaldwin" },
+  "homepage": "https://nattermatic.com",
+  "repository": "https://github.com/tombaldwin/nattermatic",
+  "license": "MIT",
+  "keywords": ["agents", "multi-agent", "messaging", "mcp", "hooks"]
+}

@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agentlink-home-'))
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'nattermatic-home-'))
 process.env.HOME = HOME
 process.env.SHELL = '/bin/zsh'
 let c
@@ -40,18 +40,18 @@ test('finds the default account, ~/.claude* dirs and CLAUDE_CONFIG_DIR aliases',
 test('managed shell block is idempotent and removable', () => {
   const rc = path.join(HOME, '.zshrc')
   const original = fs.readFileSync(rc, 'utf8')
-  c.writeShellBlock({ pathDir: '/opt/agentlink/bin' })
+  c.writeShellBlock({ pathDir: '/opt/nattermatic/bin' })
   const once = fs.readFileSync(rc, 'utf8')
-  c.writeShellBlock({ pathDir: '/opt/agentlink/bin' })
+  c.writeShellBlock({ pathDir: '/opt/nattermatic/bin' })
   assert.equal(fs.readFileSync(rc, 'utf8'), once)
-  assert.equal(once.match(/>>> agentlink >>>/g).length, 1)
-  assert.match(once, /export PATH="\/opt\/agentlink\/bin":"\$PATH"/)
+  assert.equal(once.match(/>>> nattermatic >>>/g).length, 1)
+  assert.match(once, /export PATH="\/opt\/nattermatic\/bin":"\$PATH"/)
   assert.ok(once.startsWith(original.trimEnd()))
   // our own -link aliases must not be detected as accounts
   assert.equal(c.claudeAccounts().length, 3)
   c.removeShellBlock()
   const after = fs.readFileSync(rc, 'utf8')
-  assert.doesNotMatch(after, /agentlink/)
+  assert.doesNotMatch(after, /nattermatic/)
   assert.match(after, /alias claude2=/)
 })
 
@@ -61,8 +61,8 @@ test('re-running setup from a normal shell keeps the PATH line', () => {
   c.writeShellBlock({ pathDir: '/opt/agent link/bin' })           // installer run
   const PATH0 = process.env.PATH
   process.env.PATH = `/opt/agent link/bin:${PATH0}`               // a later shell, PATH includes it via our block
-  delete process.env.AGENTLINK_ORIG_PATH
-  c.writeShellBlock()                                              // `agentlink setup` re-run, no bin dir known
+  delete process.env.NATTERMATIC_ORIG_PATH
+  c.writeShellBlock()                                              // `natter setup` re-run, no bin dir known
   process.env.PATH = PATH0
   assert.match(fs.readFileSync(rc, 'utf8'), /export PATH="\/opt\/agent link\/bin":"\$PATH"/)
   c.removeShellBlock()
@@ -77,11 +77,11 @@ test('isRegistered reads the account config file', t => {
   process.env.PATH = `${bin}:${PATH0}`
   t.after(() => { process.env.PATH = PATH0 })
   assert.equal(c.isRegistered(''), false)
-  fs.writeFileSync(path.join(HOME, '.claude.json'), JSON.stringify({ mcpServers: { agentlink: { command: c.adapterCmd()[0], args: c.adapterCmd().slice(1) } } }))
+  fs.writeFileSync(path.join(HOME, '.claude.json'), JSON.stringify({ mcpServers: { nattermatic: { command: c.adapterCmd()[0], args: c.adapterCmd().slice(1) } } }))
   assert.equal(c.isRegistered(''), false, 'the adapter without the hook is half a setup')
   c.installHook('')
   assert.equal(c.isRegistered(''), true)
-  fs.writeFileSync(path.join(HOME, '.claude.json'), JSON.stringify({ mcpServers: { agentlink: { command: '/old/node', args: ['x'] } } }))
+  fs.writeFileSync(path.join(HOME, '.claude.json'), JSON.stringify({ mcpServers: { nattermatic: { command: '/old/node', args: ['x'] } } }))
   assert.equal(c.isRegistered(''), false, 'stale path counts as unregistered')
 })
 
@@ -110,8 +110,8 @@ test('the wake hook goes into settings without disturbing them, and comes out cl
     assert.ok(wakes(ev)[0].timeout >= 86400)
   }
   assert.ok(s.hooks.Stop.some(g => g.hooks.some(h => h.command === 'say done')), 'other Stop hooks stay')
-  assert.ok(s.permissions.allow.includes('mcp__agentlink__inbox') && s.permissions.allow.includes('Bash(ls)'))
-  assert.ok(!s.permissions.allow.includes('mcp__agentlink__send'), 'sending keeps the session\'s normal rules')
+  assert.ok(s.permissions.allow.includes('mcp__nattermatic__inbox') && s.permissions.allow.includes('Bash(ls)'))
+  assert.ok(!s.permissions.allow.includes('mcp__nattermatic__send'), 'sending keeps the session\'s normal rules')
   c.removeHook(dir)
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), mine)
 })
@@ -134,9 +134,9 @@ test('settings stay where they are: symlinks are followed, modes kept, unreadabl
   // someone else's script that happens to end in " wake" stays
   const other = path.join(HOME, '.claude-other')
   fs.mkdirSync(other)
-  fs.writeFileSync(path.join(other, 'settings.json'), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: '~/bin/agentlink-notify.sh wake' }] }] } }))
+  fs.writeFileSync(path.join(other, 'settings.json'), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: '~/bin/nattermatic-notify.sh wake' }] }] } }))
   c.installHook(other); c.removeHook(other)
-  assert.equal(JSON.parse(fs.readFileSync(path.join(other, 'settings.json'), 'utf8')).hooks.Stop[0].hooks[0].command, '~/bin/agentlink-notify.sh wake')
+  assert.equal(JSON.parse(fs.readFileSync(path.join(other, 'settings.json'), 'utf8')).hooks.Stop[0].hooks[0].command, '~/bin/nattermatic-notify.sh wake')
 })
 
 test('settings that cannot be read are left alone', () => {
@@ -171,7 +171,7 @@ test('only an interactive session waits: a script must never hang on the hook', 
   assert.ok(!interactive('claude', 'ttys003', { CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' }))
   assert.match(wakeText(1, 'bob'), /a new message has/)
   assert.match(wakeText(3, 'bob'), /3 new messages have/)
-  assert.match(wakeText(1, 'bob'), /mcp__agentlink__inbox/)
+  assert.match(wakeText(1, 'bob'), /mcp__nattermatic__inbox/)
 })
 
 test('the installer and the program agree on the oldest Claude Code', () => {
@@ -204,13 +204,13 @@ test('the account a shell is using is enabled even if nothing else names it', ()
 test('a block that lost its END takes none of the user\'s lines with it', () => {
   const rc = path.join(HOME, '.zshrc')
   const saved = fs.readFileSync(rc, 'utf8')
-  c.writeShellBlock({ pathDir: '/opt/agentlink/bin' })
-  fs.writeFileSync(rc, fs.readFileSync(rc, 'utf8').replace('# <<< agentlink <<<\n', '') + 'export MINE=1\n')
-  c.writeShellBlock({ pathDir: '/opt/agentlink/bin' })
-  c.writeShellBlock({ pathDir: '/opt/agentlink/bin' })
+  c.writeShellBlock({ pathDir: '/opt/nattermatic/bin' })
+  fs.writeFileSync(rc, fs.readFileSync(rc, 'utf8').replace('# <<< nattermatic <<<\n', '') + 'export MINE=1\n')
+  c.writeShellBlock({ pathDir: '/opt/nattermatic/bin' })
+  c.writeShellBlock({ pathDir: '/opt/nattermatic/bin' })
   const text = fs.readFileSync(rc, 'utf8')
   assert.match(text, /export MINE=1/)
-  assert.equal(text.match(/>>> agentlink >>>/g).length, 1, 'and the stray marker goes')
+  assert.equal(text.match(/>>> nattermatic >>>/g).length, 1, 'and the stray marker goes')
   c.removeShellBlock()
   assert.match(fs.readFileSync(rc, 'utf8'), /export MINE=1/)
   fs.writeFileSync(rc, saved)
@@ -219,7 +219,7 @@ test('a block that lost its END takes none of the user\'s lines with it', () => 
 test('shell files: bytes are kept, nothing is made for nothing, and one we can\'t read is left alone', () => {
   const rc = path.join(HOME, '.zshrc')
   const saved = fs.readFileSync(rc)
-  fs.rmSync(path.join(HOME, '.agentlink', 'bin-dir'), { force: true })
+  fs.rmSync(path.join(HOME, '.nattermatic', 'bin-dir'), { force: true })
   const latin = Buffer.concat([Buffer.from('export X=caf'), Buffer.from([0xe9]), Buffer.from('\n')])
   fs.writeFileSync(rc, latin)
   c.writeShellBlock({})
@@ -234,7 +234,7 @@ test('shell files: bytes are kept, nothing is made for nothing, and one we can\'
   process.env.SHELL = '/bin/sh'
   const profile = path.join(HOME, '.profile')
   fs.rmSync(profile, { force: true })
-  fs.rmSync(path.join(HOME, '.agentlink', 'bin-dir'), { force: true })
+  fs.rmSync(path.join(HOME, '.nattermatic', 'bin-dir'), { force: true })
   c.writeShellBlock({})
   assert.ok(!fs.existsSync(profile), 'no file for an empty block')
   c.writeShellBlock({ pathDir: '/opt/x/bin' })
@@ -260,11 +260,11 @@ test('uninstalling and setting up again puts the PATH line back', () => {
   const saved = fs.readFileSync(rc, 'utf8')
   const shell = process.env.SHELL
   process.env.SHELL = '/bin/zsh'
-  c.writeShellBlock({ pathDir: '/opt/agentlink/bin' })
+  c.writeShellBlock({ pathDir: '/opt/nattermatic/bin' })
   c.removeShellBlock()
-  assert.doesNotMatch(fs.readFileSync(rc, 'utf8'), /opt\/agentlink/)
+  assert.doesNotMatch(fs.readFileSync(rc, 'utf8'), /opt\/nattermatic/)
   c.writeShellBlock()
-  assert.match(fs.readFileSync(rc, 'utf8'), /export PATH="\/opt\/agentlink\/bin":"\$PATH"/)
+  assert.match(fs.readFileSync(rc, 'utf8'), /export PATH="\/opt\/nattermatic\/bin":"\$PATH"/)
   c.removeShellBlock()
   fs.writeFileSync(rc, saved)
   process.env.SHELL = shell
@@ -319,27 +319,27 @@ test('which finds commands without the which program, and node paths are ones th
   process.env.PATH = PATH0
 })
 
-test('the hook is only ever agentlink\'s, and a user\'s other hooks stay as they were', () => {
+test('the hook is only ever nattermatic\'s, and a user\'s other hooks stay as they were', () => {
   const dir = path.join(HOME, '.claude-hooks'), file = path.join(dir, 'settings.json')
   fs.mkdirSync(dir, { recursive: true })
-  const theirs = { hooks: { Stop: [{ matcher: 'x', hooks: [] }, { hooks: [{ type: 'command', command: '~/bin/notify-agentlink wake' }] }], PostToolUse: [{ matcher: 'Edit', hooks: [{ type: 'command', command: 'lint' }] }] } }
+  const theirs = { hooks: { Stop: [{ matcher: 'x', hooks: [] }, { hooks: [{ type: 'command', command: '~/bin/notify-natter wake' }] }], PostToolUse: [{ matcher: 'Edit', hooks: [{ type: 'command', command: 'lint' }] }] } }
   fs.writeFileSync(file, JSON.stringify(theirs))
   c.installHook(dir)
   const on = JSON.parse(fs.readFileSync(file, 'utf8'))
-  assert.equal(on.hooks.PostToolUse.at(-1).matcher, 'mcp__agentlink__inbox', 'reading the inbox arms it again: an interrupted turn fires nothing else')
+  assert.equal(on.hooks.PostToolUse.at(-1).matcher, 'mcp__nattermatic__inbox', 'reading the inbox arms it again: an interrupted turn fires nothing else')
   assert.equal(on.hooks.Stop.length, 3)
   c.removeHook(dir)
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).hooks, theirs.hooks)
   assert.deepEqual(fs.readdirSync(dir), ['settings.json'], 'and no temporary file is left')
 })
 
-test('a Claude Code too old for the hook counts as registered, so `agentlink claude` doesn\'t re-register every time', () => {
+test('a Claude Code too old for the hook counts as registered, so `natter claude` doesn\'t re-register every time', () => {
   const dir = fs.mkdtempSync(path.join(HOME, 'fake-claude-')), bin = path.join(dir, 'claude')
   fs.writeFileSync(bin, '#!/bin/sh\necho "notice: 9.9.9 is out"\necho "2.1.300 (Claude Code)"\n', { mode: 0o755 })
   const PATH0 = process.env.PATH
   process.env.PATH = `${dir}:${PATH0}`
   assert.deepEqual(c.wakeSupport(), { ok: false, version: '2.1.300' }, 'its version, not a number on another line')
-  fs.writeFileSync(path.join(HOME, '.claude.json'), JSON.stringify({ mcpServers: { agentlink: { command: c.adapterCmd()[0], args: c.adapterCmd().slice(1) } } }))
+  fs.writeFileSync(path.join(HOME, '.claude.json'), JSON.stringify({ mcpServers: { nattermatic: { command: c.adapterCmd()[0], args: c.adapterCmd().slice(1) } } }))
   assert.ok(c.isRegistered(''))
   fs.rmSync(path.join(HOME, '.claude.json'))
   process.env.PATH = PATH0
@@ -354,6 +354,42 @@ test('print mode and attended sessions, as Claude Code tells its hooks', async (
   assert.ok(!interactive('claude -p hi', 'ttys003', { CLAUDE_CODE_SESSION_ATTENDED: '1' }))
   assert.ok(interactive('claude --output-format stream-json', '', { CLAUDE_CODE_SESSION_ATTENDED: '1' }), 'a host that attends its session')
   assert.deepEqual(launchFlags('claude --resume abc --model opus fix it'), ['--resume', '--model'])
-  assert.deepEqual(launchFlags('claude --channels server:agentlink server:other -c'), ['--channels', 'server:agentlink', 'server:other', '-c'])
-  assert.deepEqual(launchFlags('claude server:agentlink is down'), [])
+  assert.deepEqual(launchFlags('claude --channels server:nattermatic server:other -c'), ['--channels', 'server:nattermatic', 'server:other', '-c'])
+  assert.deepEqual(launchFlags('claude server:nattermatic is down'), [])
+})
+
+test('settings agentlink wrote, before the rename, are taken over: its hook, its tool rules and its shell block', () => {
+  const dir = path.join(HOME, '.claude-renamed')
+  fs.mkdirSync(dir)
+  const file = path.join(dir, 'settings.json')
+  const oldHook = cmd => ({ hooks: [{ type: 'command', command: cmd, async: true, asyncRewake: true }] })
+  fs.writeFileSync(file, JSON.stringify({
+    hooks: {
+      Stop: [oldHook(`'${HOME}/.agentlink/bin/agentlink' wake`), { hooks: [{ type: 'command', command: 'say done' }] }],
+      PostToolUse: [{ matcher: 'mcp__agentlink__inbox', ...oldHook(`'/usr/bin/node' --no-warnings '/x/bin/agentlink.js' wake`) }],
+    },
+    permissions: { allow: ['mcp__agentlink__inbox', 'mcp__agentlink__peers', 'mcp__agentlink__send', 'Bash(ls)'], deny: ['mcp__agentlink__invite'] },
+  }))
+  c.installHook(dir)
+  const text = fs.readFileSync(file, 'utf8')
+  assert.doesNotMatch(text, /mcp__agentlink|agentlink(\.js)?'? wake/, 'nothing of the old name left')
+  const s = JSON.parse(text)
+  assert.ok(s.hooks.Stop.some(g => g.hooks.some(h => h.command === 'say done')), 'the user\'s own hooks stay')
+  assert.equal(s.hooks.Stop.flatMap(g => g.hooks).filter(h => / wake$/.test(h.command)).length, 1, 'one wake hook, the new one')
+  assert.deepEqual(s.permissions.allow.sort(), ['Bash(ls)', 'mcp__nattermatic__inbox', 'mcp__nattermatic__peers', 'mcp__nattermatic__send'])
+  assert.deepEqual(s.permissions.deny, ['mcp__nattermatic__invite'], 'the user\'s rules keep applying')
+  c.removeHook(dir)
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).permissions, { allow: ['mcp__nattermatic__send', 'Bash(ls)'], deny: ['mcp__nattermatic__invite'] })
+
+  // the shell block, with its PATH line into the old home
+  const rc = path.join(HOME, '.zshrc')
+  const saved = fs.readFileSync(rc, 'utf8')
+  fs.writeFileSync(rc, `${saved}\n# >>> agentlink >>> (managed by \`agentlink setup\`; re-run it to refresh)\nexport PATH="${HOME}/.agentlink/bin":"$PATH"\n# <<< agentlink <<<\n`)
+  c.writeShellBlock()
+  const after = fs.readFileSync(rc, 'utf8')
+  assert.doesNotMatch(after, />>> agentlink|\.agentlink/)
+  assert.ok(after.includes(`export PATH="${HOME}/.nattermatic/bin":"$PATH"`), after)
+  c.removeShellBlock()
+  assert.equal(fs.readFileSync(rc, 'utf8').trimEnd(), saved.trimEnd())
+  fs.writeFileSync(rc, saved)
 })

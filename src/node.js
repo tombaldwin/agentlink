@@ -20,6 +20,7 @@ import { fingerprint, shortFp, newIdentity, selfSignedCert } from './cert.js'
 import { Roster, MAX_ROSTER_BYTES } from './roster.js'
 import { authedRequest, exporterOf, PinError, ProtoError, PROTO, MAX_BODY as MAX_REQ, MIN_RATE } from './tls.js'
 import { SEA, PKG_ROOT, readAsset, appBundle } from './self.js'
+import { renameOldDb } from './legacy.js'
 import { parseAddr, parsePeer, normHost, machineName, sanitizeName, shQuote, validAddr, tailscaleName, localIPv4s, errMsg, netHint, ensureHomeDir, rosterPath, MAX_TTL_MS, VERSION } from './config.js'
 
 const MAX_JOIN_REQ = 16 << 10          // a join request (before any identity check) is small
@@ -90,7 +91,8 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
   let roster
   try {
     roster = Roster.load(rosterPath(cfg.dir))
-    db = openStore(path.join(cfg.dir, 'agentlink.db'))
+    renameOldDb(cfg.dir)          // this node has the port, so no other node of this machine has it open
+    db = openStore(path.join(cfg.dir, 'nattermatic.db'))
   } catch (e) { server.close(); throw e }
   const myPub = crypto.createPublicKey(me.key)
   // the roster decides this machine's name: under any other, its messages wouldn't be accepted
@@ -817,7 +819,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     if (to.host !== cfg.host && !member(to.host) && removedHost(to.host)) throw httpErr(410, `${to.host} was removed from the network`)
     if (to.host !== cfg.host && !member(to.host) && !peerRow(to.host)?.configured) {
       const known = [cfg.host, ...knownPeers()].join(', ')
-      throw httpErr(404, `${to.host} is not a machine on this network, and nothing at that name answered as one (machines: ${known}). If it is new, run \`agentlink invite\` and join it first.`)
+      throw httpErr(404, `${to.host} is not a machine on this network, and nothing at that name answered as one (machines: ${known}). If it is new, run \`natter invite\` and join it first.`)
     }
     if (full(to.host, to.name)) throw fullError(`${to.name}@${to.host}`)
     /** @type {Omit<Envelope, 'sig'>} */
@@ -834,7 +836,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     if (to.host === cfg.host) {
       let st
       try { st = accept(e) } catch (err) { throw httpErr(503, `could not queue message: ${errMsg(err)}`) }
-      if (st === 'unknown-sender') throw httpErr(409, `this machine (${cfg.host}) isn't on its member list, so nothing was sent: run \`agentlink setup\``)
+      if (st === 'unknown-sender') throw httpErr(409, `this machine (${cfg.host}) isn't on its member list, so nothing was sent: run \`natter setup\``)
       if (st === 'expired') throw httpErr(400, 'the message expired before it could be queued')
       if (st === 'full') throw fullError(e.to)
       if (!st) throw httpErr(500, 'could not queue message')
@@ -876,7 +878,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
   }
   const rosterStatus = () => {
     const bytes = Buffer.byteLength(JSON.stringify(roster.records))
-    return { bytes, limit: MAX_ROSTER_BYTES, ...(bytes > MAX_ROSTER_BYTES * 0.75 ? { note: 'the member list is nearly full: remove any machine flooding it, then run `agentlink compact` on the founding machine' } : {}) }
+    return { bytes, limit: MAX_ROSTER_BYTES, ...(bytes > MAX_ROSTER_BYTES * 0.75 ? { note: 'the member list is nearly full: remove any machine flooding it, then run `natter compact` on the founding machine' } : {}) }
   }
   /** @param {string} to */
   const fullError = to => httpErr(429, `not sent: too many messages are waiting for ${to}, or this machine's message store is full. Try again once they've been read`)
@@ -936,17 +938,17 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
    * @param {{ token?: unknown, host?: unknown, cert?: unknown }} d
    */
   function join(d) {
-    if (typeof d.token !== 'string' || !inviteValid(d.token)) throw httpErr(403, 'this invite is not valid (already used, expired or revoked): run `agentlink invite` on a member for a new one')
+    if (typeof d.token !== 'string' || !inviteValid(d.token)) throw httpErr(403, 'this invite is not valid (already used, expired or revoked): run `natter invite` on a member for a new one')
     let pem, host
     try { pem = new crypto.X509Certificate(Buffer.from(String(d.cert), 'base64')).toString(); host = normHost(d.host) } catch { throw httpErr(400, 'bad join request') }
     if (!machineName(host)) throw httpErr(400, `"${host}" can't identify a machine: join under a name, by ending the invite line with \`| sh -s -- --host <name>\``)
     const fp = fingerprint(pem)
     const cur = roster.members.get(fp)
-    if (cur && cur.host !== host) throw httpErr(409, `this machine is already a member as ${cur.host}. To rename it, run \`agentlink remove ${cur.host}\` on a machine that joined before it, then run a new invite line with \`| sh -s -- --host ${host}\` at the end`)
+    if (cur && cur.host !== host) throw httpErr(409, `this machine is already a member as ${cur.host}. To rename it, run \`natter remove ${cur.host}\` on a machine that joined before it, then run a new invite line with \`| sh -s -- --host ${host}\` at the end`)
     if (!cur) {
       // 410: setup answers it by joining again with a new key (a machine isn't told it was removed)
       if (roster.removed.has(fp)) throw httpErr(410, 'this machine\'s key was removed from the network')
-      if (roster.byHost.has(host)) throw httpErr(409, `${host} is already a member of this network with a different key. On a member, run \`agentlink remove ${host}\` first, or join under another name by ending the invite line with \`| sh -s -- --host <name>\``)
+      if (roster.byHost.has(host)) throw httpErr(409, `${host} is already a member of this network with a different key. On a member, run \`natter remove ${host}\` first, or join under another name by ending the invite line with \`| sh -s -- --host <name>\``)
       try { roster.add(me, host, pem) } catch (e) { throw httpErr(507, errMsg(e)) }
       if (!roster.members.has(fp)) throw httpErr(500, 'could not add this machine')
       roster.save()
@@ -1015,16 +1017,16 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     // ---- joining (an invite token is the credential) ----
     if (req.method === 'GET' && (p === '/join/install' || p === '/join/pkg.tgz' || p === '/join/app.zip')) {
       const t = u.searchParams.get('t')
-      if (!t || !inviteValid(t)) return reply(res, 404, { error: 'this invite is not valid (already used, expired or revoked): run `agentlink invite` on a member for a new one' })
+      if (!t || !inviteValid(t)) return reply(res, 404, { error: 'this invite is not valid (already used, expired or revoked): run `natter invite` on a member for a new one' })
       if (p === '/join/install') {
         res.writeHead(200, { 'content-type': 'text/x-shellscript' })
         return res.end(installScript(req.headers.host, cfg, t, invite?.fp || ''))
       }
       const bundle = appBundle()
-      if (p === '/join/app.zip' && !bundle) return reply(res, 404, { error: 'this machine does not run the agentlink app' })
+      if (p === '/join/app.zip' && !bundle) return reply(res, 404, { error: 'this machine does not run the nattermatic app' })
       let file, size
       try { file = await (p === '/join/app.zip' && bundle ? packApp(cfg.dir, bundle) : packTarball(cfg.dir)); size = (await fs.promises.stat(file)).size } catch (e) {
-        log('could not pack agentlink for an installing machine:', errMsg(e))
+        log('could not pack nattermatic for an installing machine:', errMsg(e))
         return reply(res, 500, { error: 'package unavailable' })
       }
       const stream = fs.createReadStream(file)
@@ -1147,7 +1149,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
         pump(name)
         return
       }
-      case 'GET /local/wake': {                 // the wait behind `agentlink wake`: answers once, when there's news
+      case 'GET /local/wake': {                 // the wait behind `natter wake`: answers once, when there's news
         const pids = String(u.searchParams.get('pids') || '').split(',').map(Number).filter(Boolean)
         // by process, nearest first: a Claude started from inside another Claude's session belongs to
         // the inner one. Codex starts every session's adapter from one shared app-server, so its waiter
@@ -1220,7 +1222,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
         try { host = normHost(d.host) } catch { throw httpErr(400, `bad machine name "${d.host}"`) }
         const m = roster.byHost.get(host) || roster.byHost.get(peerRow(host)?.alias_of || '')
         if (!m) throw httpErr(404, `${host} is not a member of this network`)
-        if (m.fp === me.fp) throw httpErr(400, 'to take this machine off the network, run `agentlink uninstall` (or remove it from another member)')
+        if (m.fp === me.fp) throw httpErr(400, 'to take this machine off the network, run `natter uninstall` (or remove it from another member)')
         if (!roster.members.has(me.fp)) throw httpErr(409, 'this machine is not a member of its network')
         if (!roster.canRemove(me.fp, m.fp)) {
           const earlier = [...roster.members.values()].filter(x => x.rank < m.rank).map(x => x.host)
@@ -1261,7 +1263,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     return reply(res, 404, { error: 'not found' })
   }
 
-  log(`agentlink node ${VERSION} up: ${cfg.host}:${cfg.port} (network ${shortFp(cfg.net)}, key ${shortFp(me.fp)}, pid ${process.pid})`)
+  log(`nattermatic node ${VERSION} up: ${cfg.host}:${cfg.port} (network ${shortFp(cfg.net)}, key ${shortFp(me.fp)}, pid ${process.pid})`)
 
   // ---------- discovery ----------
   const discovery = cfg.discovery ? startDiscovery(cfg, () => roster.gateDks(), ({ host, fp, addr }) => {
@@ -1310,7 +1312,7 @@ function packApp(dir, bundle) {
   return packingApp ||= (async () => {
     const out = path.join(dir, 'dist', 'app')
     fs.mkdirSync(out, { recursive: true })
-    const zip = path.join(out, 'agentlink-app.zip')
+    const zip = path.join(out, 'nattermatic-app.zip')
     fs.rmSync(zip, { force: true })
     await execFileP('ditto', ['-c', '-k', '--keepParent', bundle, zip])
     return zip
@@ -1326,8 +1328,8 @@ function packTarball(dir) {
     fs.rmSync(out, { recursive: true, force: true })
     fs.mkdirSync(out, { recursive: true })
     if (SEA) {   // the app carries the npm package it was built from
-      const file = path.join(out, 'agentlink.tgz')
-      fs.writeFileSync(file, readAsset('agentlink.tgz'))
+      const file = path.join(out, 'nattermatic.tgz')
+      fs.writeFileSync(file, readAsset('nattermatic.tgz'))
       return file
     }
     // the npm that came with this node, if any: a private runtime is on no one's PATH
@@ -1351,12 +1353,12 @@ export function installScript(hostHeader, cfg, token, pin) {
   // our own name too, unless that's the same machine name: its address would replace the one that worked
   const peer = parsePeer(used)?.host === cfg.host ? '' : ` --peer ${sh(`${cfg.host}:${cfg.port}`)}`
   const preset = [
-    `AGENTLINK_PKG=${sh(`https://${used}/join/pkg.tgz?t=${token}`)}`,
+    `NATTERMATIC_PKG=${sh(`https://${used}/join/pkg.tgz?t=${token}`)}`,
     // a Mac joining a machine that runs the app gets the same app (Apple silicon only)
-    ...(appBundle() ? [`AGENTLINK_APP_URL=${sh(`https://${used}/join/app.zip?t=${token}`)}`] : []),
-    `AGENTLINK_PIN=${sh(pin)}`,
+    ...(appBundle() ? [`NATTERMATIC_APP_URL=${sh(`https://${used}/join/app.zip?t=${token}`)}`] : []),
+    `NATTERMATIC_PIN=${sh(pin)}`,
     // the token is passed in the environment: setup's command line is visible to other users (ps)
-    `AGENTLINK_TOKEN=${sh(token)}; export AGENTLINK_TOKEN`,
+    `NATTERMATIC_TOKEN=${sh(token)}; export NATTERMATIC_TOKEN`,
     // what the user added (`| sh -s -- --host <name>`) comes after: it's theirs, and it stays
     `set -- --join ${sh(used)} --pin ${sh(pin)} --net ${sh(cfg.net)}${peer} "$@"`,
   ].join('\n')

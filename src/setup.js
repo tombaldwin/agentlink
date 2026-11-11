@@ -13,21 +13,22 @@ import { Local } from './local.js'
 import { openStore } from './store.js'
 import { appBundle, SEA } from './self.js'
 import { codexPresent, installCodex, removeCodex, codexConfigFile } from './codex.js'
+import { moveOldHome, removeOldService, removeOldApp } from './legacy.js'
 import { claudeAccounts, register, unregister, writeShellBlock, removeShellBlock, primaryRc, claudeBin, selfCmd, checkAdapter, wakeSupport, WAKE_MIN_CLAUDE } from './claude.js'
 
 /**
- * Service names. The usual install (~/.agentlink) gets the plain names; any other agentlink home
- * (AGENTLINK_HOME, or a different $HOME such as a test sandbox) gets its own, so setting one up
+ * Service names. The usual install (~/.nattermatic) gets the plain names; any other nattermatic home
+ * (NATTERMATIC_HOME, or a different $HOME such as a test sandbox) gets its own, so setting one up
  * never boots out and replaces the user's real service.
  */
 function serviceNames() {
   const dir = path.resolve(homeDir())
-  const usual = path.join(os.userInfo().homedir, '.agentlink')
+  const usual = path.join(os.userInfo().homedir, '.nattermatic')
   const suffix = dir === usual ? '' : '-' + crypto.createHash('sha256').update(dir).digest('hex').slice(0, 8)
-  return { label: `com.agentlink.node${suffix}`, unit: `agentlink${suffix}` }
+  return { label: `com.nattermatic.node${suffix}`, unit: `nattermatic${suffix}` }
 }
-/** The agentlink home if it isn't this user's usual one: the Claude accounts and shell files here aren't its own. */
-const homeElsewhere = () => !!process.env.AGENTLINK_HOME && path.resolve(homeDir()) !== path.join(os.homedir(), '.agentlink')
+/** The nattermatic home if it isn't this user's usual one: the Claude accounts and shell files here aren't its own. */
+const homeElsewhere = () => !!process.env.NATTERMATIC_HOME && path.resolve(homeDir()) !== path.join(os.homedir(), '.nattermatic')
 const uid = () => process.getuid?.() ?? 0   // launchd domain (macOS only, where getuid exists)
 const sleepSync = (/** @type {number} */ ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 const ok = (/** @type {string} */ m) => console.log(`  ✓ ${m}`)
@@ -38,17 +39,26 @@ const warn = (/** @type {string} */ m) => console.log(`  ! ${m}`)
  *           join?: string, pin?: string, net?: string, token?: string }} opts
  */
 export async function setup({ host, peers = [], noService, noClaude, noCodex, noAlias, newNetwork, join, pin, net: netFp, token }) {
-  noService ||= process.env.AGENTLINK_NO_SERVICE === '1'
+  noService ||= process.env.NATTERMATIC_NO_SERVICE === '1'
   // what's registered with Claude Code doesn't carry a home with it: it would be this user's usual one
   if (homeElsewhere() && !(noClaude && noCodex && noAlias)) {
-    warn(`AGENTLINK_HOME is ${homeDir()}, so the Claude accounts, Codex and shell files of ${os.homedir()} are left alone`)
+    warn(`NATTERMATIC_HOME is ${homeDir()}, so the Claude accounts, Codex and shell files of ${os.homedir()} are left alone`)
     noClaude = noCodex = noAlias = true
   }
   if (host) host = normHost(host)   // throws before anything is written
-  delete process.env.AGENTLINK_TOKEN            // spent by the join: not for the processes setup starts
-  if (join && (!pin || !token)) throw new Error('--join needs --pin and --token (use the line printed by `agentlink invite`)')
+  delete process.env.NATTERMATIC_TOKEN            // spent by the join: not for the processes setup starts
+  if (join && (!pin || !token)) throw new Error('--join needs --pin and --token (use the line printed by `natter invite`)')
   if (join && !validAddr(join)) throw new Error(`--join: "${join}" is not a host:port address`)
-  console.log(`agentlink setup`)
+  console.log(`natter setup`)
+  // a machine set up as agentlink, before the rename: it keeps its key, network and messages
+  if (!homeElsewhere()) {
+    try {
+      const moved = moveOldHome(homeDir())
+      if (moved) (moved.startsWith('moved') ? ok : warn)(moved)
+      if (removeOldService()) ok('removed agentlink\'s background service')
+      if (removeOldApp(appBundle())) ok('removed agentlink.app')
+    } catch (e) { throw new Error(`could not move this machine's agentlink setup to nattermatic: ${errMsg(e)}`) }
+  }
   // an unreadable config.json stops setup: treating it as empty would change this machine's settings
   const existing = readConfigFile() || {}
   /** @type {Roster | null} */
@@ -74,11 +84,11 @@ export async function setup({ host, peers = [], noService, noClaude, noCodex, no
   try { prev = loadConfig() } catch {}
   const member = !!(identity && roster?.members.has(identity.fp))
   const memberName = member && identity ? roster?.members.get(identity.fp)?.host : undefined
-  const asked = host || (process.env.AGENTLINK_HOST ? normHost(process.env.AGENTLINK_HOST) : undefined)
+  const asked = host || (process.env.NATTERMATIC_HOST ? normHost(process.env.NATTERMATIC_HOST) : undefined)
   // the name this machine has on its network is fixed by the roster; a new network can pick a new one
   const myHost = asked || memberName || normHost(existing.host || detectHost())
   // wherever it came from: the roster won't take it, and that's no state to find out in
-  if (!machineName(myHost)) throw new Error(`"${myHost}" can't identify a machine on the network: run agentlink setup --host <name>`)
+  if (!machineName(myHost)) throw new Error(`"${myHost}" can't identify a machine on the network: run natter setup --host <name>`)
   /** @type {string[]} */
   let allPeers = []
   let banner = ''
@@ -90,7 +100,7 @@ export async function setup({ host, peers = [], noService, noClaude, noCodex, no
     // 1. the machine at the invite's address must present the key the invite names (its invite key)
     let inviter
     try { inviter = await peerCertificate(join) } catch (e) { throw new Error(`cannot reach ${join}: ${errMsg(e)}`) }
-    if (inviter.fp !== pin) throw new Error(`the machine at ${join} is not presenting this invite's key. Either the invite was already used, expired or was revoked (run \`agentlink invite\` on a member for a new one), or something else is answering at that address. Not joining.`)
+    if (inviter.fp !== pin) throw new Error(`the machine at ${join} is not presenting this invite's key. Either the invite was already used, expired or was revoked (run \`natter invite\` on a member for a new one), or something else is answering at that address. Not joining.`)
     // 2. keep this machine's key only if it is already a member of that same network (a key that
     // isn't carried between networks can't be used to link them)
     let same = member && !!netFp && roster?.net === netFp && !!identity
@@ -133,8 +143,8 @@ export async function setup({ host, peers = [], noService, noClaude, noCodex, no
     }
     if (identity && roster && !member && !newNetwork) {
       throw new Error(roster.removed.has(identity.fp)
-        ? 'this machine was removed from its network. Join again with a new invite (`agentlink invite` on a member), or start a new network with --new-network'
-        : 'this machine is not a member of its network. Join with an invite (`agentlink invite` on a member), or start a new network with --new-network')
+        ? 'this machine was removed from its network. Join again with a new invite (`natter invite` on a member), or start a new network with --new-network'
+        : 'this machine is not a member of its network. Join with an invite (`natter invite` on a member), or start a new network with --new-network')
     }
     const id = newIdentity()
     await stopRunningNode(prev ? [prev] : [])
@@ -146,14 +156,14 @@ export async function setup({ host, peers = [], noService, noClaude, noCodex, no
     invite = true
   } else {
     if (asked && asked !== memberName) {
-      throw new Error(`this machine is on its network as ${memberName}. To rename it, run \`agentlink remove ${memberName}\` on a machine that joined before it, then run a new invite line with \`| sh -s -- --host ${asked}\` at the end. Or start a new network with --new-network`)
+      throw new Error(`this machine is on its network as ${memberName}. To rename it, run \`natter remove ${memberName}\` on a machine that joined before it, then run a new invite line with \`| sh -s -- --host ${asked}\` at the end. Or start a new network with --new-network`)
     }
     ok('keeping this machine\'s existing network (use --new-network to create a new one)')
     await stopRunningNode(prev ? [prev] : [])
     allPeers = [...new Set([...(existing.peers || []), ...peers])]
   }
   // a port asked for here has to last: the background service doesn't get this environment
-  writeConfig({ host: myHost, peers: allPeers, ...(process.env.AGENTLINK_PORT ? { port: Number(process.env.AGENTLINK_PORT) } : {}) })
+  writeConfig({ host: myHost, peers: allPeers, ...(process.env.NATTERMATIC_PORT ? { port: Number(process.env.NATTERMATIC_PORT) } : {}) })
   fs.rmSync(path.join(homeDir(), 'disabled'), { force: true })
   const cfg = loadConfig()
   ok(`config written to ${path.join(homeDir(), 'config.json')} — this machine is ${cfg.host} (key ${shortFp(cfg.identity.fp)})`)
@@ -173,40 +183,43 @@ export async function setup({ host, peers = [], noService, noClaude, noCodex, no
   let broken = null
   if (!noClaude) {
     broken = registerClaude() || checkAdapter()
-    if (broken) warn(`Claude Code can't start agentlink, so sessions won't have it until this is fixed: ${broken}`)
+    if (broken) warn(`Claude Code can't start nattermatic, so sessions won't have it until this is fixed: ${broken}`)
   }
   let codexNote = ''
   if (!noCodex && codexPresent()) {
     try {
       const c = installCodex()
-      ok(`Codex: agentlink added to ${codexConfigFile()}`)
-      if (!c.hook) codexNote = '\nCodex sessions read messages with the inbox tool. Update Codex (it needs `codex queue`) and run agentlink setup again, so they\'re woken too.'
-      else if (c.approve) codexNote = '\nCodex asks you to trust agentlink\'s hook the next time it starts: trust it, so Codex sessions are woken by messages.'
+      ok(`Codex: nattermatic added to ${codexConfigFile()}`)
+      if (!c.hook) codexNote = '\nCodex sessions read messages with the inbox tool. Update Codex (it needs `codex queue`) and run natter setup again, so they\'re woken too.'
+      else if (c.approve) codexNote = '\nCodex asks you to trust nattermatic\'s hook the next time it starts: trust it, so Codex sessions are woken by messages.'
     } catch (e) { warn(`Codex: ${errMsg(e)}`) }
   }
-  const binDir = process.env.AGENTLINK_BIN_DIR
+  const binDir = process.env.NATTERMATIC_BIN_DIR
   if (!noAlias) {
-    // agentlink works without this: it mustn't stop setup before it prints the invite
+    // nattermatic works without this: it mustn't stop setup before it prints the invite
     try { writeShellBlock({ pathDir: binDir }) } catch (e) { warn(`could not update ${primaryRc()} (${errMsg(e)})${binDir ? `; add ${binDir} to your PATH yourself` : ''}`) }
     if (binDir && path.basename(process.env.SHELL || '') === 'fish') warn(`fish doesn't read ${primaryRc()}: run  fish_add_path ${binDir}`)
   }
   // moved to the app from an npm install: the old copy still works, but is no longer what runs
   if (SEA) {
     const real = (/** @type {string} */ p) => { try { return fs.realpathSync(p) } catch { return '' } }
-    const old = (process.env.AGENTLINK_ORIG_PATH ?? process.env.PATH ?? '').split(':').filter(d => d && d !== binDir)
-      .map(d => path.join(d, 'agentlink')).find(f => real(f) && real(f) !== real(process.execPath))
-    if (old) console.log(`  (an earlier npm install of agentlink is still at ${old}; new terminals use the app. Remove the old one with: npm uninstall -g @tombaldwin/agentlink)`)
+    const dirs = (process.env.NATTERMATIC_ORIG_PATH ?? process.env.PATH ?? '').split(':').filter(d => d && d !== binDir)
+    // (agentlink: an npm install from before the rename)
+    for (const [cmd, pkg] of [['natter', 'nattermatic'], ['agentlink', '@tombaldwin/agentlink']]) {
+      const old = dirs.map(d => path.join(d, cmd)).find(f => real(f) && real(f) !== real(process.execPath))
+      if (old) console.log(`  (an earlier npm install is still at ${old}; new terminals use the app. Remove the old one with: npm uninstall -g ${pkg})`)
+    }
   }
   console.log(`
 ${broken ? 'Done, but see the warning above.' : 'Done.'} In any Claude Code session that's already running, type /reload-plugins to join
 (or start it again: \`claude --continue\` picks up where it left off). New sessions join by themselves.
 Agents address each other as name@host, e.g. "send the test results to reviewer@laptop.local".
-Name a session with AGENTLINK_NAME=<name> (default: the project folder name).${codexNote}`)
+Name a session with NATTERMATIC_NAME=<name> (default: the project folder name).${codexNote}`)
   if (banner) console.log(`\n${banner}`)
   if (running && invite) {
     try { console.log(`\n${invitePrompt(await local.req('POST', '/local/invite'))}`) }
-    catch (e) { warn(`could not create an invite (${errMsg(e)}); run \`agentlink invite\` later`) }
-  } else console.log(`\nTo add another machine, ask Claude to make an invite (or run \`agentlink invite\`${running ? '' : ' once the node is running'}).`)
+    catch (e) { warn(`could not create an invite (${errMsg(e)}); run \`natter invite\` later`) }
+  } else console.log(`\nTo add another machine, ask Claude to make an invite (or run \`natter invite\`${running ? '' : ' once the node is running'}).`)
 }
 
 /**
@@ -232,7 +245,7 @@ function restoreCert(roster) {
  */
 function leaveNetwork() {
   fs.rmSync(path.join(homeDir(), 'invite.key'), { force: true })
-  const file = path.join(homeDir(), 'agentlink.db')
+  const file = path.join(homeDir(), 'nattermatic.db')
   if (!fs.existsSync(file)) return
   try {
     const db = openStore(file)
@@ -249,7 +262,7 @@ function leaveNetwork() {
 
 /** The port this machine's config says its node is on, if that's known. (A home of its own defaults to nothing: 7777 is another node's.) */
 function configuredPort() {
-  try { return readConfigFile()?.port || (process.env.AGENTLINK_HOME ? 0 : 7777) } catch { return 0 }
+  try { return readConfigFile()?.port || (process.env.NATTERMATIC_HOME ? 0 : 7777) } catch { return 0 }
 }
 
 /**
@@ -270,14 +283,14 @@ async function stopRunningNode(cfgs) {
     stopped = true
   }
   if (stopped) return
-  const port = cfgs[0]?.port || Number(process.env.AGENTLINK_PORT || readConfigFile()?.port || 7777)
+  const port = cfgs[0]?.port || Number(process.env.NATTERMATIC_PORT || readConfigFile()?.port || 7777)
   if (await portInUse(port)) warn(`something else is using port ${port} (another network's node, or another program); stop it so this machine's node can start`)
 }
 /** What it takes to reach the node when the rest of the config won't load: only the key matters. */
 function keyOnly() {
   try {
     const key = fs.readFileSync(keyPath(), 'utf8')
-    return [{ identity: { key, cert: '', fp: fingerprint(key) }, port: Number(process.env.AGENTLINK_PORT || readConfigFile()?.port || 7777), dir: homeDir() }]
+    return [{ identity: { key, cert: '', fp: fingerprint(key) }, port: Number(process.env.NATTERMATIC_PORT || readConfigFile()?.port || 7777), dir: homeDir() }]
   } catch { return [] }
 }
 /** @param {number} port */
@@ -301,13 +314,13 @@ export const installLine = (inv, host) =>
 export function formatInvites(invites) {
   if (!invites.length) return 'No unused invites.'
   const t = (/** @type {number} */ ms) => new Date(ms).toLocaleString()
-  return [`${invites.length} unused invite(s) (\`agentlink invite --revoke\` cancels them):`,
+  return [`${invites.length} unused invite(s) (\`natter invite --revoke\` cancels them):`,
     ...invites.map(i => `  made ${t(i.created_at)}, expires ${t(i.expires_at)}`)].join('\n')
 }
 
 /** Ready-to-paste instructions (for a person, or for Claude) to add another machine. @param {{ token: string, fp: string, host: string, port: number, tailscale?: string | null, ip?: string }} inv */
 export function invitePrompt(inv) {
-  let prompt = `Join my agentlink network: run  ${installLine(inv, inv.host)}`
+  let prompt = `Join my nattermatic network: run  ${installLine(inv, inv.host)}`
   if (inv.tailscale) prompt += `  — if ${inv.host} can't be reached, run  ${installLine(inv, inv.tailscale)}  instead`
   // not every machine can look up .local names (many Linux installs can't); the pinned key makes an IP just as safe
   else if (inv.ip) prompt += `  — if ${inv.host} can't be found, run  ${installLine(inv, inv.ip)}  instead`
@@ -316,15 +329,15 @@ export function invitePrompt(inv) {
 
   ${prompt}
 
-It lets one machine join and expires in 24 hours (\`agentlink invite --revoke\` cancels unused invites).
-Once it's used, expired or revoked, curl rejects the line (a key mismatch or a 404): ask Claude for a new invite, or run \`agentlink invite\`.${inv.tailscale ? '' : `
-(For machines off this LAN: install Tailscale on both, then run \`agentlink invite\` again.)`}
+It lets one machine join and expires in 24 hours (\`natter invite --revoke\` cancels unused invites).
+Once it's used, expired or revoked, curl rejects the line (a key mismatch or a 404): ask Claude for a new invite, or run \`natter invite\`.${inv.tailscale ? '' : `
+(For machines off this LAN: install Tailscale on both, then run \`natter invite\` again.)`}
 `
 }
 
-/** Enable agentlink for every Claude account here. Returns what's wrong, if it couldn't be done at all. */
+/** Enable nattermatic for every Claude account here. Returns what's wrong, if it couldn't be done at all. */
 function registerClaude() {
-  if (!claudeBin()) return 'claude was not found on PATH, in ~/.local/bin or in ~/.claude/local. Run `agentlink setup` from a terminal where `claude` works'
+  if (!claudeBin()) return 'claude was not found on PATH, in ~/.local/bin or in ~/.claude/local. Run `natter setup` from a terminal where `claude` works'
   /** @type {string | null} */
   let failed = null
   for (const acct of claudeAccounts()) {
@@ -334,7 +347,7 @@ function registerClaude() {
   }
   const { ok: wakes, version } = wakeSupport()
   const then = `so sessions won't wake by themselves; they read messages with the inbox tool`
-  if (!wakes) warn(version ? `Claude Code ${version} is older than ${WAKE_MIN_CLAUDE}, ${then}. Update Claude Code, then run agentlink setup again` : `couldn't tell which version of Claude Code this is (it needs ${WAKE_MIN_CLAUDE}), ${then}`)
+  if (!wakes) warn(version ? `Claude Code ${version} is older than ${WAKE_MIN_CLAUDE}, ${then}. Update Claude Code, then run natter setup again` : `couldn't tell which version of Claude Code this is (it needs ${WAKE_MIN_CLAUDE}), ${then}`)
   return failed
 }
 
@@ -344,7 +357,7 @@ function installService() {
   const { label: LABEL, unit: UNIT } = serviceNames()
   const logFile = path.join(cfgDir, 'node.log')
   // the service starts with this user's real home, whatever this run's is
-  const env = { PATH: process.env.PATH, ...(path.resolve(cfgDir) !== path.join(os.userInfo().homedir, '.agentlink') ? { AGENTLINK_HOME: cfgDir } : {}) }
+  const env = { PATH: process.env.PATH, ...(path.resolve(cfgDir) !== path.join(os.userInfo().homedir, '.nattermatic') ? { NATTERMATIC_HOME: cfgDir } : {}) }
   if (process.platform === 'darwin') {
     const plist = path.join(os.homedir(), 'Library', 'LaunchAgents', `${LABEL}.plist`)
     const args = [...selfCmd(), 'node']
@@ -378,7 +391,7 @@ function installService() {
     const unit = path.join(os.homedir(), '.config', 'systemd', 'user', `${UNIT}.service`)
     fs.mkdirSync(path.dirname(unit), { recursive: true })
     fs.writeFileSync(unit, `[Unit]
-Description=agentlink agent messaging node
+Description=nattermatic agent messaging node
 
 [Service]
 ExecStart=${[...selfCmd(), 'node'].map(sdQuote).join(' ')}
@@ -407,6 +420,7 @@ export async function uninstall() {
     const local = new Local(loadConfig())
     if (await local.health()) await local.req('POST', '/local/shutdown')
   } catch {}
+  if (!homeElsewhere()) removeOldService()
   if (process.platform === 'darwin') {
     spawnSync('launchctl', ['bootout', `gui/${uid()}/${LABEL}`], { stdio: 'ignore' })
     fs.rmSync(path.join(os.homedir(), 'Library', 'LaunchAgents', `${LABEL}.plist`), { force: true })
@@ -414,7 +428,7 @@ export async function uninstall() {
     spawnSync('systemctl', ['--user', 'disable', '--now', UNIT], { stdio: 'ignore' })
     fs.rmSync(path.join(os.homedir(), '.config', 'systemd', 'user', `${UNIT}.service`), { force: true })
   }
-  if (homeElsewhere()) warn(`AGENTLINK_HOME is ${homeDir()}, so the Claude accounts and shell files of ${os.homedir()} were left alone`)
+  if (homeElsewhere()) warn(`NATTERMATIC_HOME is ${homeDir()}, so the Claude accounts and shell files of ${os.homedir()} were left alone`)
   else {
     for (const acct of claudeAccounts()) {
       try { unregister(acct.dir) } catch (e) { warn(errMsg(e)) }     // one account's settings mustn't stop the rest
@@ -424,12 +438,12 @@ export async function uninstall() {
   }
   let host = ''
   try { host = loadConfig().host } catch {}
-  console.log(`Stopped agentlink and removed its service, its Claude Code registrations and its Codex settings.
-Its key, messages and settings remain in ${homeDir()}: \`agentlink setup\` turns it back on as before.
+  console.log(`Stopped nattermatic and removed its service, its Claude Code registrations and its Codex settings.
+Its key, messages and settings remain in ${homeDir()}: \`natter setup\` turns it back on as before.
 To remove it completely:
-  - take this machine off the network: on another member, run  agentlink remove ${host || '<this machine>'}
+  - take this machine off the network: on another member, run  natter remove ${host || '<this machine>'}
   - delete ${homeDir()}
-  - uninstall the program: ${appBundle() ? `delete ${appBundle()}` : `npm uninstall -g @tombaldwin/agentlink  (not needed if agentlink brought its own Node.js: that lives in ${homeDir()})`}`)
+  - uninstall the program: ${appBundle() ? `delete ${appBundle()}` : `npm uninstall -g nattermatic  (not needed if nattermatic brought its own Node.js: that lives in ${homeDir()})`}`)
 }
 
 /** systemd unit quoting: double quotes, escaped \\ and ", and % doubled (specifier escape). */

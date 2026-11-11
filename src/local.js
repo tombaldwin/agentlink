@@ -16,7 +16,7 @@ import { selfCmd } from './claude.js'
 const MAX_LOCAL_REPLY = 64 << 20   // the most an inbox read can come to: 100 messages of 64 KB, escaped
 
 /**
- * The running node is a newer agentlink than this process: this process (a session's adapter
+ * The running node is a newer nattermatic than this process: this process (a session's adapter
  * started before an upgrade, say) is the one that is out of date, and must not replace the node.
  */
 export class StaleError extends Error {}
@@ -61,8 +61,8 @@ export class Local {
 
   /** @param {unknown} e */
   wrap(e) {
-    if (e instanceof PinError || /** @type {any} */ (e)?.code === 'EPROTO') return new Error(`port ${this.cfg.port} is not answered by this machine's agentlink node`)
-    return new Error(`cannot reach the agentlink node on port ${this.cfg.port}: ${errMsg(e)}`)
+    if (e instanceof PinError || /** @type {any} */ (e)?.code === 'EPROTO') return new Error(`port ${this.cfg.port} is not answered by this machine's nattermatic node`)
+    return new Error(`cannot reach the nattermatic node on port ${this.cfg.port}: ${errMsg(e)}`)
   }
 
   /**
@@ -86,7 +86,7 @@ export class Local {
 
   /**
    * Is a node running on the port? null: nothing is listening. { foreign: true }: something that
-   * isn't this machine's node (another network's node, another user's, or not agentlink at all).
+   * isn't this machine's node (another network's node, another user's, or not nattermatic at all).
    * @returns {Promise<import('./types.js').Health | { foreign: true } | null>}
    */
   async health() {
@@ -101,18 +101,18 @@ export class Local {
   /** Make sure a node is running on this machine (start one in the background if not). */
   async ensureNode() {
     let h = await this.health()
-    if (h && 'foreign' in h) throw new Error(`port ${this.cfg.port} is used by something that is not this machine's agentlink node`)
+    if (h && 'foreign' in h) throw new Error(`port ${this.cfg.port} is used by something that is not this machine's nattermatic node`)
     if (h && versionOf(h).newer) {
-      // agentlink was upgraded while this process was running: replacing the node would downgrade it
-      throw new StaleError(`agentlink on this machine was upgraded (to ${h.version}, protocol ${h.proto}) while this program (${VERSION}, protocol ${PROTO}) was running, so it can't use the node any more`)
+      // nattermatic was upgraded while this process was running: replacing the node would downgrade it
+      throw new StaleError(`nattermatic on this machine was upgraded (to ${h.version}, protocol ${h.proto}) while this program (${VERSION}, protocol ${PROTO}) was running, so it can't use the node any more`)
     }
-    // agentlink was upgraded under a running node: replace it with this version
+    // nattermatic was upgraded under a running node: replace it with this version
     if (h && versionOf(h).differs) {
       try { await this.req('POST', '/local/shutdown') } catch {}
       for (let i = 0; i < 30 && (h = await this.health()) && !('foreign' in h) && versionOf(h).differs; i++) await sleep(100)
     }
     if (h && !('foreign' in h) && !versionOf(h).differs) return h
-    if (fs.existsSync(path.join(this.cfg.dir, 'disabled'))) throw new Error('agentlink is uninstalled on this machine (run `agentlink setup` to re-enable)')
+    if (fs.existsSync(path.join(this.cfg.dir, 'disabled'))) throw new Error('nattermatic is uninstalled on this machine (run `natter setup` to re-enable)')
     ensureHomeDir(this.cfg.dir)
     const out = fs.openSync(path.join(this.cfg.dir, 'node.log'), 'a', 0o600)
     let exited = false, spawnErr = ''
@@ -133,7 +133,7 @@ export class Local {
     }
     const h3 = await this.health()
     if (h3 && !('foreign' in h3)) return h3
-    throw new Error(`could not start agentlink node${spawnErr ? ` (${spawnErr})` : ''} (see ${path.join(this.cfg.dir, 'node.log')})`)
+    throw new Error(`could not start the nattermatic node${spawnErr ? ` (${spawnErr})` : ''} (see ${path.join(this.cfg.dir, 'node.log')})`)
   }
 
   /**

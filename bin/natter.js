@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import '../src/legacy-env.js'
 import { loadConfig, VERSION } from '../src/config.js'
 import { resolve, findCommand, mainHelp, commandHelp, suggest, completionScript } from '../src/cli.js'
 
@@ -17,7 +18,7 @@ const flags = {}
 const pos = []
 for (let i = 0; i < rest.length; i++) {
   const a = rest[i]
-  if (cmd === 'send' && pos.length) { pos.push(a); continue }    // past the address it's the message, whatever it looks like
+  if (cmd === 'to' && pos.length) { pos.push(a); continue }    // past the address it's the message, whatever it looks like
   if (a === '--') { pos.push(...rest.slice(i + 1)); break }
   const eq = a.indexOf('=')
   const k = a.startsWith('--') ? a.slice(2, eq < 0 ? undefined : eq) : ''
@@ -29,16 +30,16 @@ for (let i = 0; i < rest.length; i++) {
   } else if (BOOL_FLAGS.includes(k) && eq < 0) flags[k] = true
   else pos.push(a)
 }
-function usage(/** @type {string} */ m) { console.error(`agentlink: ${m}`); process.exit(2) }
+function usage(/** @type {string} */ m) { console.error(`natter: ${m}`); process.exit(2) }
 /** @param {string} name */
 function unknownCommand(name) {
   const s = suggest(name)
-  usage(`unknown command '${name}'${s ? ` (did you mean ${s}?)` : ''}: see agentlink help`)
+  usage(`unknown command '${name}'${s ? ` (did you mean ${s}?)` : ''}: see natter help`)
 }
 if (!findCommand(cmd)) unknownCommand(first)
-// `agentlink <command> --help` shows that command's help instead of running it. Not for claude
+// `natter <command> --help` shows that command's help instead of running it. Not for claude
 // (its options go to Claude Code), and for send only in place of the address: after it, it's message text.
-const helpAsked = cmd === 'send' ? ['--help', '-h'].includes(rest[0])
+const helpAsked = cmd === 'to' ? ['--help', '-h'].includes(rest[0])
   : cmd !== 'claude' && rest.slice(0, rest.includes('--') ? rest.indexOf('--') : undefined).some(a => a === '--help' || a === '-h')
 if (helpAsked) {
   const c = findCommand(cmd)
@@ -47,14 +48,14 @@ if (helpAsked) {
 }
 // a mistyped option (e.g. `invite --lsit`) must not run the command as if it weren't there; send
 // takes free text and claude passes everything on to Claude Code
-if (!['send', 'claude'].includes(cmd)) { const bad = pos.find(a => a.startsWith('-')); if (bad) usage(`unknown option ${bad} (see agentlink ${cmd} --help)`) }
+if (!['to', 'claude'].includes(cmd)) { const bad = pos.find(a => a.startsWith('-')); if (bad) usage(`unknown option ${bad} (see natter ${cmd} --help)`) }
 
 async function main() {
   switch (cmd) {
     case 'setup': {
       const { setup } = await import('../src/setup.js')
-      if (pos.length) throw new Error('agentlink no longer uses a shared network secret: to join a network, run the line printed by `agentlink invite` on a member')
-      return setup({ host: flags.host, peers: flags.peer || [], noService: flags['no-service'], noClaude: flags['no-claude'], noCodex: flags['no-codex'], noAlias: flags['no-alias'], newNetwork: flags['new-network'], join: flags.join, pin: flags.pin, net: flags.net, token: flags.token || process.env.AGENTLINK_TOKEN })
+      if (pos.length) throw new Error('nattermatic no longer uses a shared network secret: to join a network, run the line printed by `natter invite` on a member')
+      return setup({ host: flags.host, peers: flags.peer || [], noService: flags['no-service'], noClaude: flags['no-claude'], noCodex: flags['no-codex'], noAlias: flags['no-alias'], newNetwork: flags['new-network'], join: flags.join, pin: flags.pin, net: flags.net, token: flags.token || process.env.NATTERMATIC_TOKEN })
     }
     case 'node': {
       const { runNode } = await import('../src/node.js')
@@ -62,21 +63,21 @@ async function main() {
       const fs = await import('node:fs')
       const path = await import('node:path')
       const { homeDir } = await import('../src/config.js')
-      // If another agentlink node already serves this port (e.g. one a session started), the service
+      // If another nattermatic node already serves this port (e.g. one a session started), the service
       // waits quietly and takes over when it exits, instead of crash-looping under launchd/systemd.
       // A node started on demand by a session (--on-demand) just exits: one node is enough.
-      // Every attempt re-reads the config and honours `agentlink uninstall`, so a long-waiting
+      // Every attempt re-reads the config and honours `natter uninstall`, so a long-waiting
       // standby never revives an uninstalled node or serves a config that setup has since replaced.
       for (let waited = false; ;) {
-        if (fs.existsSync(path.join(homeDir(), 'disabled'))) { console.error('agentlink is uninstalled on this machine; not starting the node'); return }
+        if (fs.existsSync(path.join(homeDir(), 'disabled'))) { console.error('nattermatic is uninstalled on this machine; not starting the node'); return }
         const cfg = loadConfig()
         try { await runNode(cfg); return } catch (e) {
           if (/** @type {NodeJS.ErrnoException} */ (e).code !== 'EADDRINUSE') throw e
           const local = new Local(cfg)
           const h = await local.health()
           if (!h || 'foreign' in h) { console.error(`port ${cfg.port} is in use by something else`); process.exit(1) }
-          if (flags['on-demand']) { console.error(`another agentlink node (pid ${h.pid}) is already running`); return }
-          if (!waited) { console.error(`another agentlink node (pid ${h.pid}) is running; standing by`); waited = true }
+          if (flags['on-demand']) { console.error(`another nattermatic node (pid ${h.pid}) is already running`); return }
+          if (!waited) { console.error(`another nattermatic node (pid ${h.pid}) is running; standing by`); waited = true }
           await new Promise(r => setTimeout(r, 5000))
         }
       }
@@ -103,13 +104,13 @@ async function main() {
       const { Local } = await import('../src/local.js')
       return launchClaude(process.argv.slice(3), async () => new Local(loadConfig()).ensureNode())
     }
-    case 'send': {
-      if (pos.length < 2) throw new Error('usage: agentlink send <name@host> <message>')
+    case 'to': {
+      if (pos.length < 2) throw new Error('usage: natter to <name@host> <message>')
       const local = await client()
       const r = await local.req('POST', '/local/send', { from: flags.from || 'cli', to: pos[0], body: pos.slice(1).join(' ') })
       return console.log(r.status)
     }
-    case 'peers': {
+    case 'who': {
       const p = await (await client()).req('GET', '/local/peers')
       console.log(`${p.self} (this machine): ${p.local.join(', ') || '(no agents)'}`)
       for (const r of p.remote) console.log(`${r.host}: ${r.online ? (r.sessions.join(', ') || '(no agents)') : `offline${r.error ? ` — ${r.error}` : ''}`}`)
@@ -119,7 +120,7 @@ async function main() {
       return console.log(JSON.stringify(await (await client()).req('GET', '/local/status'), null, 2))
     case 'invite': {
       const local = await client()
-      if (pos.length) throw new Error('usage: agentlink invite [--list|--revoke]')
+      if (pos.length) throw new Error('usage: natter invite [--list|--revoke]')
       if (flags.revoke) return console.log(`revoked ${(await local.req('POST', '/local/invite/revoke')).revoked} unused invite(s)`)
       if (flags.list) {
         const { invites } = await local.req('GET', '/local/invites')
@@ -130,12 +131,12 @@ async function main() {
       return console.log(invitePrompt(await local.req('POST', '/local/invite')))
     }
     case 'remove': {
-      if (pos.length !== 1) throw new Error('usage: agentlink remove <host>')
+      if (pos.length !== 1) throw new Error('usage: natter remove <host>')
       const r = await (await client()).req('POST', '/local/remove', { host: pos[0] })
       return console.log(`removed ${r.removed}: it can no longer send to or receive from this network`)
     }
     case 'compact': {
-      if (pos.length) throw new Error('usage: agentlink compact [--yes]')
+      if (pos.length) throw new Error('usage: natter compact [--yes]')
       const r = await (await client()).req('POST', '/local/compact', { confirm: !!flags.yes, force: !!flags.force }, '', 150_000)
       const off = r.offline.length ? [`Not reachable just now, so anything they've heard of is unknown here: ${r.offline.join(', ')}`] : []
       if (flags.yes) return console.log([`member list compacted: ${r.before} bytes to ${r.bytes}. Members: ${r.members.join(', ')}`, ...off].join('\n'))
@@ -145,7 +146,7 @@ async function main() {
         ...(r.caughtUp ? [] : ['Not every machine could be checked in time: run this again before going ahead.']),
         `The member list is ${r.bytes} bytes (limit ${r.limit}). A machine added that isn't listed above will need a new invite, and removed machines are forgotten.`,
         'A removal this machine has not heard of can be undone by this, if the machine that made it is removed too: check any machine you removed from elsewhere is gone from the list above.',
-        'Run `agentlink compact --yes` to go ahead.',
+        'Run `natter compact --yes` to go ahead.',
       ].join('\n'))
     }
     case 'uninstall': {
@@ -155,12 +156,12 @@ async function main() {
     case 'version': return console.log(VERSION)
     case 'help': {
       if (!pos.length) return console.log(mainHelp(VERSION))
-      const c = findCommand(pos[0])
+      const c = findCommand(resolve(pos[0]))
       if (!c || c.hidden) return unknownCommand(pos[0])
       return console.log(commandHelp(c))
     }
     case 'completion': {
-      if (pos.length !== 1) throw new Error('usage: agentlink completion <zsh | bash>')
+      if (pos.length !== 1) throw new Error('usage: natter completion <zsh | bash>')
       return process.stdout.write(completionScript(pos[0]))
     }
     case '__complete': {                         // for the completion scripts: never starts a node
@@ -187,4 +188,4 @@ async function client() {
   return local
 }
 
-main().catch(e => { console.error(`agentlink: ${e instanceof Error ? e.message : e}`); process.exit(1) })
+main().catch(e => { console.error(`natter: ${e instanceof Error ? e.message : e}`); process.exit(1) })

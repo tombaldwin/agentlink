@@ -1,5 +1,5 @@
 // The command line's help, suggestions for mistyped commands, and shell completion.
-// bin/agentlink.js runs the commands; this describes them.
+// bin/natter.js runs the commands; this describes them.
 
 /**
  * @typedef {{ name: string, args?: string, summary: string, help?: string,
@@ -11,15 +11,15 @@ export const COMMANDS = [
   {
     name: 'setup', args: '[options]', summary: 'set up this machine, or update it after an upgrade',
     help: `Starts a new network if this machine has none, and keeps its network if it has one.
-To add a machine to an existing network, don't run this: run \`agentlink invite\` on a machine
+To add a machine to an existing network, don't run this: run \`natter invite\` on a machine
 that's already a member, and run the line it prints on the new one.
-Also enables agentlink for every Claude Code account on this machine, and for Codex if it's installed.`,
+Also enables nattermatic for every Claude Code account on this machine, and for Codex if it's installed.`,
     flags: [
       ['--new-network', 'leave this machine\'s network and start a new one'],
       ['--host <name>', 'the name other machines use for this one (default: its .local name)'],
       ['--no-service', 'don\'t install the background service'],
-      ['--no-claude', 'don\'t enable agentlink in Claude Code'],
-      ['--no-codex', 'don\'t enable agentlink in Codex'],
+      ['--no-claude', 'don\'t enable nattermatic in Claude Code'],
+      ['--no-codex', 'don\'t enable nattermatic in Codex'],
     ],
   },
   {
@@ -32,13 +32,13 @@ machine join and expires in 24 hours.`,
     ],
   },
   {
-    name: 'send', args: '<name@host> <message...>', summary: 'send a message to an agent',
+    name: 'to', args: '<name@host> <message...>', summary: 'send a message to an agent',
     help: `Everything after the address is the message. A bare name means this machine.
 Prints whether it was delivered, is waiting in an inbox, or is held until the machine is back.
-Example: agentlink send reviewer@laptop.local "the build is green"`,
+Example: natter to reviewer@laptop.local "the build is green"`,
     flags: [['--from <name>', 'the sender name to show (default: cli)']],
   },
-  { name: 'peers', summary: 'show which agents are online, here and on other machines' },
+  { name: 'who', summary: 'show which agents are online, here and on other machines' },
   { name: 'status', summary: 'show this machine\'s node status as JSON' },
   {
     name: 'remove', args: '<host>', summary: 'remove a machine from the network',
@@ -57,19 +57,19 @@ Only needed if the list nears its size limit after many machines have come and g
   {
     name: 'claude', args: '[claude args...]', summary: 'start Claude Code with messages pushed into the session',
     help: `Optional: ordinary \`claude\` sessions already get messages, and are woken by them.
-This starts Claude Code with agentlink as a channel, so messages appear in the session as they
+This starts Claude Code with nattermatic as a channel, so messages appear in the session as they
 arrive. Arguments are passed to claude.`,
   },
   { name: 'uninstall', summary: 'remove the background service and the Claude Code and Codex setup' },
   {
     name: 'completion', args: '<zsh | bash>', summary: 'print a shell completion script',
     help: `zsh: add this line to ~/.zshrc (after compinit, if you call it):
-  eval "$(agentlink completion zsh)"
+  eval "$(natter completion zsh)"
 bash: add this line to ~/.bashrc:
-  eval "$(agentlink completion bash)"`,
+  eval "$(natter completion bash)"`,
   },
   { name: 'version', summary: 'print the version' },
-  { name: 'help', args: '[command]', summary: 'show help for agentlink or one command' },
+  { name: 'help', args: '[command]', summary: 'show help for nattermatic or one command' },
   {
     name: 'node', summary: 'run the node (normally run by the background service)', plumbing: true,
     flags: [['--on-demand', 'exit if a node is already running, instead of standing by']],
@@ -93,36 +93,37 @@ tool rather than being woken (use this for agents other than Claude Code).`,
 const byName = new Map(COMMANDS.map(c => [c.name, c]))
 export const findCommand = (/** @type {string} */ name) => byName.get(name)
 
-const ALIASES = { '--version': 'version', '-v': 'version', '--help': 'help', '-h': 'help' }
+// send and peers are agentlink's names for to and who: scripts written for it keep working
+const ALIASES = { '--version': 'version', '-v': 'version', '--help': 'help', '-h': 'help', send: 'to', peers: 'who' }
 /** The command a first argument names, following aliases. */
 export const resolve = (/** @type {string | undefined} */ a) => a === undefined ? 'help' : /** @type {Record<string,string>} */ (ALIASES)[a] || a
 
 const line = (/** @type {Command} */ c) => {
-  const left = `  agentlink ${c.name}${c.args ? ` ${c.args}` : ''}`
+  const left = `  natter ${c.name}${c.args ? ` ${c.args}` : ''}`
   return left.length < 40 ? left.padEnd(40) + c.summary : `${left}\n${' '.repeat(40)}${c.summary}`
 }
 
 /** @param {string} version */
 export function mainHelp(version) {
   const shown = COMMANDS.filter(c => !c.hidden)
-  return `agentlink ${version} — lets AI agents on your machines message each other
+  return `nattermatic ${version} — lets AI agents on different Claude accounts and machines natter to each other
 
-Usage: agentlink <command> [options]
+Usage: natter <command> [options]
 
 ${shown.filter(c => !c.plumbing).map(line).join('\n')}
 
 Run by your agent or the service, not usually by hand:
 ${shown.filter(c => c.plumbing).map(line).join('\n')}
 
-agentlink help <command> (or agentlink <command> --help) shows a command's options.
-https://github.com/tombaldwin/agentlink`
+natter help <command> (or natter <command> --help) shows a command's options.
+https://github.com/tombaldwin/nattermatic`
 }
 
 /** @param {Command} c */
 export function commandHelp(c) {
   const flags = c.flags?.length
     ? `\n\nOptions:\n${c.flags.map(([f, d]) => `  ${f.padEnd(18)}${d}`).join('\n')}` : ''
-  return `Usage: agentlink ${c.name}${c.args ? ` ${c.args}` : ''}
+  return `Usage: natter ${c.name}${c.args ? ` ${c.args}` : ''}
 
 ${c.summary[0].toUpperCase()}${c.summary.slice(1)}.${c.help ? `\n\n${c.help}` : ''}${flags}`
 }
@@ -143,10 +144,10 @@ function distance(/** @type {string} */ a, /** @type {string} */ b) {
 export function suggest(/** @type {string} */ typed) {
   const t = typed.toLowerCase()
   let best = '', bestD = Infinity
-  for (const c of COMMANDS) {
-    if (c.hidden) continue
-    const d = c.name.startsWith(t) && t.length >= 2 ? 0 : distance(t, c.name)
-    if (d < bestD) { best = c.name; bestD = d }
+  // (the old names too: someone who typed sned meant send, which still works)
+  for (const name of [...COMMANDS.filter(c => !c.hidden).map(c => c.name), 'send', 'peers']) {
+    const d = name.startsWith(t) && t.length >= 2 ? 0 : distance(t, name)
+    if (d < bestD) { best = name; bestD = d }
   }
   return bestD <= Math.max(1, Math.floor(best.length / 3)) ? best : undefined
 }
@@ -157,26 +158,26 @@ const flagNames = (/** @type {Command} */ c) => (c.flags || []).map(([f]) => f.s
 
 /** @param {string} shell */
 export function completionScript(shell) {
-  const cases = COMMANDS.filter(c => !c.hidden && c.flags?.length && c.name !== 'send')   // send completes addresses instead
+  const cases = COMMANDS.filter(c => !c.hidden && c.flags?.length && c.name !== 'to')   // to completes addresses instead
   if (shell === 'zsh') {
-    return `#compdef agentlink
-# agentlink completion for zsh. Load it with:  eval "$(agentlink completion zsh)"
-_agentlink() {
+    return `#compdef natter nattermatic agentlink
+# natter completion for zsh. Load it with:  eval "$(natter completion zsh)"
+_natter() {
   local -a cmds
   cmds=(${COMMANDS.filter(c => !c.hidden).map(c => `'${c.name}:${c.summary.replace(/'/g, `'\\''`).replace(/:/g, '\\:')}'`).join(' ')})
   if (( CURRENT == 2 )); then
-    _describe -t commands 'agentlink command' cmds
+    _describe -t commands 'natter command' cmds
     return
   fi
   case $words[2] in
-    send)
+    to|send)
       if (( CURRENT == 3 )); then
-        local -a addrs; addrs=(\${(f)"$(agentlink __complete addresses 2>/dev/null)"})
+        local -a addrs; addrs=(\${(f)"$(natter __complete addresses 2>/dev/null)"})
         compadd -- $addrs
       fi ;;
     remove)
       if (( CURRENT == 3 )); then
-        local -a hosts; hosts=(\${(f)"$(agentlink __complete hosts 2>/dev/null)"})
+        local -a hosts; hosts=(\${(f)"$(natter __complete hosts 2>/dev/null)"})
         compadd -- $hosts
       fi ;;
     help|completion)
@@ -188,19 +189,19 @@ ${cases.map(c => `    ${c.name}) compadd -- ${flagNames(c).join(' ')} --help ;;`
     *) compadd -- --help ;;
   esac
 }
-if (( $+functions[compdef] )); then compdef _agentlink agentlink; else autoload -Uz compinit && compinit && compdef _agentlink agentlink; fi
+if (( $+functions[compdef] )); then compdef _natter natter nattermatic agentlink; else autoload -Uz compinit && compinit && compdef _natter natter nattermatic agentlink; fi
 `
   }
   if (shell === 'bash') {
-    return `# agentlink completion for bash. Load it with:  eval "$(agentlink completion bash)"
-_agentlink() {
+    return `# natter completion for bash. Load it with:  eval "$(natter completion bash)"
+_natter() {
   local cur=\${COMP_WORDS[COMP_CWORD]} words=""
   if [ "$COMP_CWORD" -eq 1 ]; then
     words="${visible().join(' ')}"
   elif [ "$COMP_CWORD" -eq 2 ]; then
     case \${COMP_WORDS[1]} in
-      send) words=$(agentlink __complete addresses 2>/dev/null) ;;
-      remove) words=$(agentlink __complete hosts 2>/dev/null) ;;
+      to|send) words=$(natter __complete addresses 2>/dev/null) ;;
+      remove) words=$(natter __complete hosts 2>/dev/null) ;;
       help) words="${visible().join(' ')}" ;;
       completion) words="zsh bash" ;;
       claude) return ;;
@@ -215,8 +216,8 @@ ${cases.map(c => `      ${c.name}) words="${flagNames(c).join(' ')}" ;;`).join('
   local IFS=$'\\n'
   COMPREPLY=($(IFS=$' \\n' compgen -W "$words" -- "$cur"))
 }
-complete -o default -F _agentlink agentlink
+complete -o default -F _natter natter nattermatic agentlink
 `
   }
-  throw new Error('usage: agentlink completion <zsh | bash>')
+  throw new Error('usage: natter completion <zsh | bash>')
 }

@@ -6,12 +6,16 @@ import { spawn, spawnSync } from 'node:child_process'
 import { cmpVersion, ensureHomeDir, errMsg, homeDir, shQuote as sq, writeAtomic } from './config.js'
 
 import { SEA, BIN } from './self.js'
+import { oldHome, renamedRule } from './legacy.js'
 export { BIN }
 const HOME = os.homedir()
-const BEGIN = '# >>> agentlink >>> (managed by `agentlink setup`; re-run it to refresh)'
-const END = '# <<< agentlink <<<'
+const BEGIN = '# >>> nattermatic >>> (managed by `natter setup`; re-run it to refresh)'
+const END = '# <<< nattermatic <<<'
+// the block as agentlink wrote it, before the rename: read as this one
+const OLD_BEGIN = '# >>> agentlink >>> (managed by `agentlink setup`; re-run it to refresh)', OLD_END = '# <<< agentlink <<<'
+const renamedBlock = (/** @type {string} */ s) => s.split('\n').map(l => l === OLD_BEGIN ? BEGIN : l === OLD_END ? END : l).join('\n')
 // one token: the option is variadic, so a separate value would also swallow a following prompt
-const CHANNEL_FLAGS = ['--dangerously-load-development-channels=server:agentlink']
+const CHANNEL_FLAGS = ['--dangerously-load-development-channels=server:nattermatic']
 // claude subcommands that must not get the channel flags
 const SUBCOMMANDS = new Set(['mcp', 'config', 'doctor', 'update', 'upgrade', 'install', 'migrate-installer',
   'setup-token', 'plugin', 'plugins', 'agents', 'auth', 'login', 'logout', '-v', '--version', '-h', '--help'])
@@ -27,7 +31,7 @@ export function nodePath() {
   const cands = /** @type {string[]} */ ([which('node'), '/opt/homebrew/bin/node', '/usr/local/bin/node'].filter(c => c !== null && !/\/fnm_multishells\/|^\/run\//.test(c)))
   return cands.find(c => me ? real(c) === me : real(c)) || process.execPath
 }
-/** The command that runs agentlink: node and bin/agentlink.js, or the single executable. */
+/** The command that runs nattermatic: node and bin/natter.js, or the single executable. */
 export const selfCmd = () => SEA ? [process.execPath] : [nodePath(), '--no-warnings', BIN]
 export const adapterCmd = () => [...selfCmd(), 'mcp']
 
@@ -35,7 +39,7 @@ export const adapterCmd = () => [...selfCmd(), 'mcp']
  * Can Claude Code actually start the adapter it is registered with? Runs the registered command
  * with --check (which loads the adapter and its dependencies, then exits). Without this, a broken
  * install (say, a git clone without \`npm install\`) only shows up as a session that silently has
- * no agentlink. Returns null if it starts, otherwise why not.
+ * no nattermatic. Returns null if it starts, otherwise why not.
  * @returns {string | null}
  */
 export function checkAdapter() {
@@ -45,7 +49,7 @@ export function checkAdapter() {
   const why = (r.error ? errMsg(r.error) : (r.stderr || r.stdout || `exit ${r.status}`)).trim().split('\n').filter(Boolean).slice(-2).join(' ')
   const root = path.dirname(path.dirname(BIN))
   const clone = !SEA && fs.existsSync(path.join(root, '.git')) && !fs.existsSync(path.join(root, 'node_modules'))
-  return clone ? `${why} — this is a git clone without its dependencies: run \`npm install\` in ${root}, then \`agentlink setup\` again` : why
+  return clone ? `${why} — this is a git clone without its dependencies: run \`npm install\` in ${root}, then \`natter setup\` again` : why
 }
 /** Double-quote for sh, escaping the characters that stay special inside double quotes. */
 const dq = (/** @type {unknown} */ v) => `"${String(v).replace(/[\\"$`]/g, '\\$&')}"`
@@ -137,13 +141,13 @@ export function claudeAccounts() {
     const d = path.resolve(expand(process.env.CLAUDE_CONFIG_DIR))
     if (!byDir.has(d)) byDir.set(d, { dir: d, alias: `claude-${path.basename(d).replace(/^\./, '')}` })
   }
-  // accounts enabled by `agentlink claude` under a CLAUDE_CONFIG_DIR found nowhere above
+  // accounts enabled by `natter claude` under a CLAUDE_CONFIG_DIR found nowhere above
   for (const d of registeredDirs()) if (!byDir.has(d) && fs.existsSync(d)) byDir.set(d, { dir: d, alias: `claude-${path.basename(d).replace(/^\./, '')}` })
   return [...byDir.values()]
 }
 
 const accountsFile = () => path.join(homeDir(), 'accounts.json')
-/** Account dirs agentlink has registered with (so uninstall can find them all). @returns {string[]} */
+/** Account dirs nattermatic has registered with (so uninstall can find them all). @returns {string[]} */
 function registeredDirs() {
   try { const v = JSON.parse(fs.readFileSync(accountsFile(), 'utf8')); return Array.isArray(v) ? v.filter(d => typeof d === 'string' && d) : [] } catch { return [] }
 }
@@ -161,7 +165,9 @@ const configFile = dir => dir ? path.join(dir, '.claude.json') : path.join(HOME,
 /** @param {string} dir */
 export function isRegistered(dir) {
   try {
-    const s = JSON.parse(fs.readFileSync(configFile(dir), 'utf8')).mcpServers?.agentlink
+    const servers = JSON.parse(fs.readFileSync(configFile(dir), 'utf8')).mcpServers
+    const s = servers?.nattermatic
+    if (servers?.agentlink) return false      // still registered under the old name
     if (!s || JSON.stringify([s.command, ...(s.args || [])]) !== JSON.stringify(adapterCmd())) return false
     // (a Claude Code too old for the hook is registered without it)
     return WAKE_EVENTS.every(ev => readSettings(settingsFile(dir)).hooks?.[ev]?.some((/** @type {any} */ g) => g.hooks?.some((/** @type {any} */ h) => isWakeHook(h) && h.command === wakeCmd()))) || !wakeSupport().ok
@@ -176,19 +182,20 @@ const envFor = dir => {
   return env
 }
 
-/** Register the agentlink MCP server (user scope) in one account. @param {string} dir */
+/** Register the nattermatic MCP server (user scope) in one account. @param {string} dir */
 export function register(dir) {
   const claude = claudeBin()
   if (!claude) throw new Error('claude not found on PATH')
   const env = envFor(dir)
   /** @type {any} */
   let was = null
-  try { was = JSON.parse(fs.readFileSync(configFile(dir), 'utf8')).mcpServers?.agentlink } catch {}
-  spawnSync(claude, ['mcp', 'remove', '-s', 'user', 'agentlink'], { stdio: 'ignore', env })
-  const r = spawnSync(claude, ['mcp', 'add', '-s', 'user', 'agentlink', '--', ...adapterCmd()], { encoding: 'utf8', env })
+  try { was = JSON.parse(fs.readFileSync(configFile(dir), 'utf8')).mcpServers?.nattermatic } catch {}
+  spawnSync(claude, ['mcp', 'remove', '-s', 'user', 'nattermatic'], { stdio: 'ignore', env })
+  spawnSync(claude, ['mcp', 'remove', '-s', 'user', 'agentlink'], { stdio: 'ignore', env })    // its name before the rename
+  const r = spawnSync(claude, ['mcp', 'add', '-s', 'user', 'nattermatic', '--', ...adapterCmd()], { encoding: 'utf8', env })
   if (r.status !== 0) {
     // what worked before is better than nothing
-    if (was?.command) spawnSync(claude, ['mcp', 'add', '-s', 'user', 'agentlink', '--', was.command, ...(was.args || [])], { stdio: 'ignore', env })
+    if (was?.command) spawnSync(claude, ['mcp', 'add', '-s', 'user', 'nattermatic', '--', was.command, ...(was.args || [])], { stdio: 'ignore', env })
     throw new Error((r.stderr || r.stdout || `exit ${r.status}`).trim())
   }
   rememberDir(dir)
@@ -198,7 +205,7 @@ export function register(dir) {
 /** @param {string} dir */
 export function unregister(dir) {
   const claude = claudeBin()
-  if (claude) spawnSync(claude, ['mcp', 'remove', '-s', 'user', 'agentlink'], { stdio: 'ignore', env: envFor(dir) })
+  if (claude) for (const name of ['nattermatic', 'agentlink']) spawnSync(claude, ['mcp', 'remove', '-s', 'user', name], { stdio: 'ignore', env: envFor(dir) })
   removeHook(dir)
 }
 
@@ -209,27 +216,28 @@ export function unregister(dir) {
 // idle, and Claude Code enforces a timeout even so: 20 days, the most a timer can hold with room to spare.
 const WAKE_EVENTS = ['SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure', 'PostToolUse']
 // the oldest Claude Code this has been tested with. Older ones may not know these hook events, and
-// settings they can't read would affect far more than agentlink, so they don't get the hook
+// settings they can't read would affect far more than nattermatic, so they don't get the hook
 export const WAKE_MIN_CLAUDE = '2.1.318'
 const WAKE_TIMEOUT_S = 20 * 86400
 // reading messages and seeing who's online run unattended; sending keeps the session's normal rules
-const WAKE_TOOLS = ['mcp__agentlink__inbox', 'mcp__agentlink__peers']
+const WAKE_TOOLS = ['mcp__nattermatic__inbox', 'mcp__nattermatic__peers']
 
 const settingsFile = (/** @type {string} */ dir) => path.join(dir || path.join(HOME, '.claude'), 'settings.json')
 const wakeCmd = () => [...selfCmd().map(a => a.startsWith('-') ? a : sq(a)), 'wake'].join(' ')
 /** @param {any} h */
-const isWakeHook = h => typeof h?.command === 'string' && /(^|[\s'"/])agentlink(\.js)?['"]? wake$/.test(h.command)
+// (agentlink: the hook as it was before the rename, replaced by this one)
+const isWakeHook = h => typeof h?.command === 'string' && /(^|[\s'"/])(natter|nattermatic|agentlink)(\.js)?['"]? wake$/.test(h.command)
 
 /** @param {string} file @returns {Record<string, any>} */
 function readSettings(file) {
   let text
   try { text = fs.readFileSync(file, 'utf8') } catch (e) {
     if (/** @type {any} */ (e).code === 'ENOENT' && !isDangling(file)) return {}
-    throw new Error(`can't read ${file}, so agentlink left it alone (${errMsg(e)})`)
+    throw new Error(`can't read ${file}, so nattermatic left it alone (${errMsg(e)})`)
   }
   // never overwrite settings we can't read: they're the user's
   try { const v = JSON.parse(text); if (v && typeof v === 'object' && !Array.isArray(v)) return v } catch {}
-  throw new Error(`${file} isn't valid JSON, so agentlink left it alone. Fix it, then run agentlink setup again`)
+  throw new Error(`${file} isn't valid JSON, so nattermatic left it alone. Fix it, then run natter setup again`)
 }
 /** A symlink to nothing: writing through it would quietly replace the link. @param {string} file */
 function isDangling(file) { try { return fs.lstatSync(file).isSymbolicLink() } catch { return false } }
@@ -246,7 +254,7 @@ function writeSettings(file, s) {
   fs.mkdirSync(path.dirname(file), { recursive: true })
   replaceFile(file, JSON.stringify(s, null, 2) + '\n', 0o600)     // they can hold secrets in `env`
 }
-/** `s` with no agentlink hook left, keeping everything else. @param {Record<string, any>} s */
+/** `s` with no nattermatic hook left, keeping everything else. @param {Record<string, any>} s */
 function withoutHook(s) {
   if (!s.hooks || typeof s.hooks !== 'object') return s
   let took = false
@@ -269,8 +277,10 @@ export function installHook(dir) {
   const file = settingsFile(dir)
   const s = withoutHook(readSettings(file))
   s.hooks ??= {}
-  for (const ev of WAKE_EVENTS) (s.hooks[ev] ??= []).push({ ...(ev === 'PostToolUse' ? { matcher: 'mcp__agentlink__inbox' } : {}), hooks: [{ type: 'command', command: wakeCmd(), async: true, asyncRewake: true, timeout: WAKE_TIMEOUT_S }] })
+  for (const ev of WAKE_EVENTS) (s.hooks[ev] ??= []).push({ ...(ev === 'PostToolUse' ? { matcher: 'mcp__nattermatic__inbox' } : {}), hooks: [{ type: 'command', command: wakeCmd(), async: true, asyncRewake: true, timeout: WAKE_TIMEOUT_S }] })
   s.permissions ??= {}
+  // rules the user wrote for agentlink's tools, such as allowing send, keep applying under the new name
+  for (const k of ['allow', 'ask', 'deny']) if (Array.isArray(s.permissions[k])) s.permissions[k] = [...new Set(s.permissions[k].map(renamedRule))]
   if (s.permissions.allow === undefined || Array.isArray(s.permissions.allow)) s.permissions.allow = [...new Set([...(s.permissions.allow || []), ...WAKE_TOOLS])]
   writeSettings(file, s)
 }
@@ -282,7 +292,7 @@ export function removeHook(dir) {
   const before = JSON.stringify(readSettings(file))
   const s = withoutHook(readSettings(file))
   if (Array.isArray(s.permissions?.allow)) {
-    s.permissions.allow = s.permissions.allow.filter((/** @type {string} */ t) => !WAKE_TOOLS.includes(t))
+    s.permissions.allow = s.permissions.allow.filter((/** @type {string} */ t) => !WAKE_TOOLS.includes(t) && !WAKE_TOOLS.includes(renamedRule(t)))
     if (!s.permissions.allow.length) delete s.permissions.allow
     if (!Object.keys(s.permissions).length) delete s.permissions
   }
@@ -312,7 +322,7 @@ function blockDir(text) {
   const m = text.match(new RegExp(BLOCK))?.[0].match(/^export PATH="((?:[^"\\]|\\.)*)":"\$PATH"$/m)
   return m ? fromRc(m[1]).replace(/\\(.)/g, '$1') : null
 }
-// `agentlink uninstall` takes the PATH line out and `agentlink setup` puts it back, with no installer to say what it was
+// `natter uninstall` takes the PATH line out and `natter setup` puts it back, with no installer to say what it was
 const pathDirFile = () => path.join(homeDir(), 'bin-dir')
 
 /**
@@ -323,16 +333,17 @@ const pathDirFile = () => path.join(homeDir(), 'bin-dir')
 export function writeShellBlock({ pathDir } = {}) {
   const rc = primaryRc()
   const cur = readRc(rc)
-  const prevDir = blockDir(cur)
+  // a PATH line agentlink wrote into its old home: that home is this one now
+  const prevDir = blockDir(renamedBlock(cur))?.replace(new RegExp(`^${escRe(oldHome())}(?=/|$)`), homeDir()) ?? null
   let saved = null
   try { saved = fs.readFileSync(pathDirFile(), 'utf8').trim() || null } catch {}
   // a re-run from a normal shell doesn't know the installer's bin dir: keep the one we wrote before
   const dir = pathDir || prevDir || saved
   // compare with the PATH the user's shell had before the installer touched it. A dir we wrote stays:
   // it may be on this shell's PATH only because of our line
-  const userPath = (process.env.AGENTLINK_ORIG_PATH || process.env.PATH || '').split(':')
+  const userPath = (process.env.NATTERMATIC_ORIG_PATH || process.env.PATH || '').split(':')
   const line = dir && (dir === prevDir || dir === saved || !userPath.includes(dir)) ? `export PATH=${asRc(dq(dir))}:"$PATH"` : null
-  const rest = stripBlock(cur)
+  const rest = stripBlock(renamedBlock(cur))
   const next = line ? `${rest.replace(/\n*$/, '\n')}\n${BEGIN}\n${line}\n${END}\n` : rest
   if (next !== cur) writeRc(rc, next)
   fs.rmSync(pathDirFile(), { force: true })
@@ -344,7 +355,7 @@ export function removeShellBlock() {
   const problems = []
   for (const rc of rcFiles()) {
     try {
-      const cur = readRc(rc)
+      const cur = renamedBlock(readRc(rc))
       if (!cur.includes(BEGIN)) continue
       const dir = blockDir(cur)
       if (dir) try { ensureHomeDir(); writeAtomic(pathDirFile(), dir, 0o600) } catch {}    // only a convenience
@@ -361,35 +372,35 @@ export function removeShellBlock() {
 export const isPrintFlag = w => /^(-[a-zA-Z]*p[a-zA-Z]*|--print)(=|$)/.test(w)
 
 /**
- * `agentlink claude [args]`: run claude for the current account with agentlink enabled.
+ * `natter claude [args]`: run claude for the current account with nattermatic enabled.
  * @param {string[]} args
  * @param {() => Promise<unknown>} ensureNode
  */
 export async function launchClaude(args, ensureNode) {
   const claude = claudeBin()
-  if (!claude) { console.error('agentlink: claude not found on PATH'); process.exit(127) }
+  if (!claude) { console.error('nattermatic: claude not found on PATH'); process.exit(127) }
   const dir = process.env.CLAUDE_CONFIG_DIR ? path.resolve(expand(process.env.CLAUDE_CONFIG_DIR)) : ''
-  // subcommands, print mode (which ignores channels) and an uninstalled agentlink run claude as is
+  // subcommands, print mode (which ignores channels) and an uninstalled nattermatic run claude as is
   const disabled = fs.existsSync(path.join(homeDir(), 'disabled'))
-  if (disabled) console.error('agentlink: uninstalled on this machine (run `agentlink setup` to re-enable); starting claude without it')
+  if (disabled) console.error('nattermatic: uninstalled on this machine (run `natter setup` to re-enable); starting claude without it')
   const passthrough = disabled || (args[0] && SUBCOMMANDS.has(args[0]))
   const print = args.some(isPrintFlag)
   if (!passthrough) {
     if (!isRegistered(dir)) {
-      try { register(dir); console.error(`agentlink: enabled for this Claude account (${dir || 'default'})`) }
-      catch (e) { console.error(`agentlink: could not register with this account: ${errMsg(e)}`) }
+      try { register(dir); console.error(`nattermatic: enabled for this Claude account (${dir || 'default'})`) }
+      catch (e) { console.error(`nattermatic: could not register with this account: ${errMsg(e)}`) }
       const broken = checkAdapter()
-      if (broken) console.error(`agentlink: WARNING: Claude Code can't start agentlink, so this session won't have it: ${broken}`)
+      if (broken) console.error(`nattermatic: WARNING: Claude Code can't start nattermatic, so this session won't have it: ${broken}`)
     }
-    await Promise.resolve().then(ensureNode).catch(e => console.error(`agentlink: ${errMsg(e)}`))   // never blocks claude
+    await Promise.resolve().then(ensureNode).catch(e => console.error(`nattermatic: ${errMsg(e)}`))   // never blocks claude
   }
-  // AGENTLINK_CHANNEL tells the adapter that this session really has the channel enabled; without
+  // NATTERMATIC_CHANNEL tells the adapter that this session really has the channel enabled; without
   // it (a plain `claude`), pushed messages would be ignored, so the adapter keeps them for `inbox`
   const channel = !passthrough && !print
-  const env = { ...process.env, AGENTLINK_CHANNEL: channel ? '1' : '' }   // not inherited from an outer session
+  const env = { ...process.env, NATTERMATIC_CHANNEL: channel ? '1' : '' }   // not inherited from an outer session
   const child = spawn(claude, channel ? [...CHANNEL_FLAGS, ...args] : args, { stdio: 'inherit', env })
   process.on('SIGINT', () => {})                       // the child owns the terminal, and gets this from it
   for (const sig of /** @type {const} */ (['SIGTERM', 'SIGHUP'])) process.on(sig, () => child.kill(sig))
-  child.on('error', e => { console.error(`agentlink: could not start claude: ${errMsg(e)}`); process.exit(127) })
+  child.on('error', e => { console.error(`nattermatic: could not start claude: ${errMsg(e)}`); process.exit(127) })
   child.on('exit', (code, signal) => process.exit(code ?? (signal ? 128 + (os.constants.signals[signal] || 0) : 1)))
 }

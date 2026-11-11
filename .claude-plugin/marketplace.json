@@ -1,13 +1,21 @@
 {
-  "name": "agentlink",
+  "name": "nattermatic",
   "owner": { "name": "Tom Baldwin", "url": "https://github.com/tombaldwin" },
-  "metadata": { "description": "Let AI agents on different machines and Claude accounts message each other." },
+  "metadata": { "description": "Let AI agents on different Claude accounts and machines natter to each other." },
   "plugins": [
     {
+      "name": "nattermatic",
+      "source": "./plugins/nattermatic",
+      "description": "Sets up nattermatic, so Claude Code sessions on different Claude accounts and machines can message each other as name@host, and an incoming message wakes an idle session.",
+      "version": "0.2.0",
+      "license": "MIT",
+      "keywords": ["agents", "multi-agent", "messaging", "mcp", "hooks"]
+    },
+    {
       "name": "agentlink",
-      "source": "./plugins/agentlink",
-      "description": "Sets up agentlink, so Claude Code sessions on different machines and Claude accounts can message each other as name@host, and an incoming message wakes an idle session.",
-      "version": "0.1.3",
+      "source": "./plugins/nattermatic",
+      "description": "nattermatic under its old name, agentlink: for plugins installed before the rename. New installs: nattermatic.",
+      "version": "0.2.0",
       "license": "MIT",
       "keywords": ["agents", "multi-agent", "messaging", "mcp", "hooks"]
     }

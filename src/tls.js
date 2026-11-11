@@ -1,4 +1,4 @@
-// Connections between agentlink machines.
+// Connections between nattermatic machines.
 //
 // Nodes present a throwaway TLS certificate (a fresh key per connection), so someone who connects
 // to a node's port learns nothing they could recognise the machine by later, on another network.
@@ -28,7 +28,7 @@ export class PinError extends Error {}
 export class ProtoError extends Error {
   /** @param {number} theirs */
   constructor(theirs) {
-    super(`it runs ${theirs > PROTO ? 'a newer' : 'an older'} version of agentlink (protocol ${theirs}; this machine: ${PROTO}). Upgrade the older machine: re-run the installer, or \`npm install -g @tombaldwin/agentlink\` and \`agentlink setup\``)
+    super(`it runs ${theirs > PROTO ? 'a newer' : 'an older'} version of nattermatic (protocol ${theirs}; this machine: ${PROTO}). Upgrade the older machine: re-run the installer, or \`npm install -g nattermatic\` and \`natter setup\``)
   }
 }
 
@@ -51,7 +51,7 @@ export const exporterOf = sock => sock.exportKeyingMaterial(32, 'EXPORTER-agentl
 function mapErr(e) {
   const code = /** @type {any} */ (e)?.code
   // the far end doesn't speak TLS (a plain HTTP server answers our handshake with garbage)
-  if (code === 'EPROTO' || /^ERR_SSL_/.test(code || '')) return Object.assign(new Error('not an agentlink node (no TLS)'), { code: 'EPROTO' })
+  if (code === 'EPROTO' || /^ERR_SSL_/.test(code || '')) return Object.assign(new Error('not a nattermatic node (no TLS)'), { code: 'EPROTO' })
   return e
 }
 

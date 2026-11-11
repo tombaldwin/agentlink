@@ -19,10 +19,10 @@ import { Local } from '../src/local.js'
 import { readIdentity } from '../src/config.js'
 import { openStore } from '../src/store.js'
 
-const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'agentlink.js')
-// AGENTLINK_TEST_EXE runs everything with a built single executable (the macOS app) instead
-const [EXE, ...PRE] = process.env.AGENTLINK_TEST_EXE ? [path.resolve(process.env.AGENTLINK_TEST_EXE)] : [process.execPath, '--no-warnings', BIN]
-const ROOT = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'agentlink-e2e-'))
+const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'natter.js')
+// NATTERMATIC_TEST_EXE runs everything with a built single executable (the macOS app) instead
+const [EXE, ...PRE] = process.env.NATTERMATIC_TEST_EXE ? [path.resolve(process.env.NATTERMATIC_TEST_EXE)] : [process.execPath, '--no-warnings', BIN]
+const ROOT = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'nattermatic-e2e-'))
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const NODES = { a: 17771, b: 17772, c: 17773, d: 17774, e: 17775, f: 17776, g: 17777, h: 17778, i: 17779, j: 17780, k: 17781, l: 17782, m: 17783, n: 17784 }
 const EXTRA_PORTS = [17790, 17791, 17792, 17793]
@@ -48,7 +48,7 @@ function home(n, conf = {}, roster = n === 'd' ? OTHER_NET : NET) {
   fs.writeFileSync(path.join(dir, 'roster.json'), JSON.stringify({ net: roster.net, records: roster.records }))
   return dir
 }
-const envFor = n => ({ ...process.env, AGENTLINK_HOME: path.join(ROOT, n) })
+const envFor = n => ({ ...process.env, NATTERMATIC_HOME: path.join(ROOT, n) })
 const localOf = n => new Local({ identity: readIdentity(path.join(ROOT, n)), port: NODES[n], dir: path.join(ROOT, n) })
 
 const procs = {}
@@ -77,7 +77,7 @@ function cliAsync(n, ...args) {
 /** A command expected to fail: its stderr. */
 function cliFails(n, ...args) {
   const r = spawnSync(EXE, [...PRE, ...args], { env: envFor(n), encoding: 'utf8' })
-  assert.notEqual(r.status, 0, `expected \`agentlink ${args.join(' ')}\` to fail:\n${r.stdout}`)
+  assert.notEqual(r.status, 0, `expected \`nattermatic ${args.join(' ')}\` to fail:\n${r.stdout}`)
   return r.stderr
 }
 function cli(n, ...args) {
@@ -89,7 +89,7 @@ async function adapter(n, name, poll = false) {
   const transport = new StdioClientTransport({
     command: EXE,
     args: [...PRE, 'mcp', '--name', name, ...(poll === 'plain' ? [] : poll ? ['--poll'] : ['--channel'])],
-    env: { ...envFor(n), AGENTLINK_LISTEN_GRACE_MS: '100' }, stderr: 'ignore',
+    env: { ...envFor(n), NATTERMATIC_LISTEN_GRACE_MS: '100' }, stderr: 'ignore',
   })
   const client = new Client({ name: 'test', version: '0' }, { capabilities: {} })
   const got = []
@@ -194,9 +194,9 @@ try {
     const net = await bob.call('network')
     assert.match(net, /This machine: b\.test/)
     assert.match(net, /in joining order[^\n]*\n  a\.test — online; founded the network\n  b\.test — this machine; added by a\.test/)
-    assert.match(net, /agentlink remove <host>/)
+    assert.match(net, /natter remove <host>/)
     const inv = await bob.call('invite')
-    assert.match(inv, /Join my agentlink network: run  curl -fsSL -k --pinnedpubkey "sha256\/\/[^"]+" "https:\/\/b\.test:\d+\/join\/install\?t=/)
+    assert.match(inv, /Join my nattermatic network: run  curl -fsSL -k --pinnedpubkey "sha256\/\/[^"]+" "https:\/\/b\.test:\d+\/join\/install\?t=/)
     assert.match(inv, /Don't send it to another agent/)
     assert.match(await bob.call('invite', { list: true }), /^1 unused invite\(s\)[^\n]*\n  made .*, expires /)
     assert.match(await bob.call('invite', { revoke: true }), /Cancelled 1 unused invite/)
@@ -516,7 +516,7 @@ try {
     // a row stored by an older version is dropped at startup instead of halting the flush loop
     await stopNode('a')
     const { DatabaseSync } = await import('node:sqlite')
-    const db = new DatabaseSync(path.join(ROOT, 'a', 'agentlink.db'))
+    const db = new DatabaseSync(path.join(ROOT, 'a', 'nattermatic.db'))
     db.prepare(`INSERT INTO messages (id,from_addr,to_addr,to_host,to_name,body,sent_at,expires_at,sig,role,state,next_attempt,updated_at)
       VALUES ('poison','x@a.test','y@b.test','b.test','y','p',1,?,'s','outbox','pending',0,1)`).run(2n ** 60n)
     db.close()
@@ -708,8 +708,8 @@ try {
     assert.match(cliFails('a', 'send', 'bob@typo.test', 'hi'), /machines: a\.test, /, 'a typo is refused at once, listing the machines')
   })
 
-  // ---- setup, invites, joining, removal (real `agentlink setup`, nodes on ports i/k/l) ----
-  const setupEnv = (n, extra = {}) => ({ ...process.env, AGENTLINK_HOME: path.join(ROOT, `s-${n}`), AGENTLINK_PORT: String(NODES[n]), AGENTLINK_HOST: `${n}.test`, AGENTLINK_DISCOVERY: '0', AGENTLINK_AUTO_ALIASES: '0', ...extra })
+  // ---- setup, invites, joining, removal (real `natter setup`, nodes on ports i/k/l) ----
+  const setupEnv = (n, extra = {}) => ({ ...process.env, NATTERMATIC_HOME: path.join(ROOT, `s-${n}`), NATTERMATIC_PORT: String(NODES[n]), NATTERMATIC_HOST: `${n}.test`, NATTERMATIC_DISCOVERY: '0', NATTERMATIC_AUTO_ALIASES: '0', ...extra })
   const setup = (n, args = [], extra = {}) => spawnSync(EXE, [...PRE, 'setup', ...args, '--no-service', '--no-claude', '--no-alias'], { env: setupEnv(n, extra), encoding: 'utf8', timeout: 60_000 })
   const scli = (n, ...args) => spawnSync(EXE, [...PRE, ...args], { env: setupEnv(n), encoding: 'utf8', timeout: 30_000 })
   const sLocal = n => new Local({ identity: readIdentity(path.join(ROOT, `s-${n}`)), port: NODES[n], dir: path.join(ROOT, `s-${n}`) })
@@ -733,7 +733,7 @@ try {
     r = setup('i')
     assert.equal(r.status, 0, r.stderr)
     assert.doesNotMatch(r.stdout, /New network created/)
-    assert.doesNotMatch(r.stdout, /Join my agentlink network/, 're-running setup makes no new invite')
+    assert.doesNotMatch(r.stdout, /Join my nattermatic network/, 're-running setup makes no new invite')
     assert.equal(readIdentity(path.join(ROOT, 's-i')).fp, fp1, 'key kept')
     r = setup('i', ['--new-network'])
     assert.match(r.stdout, /New network created/)
@@ -749,8 +749,8 @@ try {
     const url = `https://127.0.0.1:${NODES.i}/join/install?t=${inv.token}`
     const good = spawnSync(curlBin, ['-fsSL', '-k', '--pinnedpubkey', `sha256//${inv.pin}`, url], { encoding: 'utf8' })
     assert.equal(good.status, 0, good.stderr)
-    assert.match(good.stdout, /AGENTLINK_PIN=/)
-    assert.match(good.stdout, /AGENTLINK_TOKEN=/)
+    assert.match(good.stdout, /NATTERMATIC_PIN=/)
+    assert.match(good.stdout, /NATTERMATIC_TOKEN=/)
     assert.doesNotMatch(good.stdout, /--token/, 'the token is never put on a command line')
     assert.match(good.stdout, /^set -- --join .* "\$@"$/m, 'what the user adds to the line (--host) is kept')
     const bad = spawnSync(curlBin, ['-fsSL', '-k', '--pinnedpubkey', `sha256//${newIdentity().fp}`, url], { encoding: 'utf8' })
@@ -762,7 +762,7 @@ try {
     const r = setup('k', joinArgs(inv))
     assert.equal(r.status, 0, r.stdout + r.stderr)
     assert.match(r.stdout, /Joined the network via i\.test/)
-    assert.doesNotMatch(r.stdout, /Join my agentlink network/, 'a machine that just joined opens no invite of its own')
+    assert.doesNotMatch(r.stdout, /Join my nattermatic network/, 'a machine that just joined opens no invite of its own')
     assert.equal(scli('k', 'invite', '--list').stdout.trim(), 'No unused invites.')
     const typo = scli('k', 'invite', '--lsit')
     assert.equal(typo.status, 2)
@@ -790,7 +790,7 @@ try {
     assert.notEqual(r.status, 0)
     assert.match(r.stderr, /not presenting this invite's key/)
     // a name that's already a member
-    r = setup('l', joinArgs(fresh), { AGENTLINK_HOST: 'k.test' })
+    r = setup('l', joinArgs(fresh), { NATTERMATIC_HOST: 'k.test' })
     assert.notEqual(r.status, 0)
     assert.match(r.stderr, /k\.test is already a member/)
     // revoked
@@ -802,7 +802,7 @@ try {
     const other = parseInvite(scli('i', 'invite').stdout)
     assert.equal(other.pin, fresh.pin, 'open invites share the invite key')
     const { DatabaseSync } = await import('node:sqlite')
-    const db = new DatabaseSync(path.join(ROOT, 's-i', 'agentlink.db'))
+    const db = new DatabaseSync(path.join(ROOT, 's-i', 'nattermatic.db'))
     db.prepare(`UPDATE invites SET expires_at=1 WHERE hash=?`).run(crypto.createHash('sha256').update(fresh.token).digest('base64url'))
     db.close()
     r = setup('l', joinArgs(fresh))
@@ -822,7 +822,7 @@ try {
     const out = scli('k', 'send', 'x@i.test', 'after removal').stdout
     assert.doesNotMatch(out, /pushed to|stored on/)
     assert.match(scli('i', 'send', 'x@k.test', 'to the removed').stderr, /k\.test was removed from the network/)
-    assert.match(scli('i', 'remove', 'i.test').stderr, /agentlink uninstall/)
+    assert.match(scli('i', 'remove', 'i.test').stderr, /natter uninstall/)
   })
 
   const netOf = n => JSON.parse(fs.readFileSync(path.join(ROOT, `s-${n}`, 'roster.json'), 'utf8')).net
@@ -841,14 +841,14 @@ try {
 
   await step('a machine is renamed by removing it and joining under the new name', async () => {
     let fresh = parseInvite(scli('i', 'invite').stdout)
-    const asIs = setup('k', [...joinArgs(fresh), '--net', netOf('i')], { AGENTLINK_HOST: 'k2.test' })
+    const asIs = setup('k', [...joinArgs(fresh), '--net', netOf('i')], { NATTERMATIC_HOST: 'k2.test' })
     assert.notEqual(asIs.status, 0)
-    assert.match(asIs.stderr, /already a member as k\.test\. To rename it, run `agentlink remove k\.test`/)
+    assert.match(asIs.stderr, /already a member as k\.test\. To rename it, run `natter remove k\.test`/)
     assert.equal(scli('i', 'remove', 'k.test').status, 0)
-    const r = setup('k', [...joinArgs(fresh), '--net', netOf('i')], { AGENTLINK_HOST: 'k2.test' })
+    const r = setup('k', [...joinArgs(fresh), '--net', netOf('i')], { NATTERMATIC_HOST: 'k2.test' })
     assert.equal(r.status, 0, r.stdout + r.stderr)
     assert.ok(JSON.parse(scli('i', 'status').stdout).members.some(m => m.host === 'k2.test'))
-    const stay = setup('k', [], { AGENTLINK_HOST: 'other.test' })
+    const stay = setup('k', [], { NATTERMATIC_HOST: 'other.test' })
     assert.notEqual(stay.status, 0, 'and without an invite the name can\'t be changed, by flag or by environment')
     assert.match(stay.stderr, /on its network as k2\.test/)
   })
@@ -882,7 +882,7 @@ try {
     const env = setupEnv('i')
     const standby = spawn(EXE, [...PRE, 'node'], { env, stdio: 'ignore' })
     await sleep(1000)
-    fs.writeFileSync(path.join(ROOT, 's-i', 'disabled'), '')        // what `agentlink uninstall` writes first
+    fs.writeFileSync(path.join(ROOT, 's-i', 'disabled'), '')        // what `natter uninstall` writes first
     await sLocal('i').req('POST', '/local/shutdown')
     const exited = await Promise.race([new Promise(r => standby.once('exit', () => r(true))), sleep(8000).then(() => false)])
     if (!exited) standby.kill('SIGKILL')
@@ -968,7 +968,7 @@ try {
     await waitFor(async () => (await localOf('c').req('GET', '/local/history', undefined, '?name=zed')).messages.some(m => m.id === e.id), 15000, 'delivery to c')
     assert.ok(JSON.parse(cli('c', 'status')).members.some(m => m.host === 'n.test'), 'c learned of n.test from a')
     const { DatabaseSync } = await import('node:sqlite')
-    const db = new DatabaseSync(path.join(ROOT, 'a', 'agentlink.db'))
+    const db = new DatabaseSync(path.join(ROOT, 'a', 'nattermatic.db'))
     const row = db.prepare('SELECT state, attempts FROM messages WHERE id=?').get(e.id)
     db.close()
     assert.equal(row.state, 'forwarded')
@@ -981,7 +981,7 @@ try {
     home('m', { routes: {}, peers: [`127.0.0.1:${NODES.n}`] }, r)
     home('n', { routes: {}, peers: [] }, r)
     // a laptop that left the LAN: its LAN address is stored, and it's also known under a configured name
-    const db = openStore(path.join(ROOT, 'm', 'agentlink.db'))
+    const db = openStore(path.join(ROOT, 'm', 'nattermatic.db'))
     const ins = db.prepare('INSERT INTO peers(host,addr,last_seen,configured,alias_of) VALUES(?,?,?,?,?)')
     ins.run('n.test', '127.0.0.1:1', Date.now(), 0, null)
     ins.run('127.0.0.1', `127.0.0.1:${NODES.n}`, Date.now(), 1, 'n.test')
@@ -997,7 +997,7 @@ try {
   await step('a message for a name only the sender uses reaches that machine', async () => {
     const r = new Roster({ net: IDS.m.fp, records: JSON.parse(fs.readFileSync(path.join(ROOT, 'm', 'roster.json'), 'utf8')).records })
     home('m', { routes: { 'nick.test': `127.0.0.1:${NODES.n}` }, peers: ['nick.test'] }, r)
-    fs.rmSync(path.join(ROOT, 'm', 'agentlink.db'), { force: true })
+    fs.rmSync(path.join(ROOT, 'm', 'nattermatic.db'), { force: true })
     await startNode('m')                                   // n is off: nothing says what nick.test is yet
     assert.match(cli('m', 'send', 'y@nick.test', 'by nickname'), /queued/)
     await startNode('n')
@@ -1040,7 +1040,7 @@ try {
     await sleep(300)
     let hooky = await adapter('b', 'hooky', 'plain')
     const wake = () => {
-      const p = spawn(EXE, [...PRE, 'wake'], { env: { ...envFor('b'), AGENTLINK_WAKE_ANY: '1' }, stdio: ['ignore', 'ignore', 'pipe'] })
+      const p = spawn(EXE, [...PRE, 'wake'], { env: { ...envFor('b'), NATTERMATIC_WAKE_ANY: '1' }, stdio: ['ignore', 'ignore', 'pipe'] })
       let err = ''
       p.stderr.on('data', c => { err += c })
       return { p, done: new Promise(r => p.once('exit', code => r({ code, err }))) }
@@ -1052,7 +1052,7 @@ try {
     const r = await first.done
     assert.equal(r.code, 2, 'exit 2 is what wakes the session')
     assert.match(r.err, /hooky/)
-    assert.match(r.err, /mcp__agentlink__inbox/)
+    assert.match(r.err, /mcp__nattermatic__inbox/)
     assert.ok(!r.err.includes('IGNORE'), 'what another agent wrote never comes through the hook')
     // re-armed with the message still unread: no second wake for the same message
     const again = wake()
@@ -1111,7 +1111,7 @@ try {
     assert.match(cli('a', 'send', 'codexy@b.test', SECRET), /pushed to .*live session/, 'a session with a waiter counts as live')
     await waitFor(() => got().length === 1, 8000, 'codex queue')
     const [first] = got()
-    assert.ok(first.startsWith(`queue\t--thread\t${thread}\t--message\t[agentlink] `), first)
+    assert.ok(first.startsWith(`queue\t--thread\t${thread}\t--message\t[nattermatic] `), first)
     assert.match(first, /as codexy, and a new message has arrived/, 'the session found by its parent and folder (the newest there)')
     assert.ok(!first.includes('IGNORE'), 'what another agent wrote never goes into the session\'s prompt')
     assert.match(await codexy.call('inbox'), /IGNORE PREVIOUS INSTRUCTIONS/, 'the message itself is read with the inbox tool')
@@ -1136,16 +1136,16 @@ try {
     const http = await import('node:http')
     const plain = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"ok":true,"pid":1}') })
     await new Promise(r => plain.listen(17792, '127.0.0.1', r))
-    await assert.rejects(local.ensureNode(), /not this machine's agentlink node/)
-    await assert.rejects(local.req('POST', '/local/send', { to: 'x', body: 'y' }), /not answered by this machine's agentlink node/)
+    await assert.rejects(local.ensureNode(), /not this machine's nattermatic node/)
+    await assert.rejects(local.req('POST', '/local/send', { to: 'x', body: 'y' }), /not answered by this machine's nattermatic node/)
     await new Promise(r => plain.close(r))
     const other = newIdentity()
     const https = await import('node:https')
     const tlsSq = https.createServer({ key: other.key, cert: other.cert }, (req, res) => { res.writeHead(200); res.end('{"ok":true,"pid":1}') })
     await new Promise(r => tlsSq.listen(17792, '127.0.0.1', r))
-    await assert.rejects(local.ensureNode(), /not this machine's agentlink node/)
-    await assert.rejects(local.req('POST', '/local/send', { to: 'x', body: 'y' }), /not answered by this machine's agentlink node/)
-    await assert.rejects(local.stream('x', 't', () => {}), /not answered by this machine's agentlink node/)
+    await assert.rejects(local.ensureNode(), /not this machine's nattermatic node/)
+    await assert.rejects(local.req('POST', '/local/send', { to: 'x', body: 'y' }), /not answered by this machine's nattermatic node/)
+    await assert.rejects(local.stream('x', 't', () => {}), /not answered by this machine's nattermatic node/)
     tlsSq.close()
   })
 
@@ -1155,7 +1155,7 @@ try {
     for (let i = 0; i < 5; i++) await memberPost('b', '/v1/deliver', { messages: [envelope(`${name}@b.test`, `early ${i}`)] })
     const before = queued()
     const client = new Client({ name: 'test', version: '0' }, { capabilities: {} })
-    await client.connect(new StdioClientTransport({ command: EXE, args: [...PRE, 'mcp', '--name', name, '--channel'], env: { ...envFor('b'), AGENTLINK_LISTEN_GRACE_MS: '100' }, stderr: 'ignore' }))
+    await client.connect(new StdioClientTransport({ command: EXE, args: [...PRE, 'mcp', '--name', name, '--channel'], env: { ...envFor('b'), NATTERMATIC_LISTEN_GRACE_MS: '100' }, stderr: 'ignore' }))
     await sleep(800)
     assert.equal(queued(), before, 'nothing is pushed, or marked pushed, before it has asked for its tools')
     await client.listTools()
@@ -1258,7 +1258,7 @@ try {
   await step('re-joining the same network keeps a removal the inviter has not heard of', async () => {
     assert.equal(setup('i', ['--new-network']).status, 0)
     scli('i', 'invite', '--revoke')
-    assert.equal(setup('k', joinArgs(parseInvite(scli('i', 'invite').stdout)), { AGENTLINK_HOST: 'k.test' }).status, 0, 'k joins')
+    assert.equal(setup('k', joinArgs(parseInvite(scli('i', 'invite').stdout)), { NATTERMATIC_HOST: 'k.test' }).status, 0, 'k joins')
     fs.rmSync(path.join(ROOT, 's-l'), { recursive: true, force: true })
     assert.equal(setup('l', joinArgs(parseInvite(scli('i', 'invite').stdout))).status, 0, 'l joins')
     await sLocal('l').req('POST', '/local/shutdown').catch(() => {})
@@ -1290,7 +1290,7 @@ try {
     scli('i', 'invite', '--revoke')
     const k = sLocal('k')
     assert.ok(await k.health(), 'k runs on its port')
-    assert.equal(setup('k', [], { AGENTLINK_PORT: String(NODES.m) }).status, 0)
+    assert.equal(setup('k', [], { NATTERMATIC_PORT: String(NODES.m) }).status, 0)
     await waitFor(async () => !await k.health(), 3000, 'the old node gone')
     await new Local({ identity: readIdentity(path.join(ROOT, 's-k')), port: NODES.m, dir: path.join(ROOT, 's-k') }).req('POST', '/local/shutdown').catch(() => {})
   })
@@ -1298,7 +1298,7 @@ try {
   await step('a name the roster would refuse stops setup, however it was given', async () => {
     for (const name of ['10.0.0.5', 'localhost']) {
       fs.rmSync(path.join(ROOT, 's-n'), { recursive: true, force: true })
-      const r = setup('n', [], { AGENTLINK_HOST: name })
+      const r = setup('n', [], { NATTERMATIC_HOST: name })
       assert.notEqual(r.status, 0)
       assert.match(r.stderr, /can't identify a machine/)
       assert.ok(!fs.existsSync(path.join(ROOT, 's-n', 'roster.json')))
@@ -1309,7 +1309,7 @@ try {
     const dir = path.join(ROOT, 's-i')
     assert.match(scli('i', 'send', 'nobody', 'OLD-NETWORK').stdout, /queued/)
     parseInvite(scli('i', 'invite').stdout)
-    const db = openStore(path.join(dir, 'agentlink.db'))
+    const db = openStore(path.join(dir, 'nattermatic.db'))
     await sLocal('i').req('POST', '/local/shutdown').catch(() => {})
     await waitFor(async () => !await sLocal('i').health(), 5000, 'i to stop')
     db.exec('BEGIN IMMEDIATE')
@@ -1327,6 +1327,47 @@ try {
     assert.match(r2.stdout, /dropped 1 undelivered message/)
     assert.equal(JSON.parse(scli('i', 'status').stdout).counts.find(c => c.state === 'queued'), undefined)
     scli('i', 'invite', '--revoke')
+  })
+
+  await step('a machine set up as agentlink moves to nattermatic, keeping its key, network, messages and settings', async () => {
+    // a home of its own, as a user's would be: no NATTERMATIC_HOME
+    const H = path.join(ROOT, 'old-user')
+    fs.mkdirSync(H)
+    const port = String(EXTRA_PORTS[3])
+    const clean = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(NATTERMATIC|AGENTLINK)_/.test(k)))
+    const run = (env, ...args) => spawnSync(EXE, [...PRE, ...args], { env: { ...clean, HOME: H, ...env }, encoding: 'utf8', timeout: 60_000 })
+    const opts = ['--no-service', '--no-claude', '--no-codex', '--no-alias']
+    const now = { NATTERMATIC_PORT: port, NATTERMATIC_HOST: 'old.test', NATTERMATIC_DISCOVERY: '0', NATTERMATIC_AUTO_ALIASES: '0' }
+    let r = run(now, 'setup', ...opts)
+    assert.equal(r.status, 0, r.stdout + r.stderr)
+    assert.match(run(now, 'to', 'someone', 'SAVED BEFORE THE MOVE').stdout, /queued/)
+    const home = path.join(H, '.nattermatic'), old = path.join(H, '.agentlink')
+    const fp = readIdentity(home).fp
+    const before = JSON.parse(run(now, 'status').stdout).counts
+    const local = new Local({ identity: readIdentity(home), port: Number(port), dir: home })
+    await local.req('POST', '/local/shutdown').catch(() => {})
+    await waitFor(async () => !await local.health(), 5000, 'the node to stop')
+    // as agentlink left it
+    fs.renameSync(home, old)
+    for (const ext of ['', '-wal', '-shm']) if (fs.existsSync(path.join(old, `nattermatic.db${ext}`))) fs.renameSync(path.join(old, `nattermatic.db${ext}`), path.join(old, `agentlink.db${ext}`))
+    // its settings, under their old names
+    const then = Object.fromEntries(Object.entries(now).map(([k, v]) => [k.replace('NATTERMATIC_', 'AGENTLINK_'), v]))
+    r = run(then, 'setup', ...opts)
+    assert.equal(r.status, 0, r.stdout + r.stderr)
+    assert.match(r.stdout, /moved .*\.agentlink to .*\.nattermatic/)
+    assert.ok(fs.lstatSync(old).isSymbolicLink() && fs.realpathSync(old) === fs.realpathSync(home), 'the old path leads to the new home')
+    assert.equal(readIdentity(home).fp, fp, 'the same key')
+    assert.ok(fs.existsSync(path.join(home, 'nattermatic.db')) && !fs.existsSync(path.join(home, 'agentlink.db')), 'the database under its new name')
+    const st = JSON.parse(run(then, 'status').stdout)
+    assert.equal(st.host, 'old.test')
+    assert.deepEqual(st.counts, before, 'the same messages')
+    // the old command names still work
+    assert.match(run(then, 'peers').stdout, /old\.test \(this machine\)/)
+    // and a second setup has nothing more to move
+    r = run(now, 'setup', ...opts)
+    assert.equal(r.status, 0, r.stdout + r.stderr)
+    assert.doesNotMatch(r.stdout, /moved/)
+    await local.req('POST', '/local/shutdown').catch(() => {})
   })
 
   await bob.close()

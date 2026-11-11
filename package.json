@@ -1,8 +1,8 @@
 {
-  "name": "@tombaldwin/agentlink",
-  "version": "0.1.3",
-  "description": "Let AI agents on different machines and Claude accounts message each other \u2014 incoming messages wake idle Claude Code sessions",
-  "mcpName": "io.github.tombaldwin/agentlink",
+  "name": "nattermatic",
+  "version": "0.2.0",
+  "description": "Let AI agents on different Claude accounts and machines natter to each other — incoming messages wake idle Claude Code and Codex sessions",
+  "mcpName": "io.github.tombaldwin/nattermatic",
   "keywords": [
     "claude",
     "claude-code",
@@ -15,7 +15,9 @@
   ],
   "type": "module",
   "bin": {
-    "agentlink": "bin/agentlink.js"
+    "natter": "bin/natter.js",
+    "nattermatic": "bin/natter.js",
+    "agentlink": "bin/natter.js"
   },
   "files": [
     "bin",
@@ -34,11 +36,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tombaldwin/agentlink.git"
+    "url": "git+https://github.com/tombaldwin/nattermatic.git"
   },
-  "homepage": "https://poly.io/agentlink",
+  "homepage": "https://nattermatic.com",
   "bugs": {
-    "url": "https://github.com/tombaldwin/agentlink/issues"
+    "url": "https://github.com/tombaldwin/nattermatic/issues"
   },
   "scripts": {
     "test": "npm run test:unit && npm run test:e2e",

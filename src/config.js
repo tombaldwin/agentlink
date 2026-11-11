@@ -5,10 +5,10 @@ import crypto from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { fingerprint } from './cert.js'
 
-export const VERSION = '0.1.3'
+export const VERSION = '0.2.0'
 
 export function homeDir() {
-  return process.env.AGENTLINK_HOME || path.join(os.homedir(), '.agentlink')
+  return process.env.NATTERMATIC_HOME || path.join(os.homedir(), '.nattermatic')
 }
 const configPath = () => path.join(homeDir(), 'config.json')
 /** This machine's key, certificate and the network's membership records. */
@@ -41,7 +41,7 @@ export function writeAtomic(file, data, mode) {
   } catch (e) { fs.rmSync(tmp, { force: true }); throw e }
 }
 
-/** Create the agentlink home directory, private to this user even if something (an older installer,
+/** Create the nattermatic home directory, private to this user even if something (an older installer,
  * a umask-created parent) made it before us: it holds this machine's private key, messages and logs. */
 export function ensureHomeDir(dir = homeDir()) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
@@ -139,7 +139,7 @@ export function detectHost() {
   }
   h ||= normHost(hostSafe(os.hostname().split('.')[0]))
   // every node treats "localhost" as itself, so it can't be a machine's network identity
-  if (isLocalhost(h)) throw new Error(`this machine's hostname is "${os.hostname()}", which can't identify it on the network; run: agentlink setup --host <name>`)
+  if (isLocalhost(h)) throw new Error(`this machine's hostname is "${os.hostname()}", which can't identify it on the network; run: natter setup --host <name>`)
   return h
 }
 const isLocalhost = (/** @type {string} */ h) => h === 'localhost' || h.startsWith('localhost.')
@@ -162,7 +162,7 @@ export function readIdentity(dir = homeDir()) {
   }
   const pub = crypto.createPublicKey(key)
   const x = new crypto.X509Certificate(cert)
-  if (!x.publicKey.equals(pub)) throw new Error(`${certPath(dir)} does not match ${keyPath(dir)}: restore the right file, or run agentlink setup --new-network to start over`)
+  if (!x.publicKey.equals(pub)) throw new Error(`${certPath(dir)} does not match ${keyPath(dir)}: restore the right file, or run natter setup --new-network to start over`)
   return { key, cert, fp: fingerprint(key) }
 }
 
@@ -184,12 +184,12 @@ export function loadConfig() {
   const file = readConfigFile() || {}
   const identity = readIdentity()
   const net = readNet()
-  if (!identity || !net) throw new Error(`agentlink is not set up on this machine. Run: agentlink setup`)
-  const explicit = process.env.AGENTLINK_HOST || file.host
+  if (!identity || !net) throw new Error(`nattermatic is not set up on this machine. Run: natter setup`)
+  const explicit = process.env.NATTERMATIC_HOST || file.host
   const host = normHost(explicit || detectHost())
-  if (isLocalhost(host)) throw new Error(`"${host}" can't identify this machine on the network; run: agentlink setup --host <name>`)
+  if (isLocalhost(host)) throw new Error(`"${host}" can't identify this machine on the network; run: natter setup --host <name>`)
   const aliases = new Set([...(file.aliases || []).map(normHost), 'localhost'])
-  const autoAliases = process.env.AGENTLINK_AUTO_ALIASES ? process.env.AGENTLINK_AUTO_ALIASES !== '0' : file.autoAliases !== false
+  const autoAliases = process.env.NATTERMATIC_AUTO_ALIASES ? process.env.NATTERMATIC_AUTO_ALIASES !== '0' : file.autoAliases !== false
   if (autoAliases) {
     for (const ip of localIPv4s()) aliases.add(ip)
     // the OS hostname is only one of our names when we use it for identity: a machine given its own
@@ -203,11 +203,11 @@ export function loadConfig() {
     net,
     host,
     aliases: [...aliases],
-    port: Number(process.env.AGENTLINK_PORT || file.port || 7777),
+    port: Number(process.env.NATTERMATIC_PORT || file.port || 7777),
     peers: (file.peers || []).map(parsePeer).filter(p => p !== null),  // extra peers beyond LAN discovery (Tailscale names, IPs)
     routes: file.routes || {},                        // host -> "ip:port" overrides
-    discoveryPort: Number(process.env.AGENTLINK_DISCOVERY_PORT || file.discoveryPort || 0) || undefined,
-    discovery: process.env.AGENTLINK_DISCOVERY ? process.env.AGENTLINK_DISCOVERY !== '0' : file.discovery !== false,
+    discoveryPort: Number(process.env.NATTERMATIC_DISCOVERY_PORT || file.discoveryPort || 0) || undefined,
+    discovery: process.env.NATTERMATIC_DISCOVERY ? process.env.NATTERMATIC_DISCOVERY !== '0' : file.discovery !== false,
     ttlMs: Math.min(Number(file.ttlDays) > 0 ? Number(file.ttlDays) * 86400_000 : 7 * 86400_000, MAX_TTL_MS),
     autoAliases,
     maxWaiting: Number(file.maxWaiting) > 0 ? Number(file.maxWaiting) : 2000,      // unread messages for one session
@@ -275,6 +275,6 @@ export const errCode = e => {
 export const netHint = e => {
   const code = errCode(e)
   if (process.platform === 'darwin' && (code === 'EHOSTUNREACH' || code === 'ENETUNREACH'))
-    return ' (if that machine is on, macOS may be blocking agentlink from the local network: check System Settings → Privacy & Security → Local Network)'
+    return ' (if that machine is on, macOS may be blocking nattermatic from the local network: check System Settings → Privacy & Security → Local Network)'
   return ''
 }

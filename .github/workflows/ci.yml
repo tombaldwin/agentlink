@@ -47,44 +47,45 @@ jobs:
           printf '#!/bin/sh\necho "claude $*" >> "$HOME/claude-calls.log"\n' > "$RUNNER_TEMP/bin/claude"
           chmod +x "$RUNNER_TEMP/bin/claude"
           export PATH="$RUNNER_TEMP/bin:$PATH" NPM_CONFIG_PREFIX="$RUNNER_TEMP/npm"
-          AGENTLINK_SKIP_CHECKS=1 AGENTLINK_APP=0 AGENTLINK_PKG="$TGZ" AGENTLINK_NO_SERVICE=1 AGENTLINK_DISCOVERY=0 sh install.sh | tee out.txt
-          grep -q "Join my agentlink network" out.txt
-          grep -q "mcp add -s user agentlink" "$HOME/claude-calls.log"
-          "$RUNNER_TEMP/npm/bin/agentlink" status
-          "$RUNNER_TEMP/npm/bin/agentlink" send someone "smoke test"
+          NATTERMATIC_SKIP_CHECKS=1 NATTERMATIC_APP=0 NATTERMATIC_PKG="$TGZ" NATTERMATIC_NO_SERVICE=1 NATTERMATIC_DISCOVERY=0 sh install.sh | tee out.txt
+          grep -q "Join my nattermatic network" out.txt
+          grep -q "mcp add -s user nattermatic" "$HOME/claude-calls.log"
+          "$RUNNER_TEMP/npm/bin/natter" status
+          "$RUNNER_TEMP/npm/bin/natter" to someone "smoke test"
+          "$RUNNER_TEMP/npm/bin/agentlink" send someone "the old name still works"
       - name: Install with the private Node runtime
         # what machines without Node 22.13+ get: the runtime must stay off PATH and the home private
         run: |
           # its own port: the previous step's node (another network) is still running on 7777
-          export HOME="$RUNNER_TEMP/home2" SHELL=/bin/bash AGENTLINK_PORT=7778
+          export HOME="$RUNNER_TEMP/home2" SHELL=/bin/bash NATTERMATIC_PORT=7778
           mkdir -p "$HOME" "$RUNNER_TEMP/bin"
           export PATH="$RUNNER_TEMP/bin:$PATH"
           # as on a Mac with an earlier app install: the wrapper must replace the link, not write through it
-          mkdir -p "$HOME/.agentlink/bin"
+          mkdir -p "$HOME/.nattermatic/bin"
           printf keep > "$RUNNER_TEMP/earlier-app"
-          ln -s "$RUNNER_TEMP/earlier-app" "$HOME/.agentlink/bin/agentlink"
-          AGENTLINK_SKIP_CHECKS=1 AGENTLINK_APP=0 AGENTLINK_PRIVATE_NODE=1 AGENTLINK_PKG="$TGZ" AGENTLINK_NO_SERVICE=1 AGENTLINK_DISCOVERY=0 sh install.sh | tee out.txt
-          grep -q "Join my agentlink network" out.txt
-          test "$(ls -ld "$HOME/.agentlink" | cut -c1-10)" = drwx------
-          "$HOME/.agentlink/bin/agentlink" status
-          test ! -e "$HOME/.agentlink/bin/node"
+          ln -s "$RUNNER_TEMP/earlier-app" "$HOME/.nattermatic/bin/natter"
+          NATTERMATIC_SKIP_CHECKS=1 NATTERMATIC_APP=0 NATTERMATIC_PRIVATE_NODE=1 NATTERMATIC_PKG="$TGZ" NATTERMATIC_NO_SERVICE=1 NATTERMATIC_DISCOVERY=0 sh install.sh | tee out.txt
+          grep -q "Join my nattermatic network" out.txt
+          test "$(ls -ld "$HOME/.nattermatic" | cut -c1-10)" = drwx------
+          "$HOME/.nattermatic/bin/natter" status
+          test ! -e "$HOME/.nattermatic/bin/node"
           test "$(cat "$RUNNER_TEMP/earlier-app")" = keep
-          # a new shell (rc written by setup) finds agentlink, but node is still the system one
-          bash -c '. ~/.bashrc 2>/dev/null || . ~/.bash_profile; test "$(command -v agentlink)" = "$HOME/.agentlink/bin/agentlink" && test "$(command -v node)" != "$HOME/.agentlink/node/bin/node"'
+          # a new shell (rc written by setup) finds nattermatic, but node is still the system one
+          bash -c '. ~/.bashrc 2>/dev/null || . ~/.bash_profile; test "$(command -v natter)" = "$HOME/.nattermatic/bin/natter" && test "$(command -v node)" != "$HOME/.nattermatic/node/bin/node"'
       - name: Join the first network with its invite line (the stock curl, pinned to the inviter's key)
         run: |
-          INVITE=$(HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/npm/bin/agentlink" invite | grep -o 'curl -fsSL -k --pinnedpubkey "[^"]*" "https://[^"]*"' | head -1)
+          INVITE=$(HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/npm/bin/natter" invite | grep -o 'curl -fsSL -k --pinnedpubkey "[^"]*" "https://[^"]*"' | head -1)
           test -n "$INVITE"
           # the inviter's name may not resolve on a runner: reach it on 127.0.0.1 instead
           INVITE=$(printf '%s' "$INVITE" | sed -E 's#https://[^/]+/#https://127.0.0.1:7777/#')
-          export HOME="$RUNNER_TEMP/home3" SHELL=/bin/bash AGENTLINK_PORT=7779 AGENTLINK_HOST=joiner
+          export HOME="$RUNNER_TEMP/home3" SHELL=/bin/bash NATTERMATIC_PORT=7779 NATTERMATIC_HOST=joiner
           mkdir -p "$HOME"
-          export PATH="$RUNNER_TEMP/bin:$PATH" NPM_CONFIG_PREFIX="$RUNNER_TEMP/npm3" AGENTLINK_APP=0 AGENTLINK_NO_SERVICE=1 AGENTLINK_DISCOVERY=0
+          export PATH="$RUNNER_TEMP/bin:$PATH" NPM_CONFIG_PREFIX="$RUNNER_TEMP/npm3" NATTERMATIC_APP=0 NATTERMATIC_NO_SERVICE=1 NATTERMATIC_DISCOVERY=0
           eval "$INVITE" | sh | tee out.txt
           grep -q "Joined the network" out.txt
-          "$RUNNER_TEMP/npm3/bin/agentlink" status | grep -q '"host": "joiner.local"'
+          "$RUNNER_TEMP/npm3/bin/natter" status | grep -q '"host": "joiner.local"'
           # a wrong key is refused before anything is downloaded: with a valid invite, so that only the key can be why
-          FRESH=$(HOME="$RUNNER_TEMP/home" AGENTLINK_PORT=7777 "$RUNNER_TEMP/npm/bin/agentlink" invite | grep -o 'sha256//[^"]*" "https://[^"]*' | head -1)
+          FRESH=$(HOME="$RUNNER_TEMP/home" NATTERMATIC_PORT=7777 "$RUNNER_TEMP/npm/bin/natter" invite | grep -o 'sha256//[^"]*" "https://[^"]*' | head -1)
           PIN=${FRESH%%\"*}
           URL="https://127.0.0.1:7777/join/install?${FRESH##*\?}"
           curl -fsS -k --pinnedpubkey "$PIN" "$URL" > /dev/null

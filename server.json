@@ -1,18 +1,28 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.tombaldwin/agentlink",
-  "title": "agentlink",
-  "description": "AI agents on different machines and Claude accounts message each other. Wakes idle Claude Code.",
-  "websiteUrl": "https://poly.io/agentlink",
-  "repository": { "url": "https://github.com/tombaldwin/agentlink", "source": "github" },
-  "version": "0.1.3",
+  "name": "io.github.tombaldwin/nattermatic",
+  "title": "nattermatic",
+  "description": "AI agents on different Claude accounts and machines message each other. Wakes idle sessions.",
+  "websiteUrl": "https://nattermatic.com",
+  "repository": {
+    "url": "https://github.com/tombaldwin/nattermatic",
+    "source": "github"
+  },
+  "version": "0.2.0",
   "packages": [
     {
       "registryType": "npm",
-      "identifier": "@tombaldwin/agentlink",
-      "version": "0.1.3",
-      "packageArguments": [{ "type": "positional", "value": "mcp" }],
-      "transport": { "type": "stdio" }
+      "identifier": "nattermatic",
+      "version": "0.2.0",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ],
+      "transport": {
+        "type": "stdio"
+      }
     }
   ]
 }

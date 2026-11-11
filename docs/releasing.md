@@ -2,7 +2,7 @@
 
 A release is a GitHub Release with the macOS app (signed with Developer ID, notarized) and the npm
 package. The installer fetches the app from the latest **published** release
-(`releases/latest/download/agentlink-macos-arm64.zip`), so publishing a release changes what new
+(`releases/latest/download/nattermatic-macos-arm64.zip`), so publishing a release changes what new
 Macs install.
 
 ## One-time setup
@@ -28,8 +28,8 @@ and note its **Key ID** and the **Issuer ID** shown above the list.
 
 For notarizing on your own Mac:
 
-    xcrun notarytool store-credentials agentlink-notary --key AuthKey_XXXX.p8 --key-id <key id> --issuer <issuer id>
-    npm run build:app -- --notarize agentlink-notary
+    xcrun notarytool store-credentials nattermatic-notary --key AuthKey_XXXX.p8 --key-id <key id> --issuer <issuer id>
+    npm run build:app -- --notarize nattermatic-notary
 
 ### 3. GitHub secrets
 
@@ -49,16 +49,16 @@ files as a workflow artifact.
 
 ### 4. npm trusted publishing
 
-On [npmjs.com](https://www.npmjs.com/package/@tombaldwin/agentlink/access), open the package's
+On [npmjs.com](https://www.npmjs.com/package/nattermatic/access), open the package's
 **Settings → Trusted publishing**, choose **GitHub Actions**, and enter owner `tombaldwin`,
-repository `agentlink` and workflow `release.yml` (no environment). The workflow then publishes to
+repository `nattermatic` and workflow `release.yml` (no environment). The workflow then publishes to
 npm without a token, with provenance. A package must exist on npm before it can be set up, so the
-first version (0.1.0) was published by hand.
+first version (a 0.0.1 placeholder, when the name was reserved) was published by hand.
 
 ## Each release
 
 1. Set the version in `package.json`, `src/config.js` (`VERSION`), `server.json` (both
-   `version`s), `plugins/agentlink/.claude-plugin/plugin.json` and
+   `version`s), `plugins/nattermatic/.claude-plugin/plugin.json` and
    `.claude-plugin/marketplace.json`, and date its section in `CHANGELOG.md`
    (`## X.Y.Z — YYYY-MM-DD`). `npm run test:unit` fails if one is left behind.
 2. Commit, then tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
@@ -68,10 +68,10 @@ first version (0.1.0) was published by hand.
    on Apple silicon Macs get this app from then on.
 5. Publishing the release runs the workflow again, which publishes the package attached to the
    release to npm, then `server.json` to the official MCP Registry. Check them with
-   `npm view @tombaldwin/agentlink version` and
-   `curl -s 'https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.tombaldwin/agentlink'`. Publish the release
+   `npm view nattermatic version` and
+   `curl -s 'https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.tombaldwin/nattermatic'`. Publish the release
    with your own account (the web page or `gh`): GitHub doesn't start workflows for a release
    published by a workflow's own token.
 
-The bundle ID (`io.github.tombaldwin.agentlink`, in `scripts/build-app.mjs`) must never change:
+The bundle ID (`io.github.tombaldwin.nattermatic`, in `scripts/build-app.mjs`) must never change:
 macOS ties each user's Local Network permission to it.

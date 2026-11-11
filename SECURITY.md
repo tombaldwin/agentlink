@@ -2,8 +2,8 @@
 
 ## Model
 
-Each machine has its own ECDSA P-256 key pair, created by `agentlink setup` and kept in
-`~/.agentlink/node.key` (readable only by you). An agentlink network is a list of member keys
+Each machine has its own ECDSA P-256 key pair, created by `natter setup` and kept in
+`~/.nattermatic/node.key` (readable only by you). A nattermatic network is a list of member keys
 (the *roster*): a set of signed records saying "this key, called `laptop.local`, was added by that
 member" or "this key was removed". Members exchange and merge these records; every member computes
 the same membership from the same records.
@@ -39,7 +39,7 @@ the same membership from the same records.
   all stand. A removed key can't come back on its own (the machine isn't told, and re-joins with an
   invite and a new key), with the exceptions in *Known limitations*. A key made by a removed machine
   never becomes the discovery key.
-- **Snapshots.** `agentlink compact`, on the founding machine, signs a list of the current members
+- **Snapshots.** `natter compact`, on the founding machine, signs a list of the current members
   in joining order, with the discovery keys still in use and a new one. Any machine can check it
   against the network's ID, and it replaces all the records before it. After a snapshot, an add dated
   before it counts for nothing, nor does an older record signed by a machine that isn't in it. A removal
@@ -54,13 +54,13 @@ the same membership from the same records.
   relaying copies can't alter messages and a member can't send as another machine. A sender address
   must be exactly `name@host` as a node writes it, so nothing can be hidden in it. Messages are
   encrypted between machines but not end to end: see *Known limitations*.
-- **Joining.** `agentlink invite` makes a one-time token (stored hashed, expires after 24 hours)
+- **Joining.** `natter invite` makes a one-time token (stored hashed, expires after 24 hours)
   and prints a `curl -k --pinnedpubkey "sha256//<key>" https://…` line. The key is an invite key,
   which the inviting node presents only while it has invites open. curl's `-k` only skips
   certificate-authority checks; `--pinnedpubkey` still makes curl refuse any other key, so the
   installer, the package and the token can't be intercepted or replaced. The joining machine checks
   the same key again before it sends its join request. The token is consumed by the join.
-  `agentlink invite --revoke` cancels unused tokens. Starting or joining another network deletes the
+  `natter invite --revoke` cancels unused tokens. Starting or joining another network deletes the
   old network's invites and all its messages, and setup stops rather than start the node if it can't.
 - **Discovery.** LAN beacons are encrypted under a discovery key that members share only over
   their TLS connections, so other people on the network can't read machine names from them. The
@@ -94,8 +94,8 @@ the same membership from the same records.
 
 - **Members are trusted.** Any member can invite machines, and a machine can remove the ones that
   joined after it. A compromised member could quietly add extra machines before you remove it.
-  `agentlink status` lists machines in joining order and shows which member added each one:
-  remove any you don't recognise, or start a new network with `agentlink setup --new-network`
+  `natter status` lists machines in joining order and shows which member added each one:
+  remove any you don't recognise, or start a new network with `natter setup --new-network`
   and re-join your machines. One thing it won't show: a member can sign a second key under its own
   name. That key never becomes a member, and it's dropped when the member is removed.
 - **A member can fill a machine's message store.** A session can have 2,000 messages waiting, but a
@@ -111,13 +111,13 @@ the same membership from the same records.
   only if a member adds it: with an invite, as any new machine would. Sending to it after that says
   it isn't a machine on the network, not that it was removed.
 - **A snapshot can drop a machine.** One added just before it, which the founding machine hadn't
-  heard of, isn't in it and needs a new invite. `agentlink compact` catches up first, and shows who
+  heard of, isn't in it and needs a new invite. `natter compact` catches up first, and shows who
   will be kept and who it couldn't reach.
 - **A snapshot goes by what the founding machine knows.** If it hasn't heard of a removal yet, two
   things can go against the rules above. A machine that was removed by a machine that's now gone
   too comes back, as the removal counts for nothing without its signer. And a machine added by a
   removed one stays, if the founding machine heard of the add first. So make a snapshot with your
-  machines online, and check the list `agentlink compact` shows.
+  machines online, and check the list `natter compact` shows.
 - **A backdated removal can cut a machine off until someone reaches it.** A member can sign a removal
   dated before a snapshot that's over 14 days old, which brings in a new key and leaves no grace period
   for the snapshot's. A machine that hasn't heard is refused at the gate until another member reaches
@@ -126,7 +126,7 @@ the same membership from the same records.
   is a new network.
 - **Messages aren't end-to-end encrypted.** While the recipient's machine is off, copies wait on
   other members, which can read them until they're handed over. They can't alter them. Don't send
-  anything through agentlink that you wouldn't want your other machines to hold.
+  anything through nattermatic that you wouldn't want your other machines to hold.
 - **The founding machine can't be removed.** Nothing joined before it. If it's lost or
   compromised, start a new network. Likewise, a machine can only be removed from machines that
   joined before it.
@@ -145,11 +145,11 @@ the same membership from the same records.
   so that no new machine can join, and machines may disagree about the last records to arrive.
   Removing it clears what it signed, apart from machines it really added and its removals of machines
   that had joined. Those stay until the next snapshot, so a roster can stay full once the member has
-  gone: remove the machines it added, then run `agentlink compact` on the founding machine. While
+  gone: remove the machines it added, then run `natter compact` on the founding machine. While
   a roster is full, two kinds of removal wait until there's room, so machines can disagree until
   then: a second removal of a machine already removed, and one listing dozens of machines a full node
   has never heard of, if what fills that node was signed by someone else. Remove that machine first.
-  `agentlink remove` says so if it's this machine's own roster that has no room.
+  `natter remove` says so if it's this machine's own roster that has no room.
 - **Agents on a machine aren't separately authenticated.** Any process running as your user can
   send as any session name on that machine.
 - **Invites are credentials until used.** Anyone who gets an unused invite line within 24 hours can
@@ -157,10 +157,10 @@ the same membership from the same records.
   shared machine, other users can see the line's token in the process list for the few seconds the
   first `curl` runs (the installer keeps it off command lines after that).
 - **While an invite is open, its key is visible to anyone who connects to the port.** Someone could
-  use it to recognise the machine during that window (24 hours at most). Run `agentlink invite
+  use it to recognise the machine during that window (24 hours at most). Run `natter invite
   --revoke` once you've added your machines. At other times, a node shows only throwaway keys.
 - **The open port is visible.** Someone scanning a network can see that something is listening on
-  agentlink's port (7777 by default), and the join paths answer in a way that shows it's agentlink.
+  nattermatic's port (7777 by default), and the join paths answer in a way that shows it's nattermatic.
 - **Looking up `.local` names is visible.** Connections themselves don't reveal a machine's name,
   but a laptop trying to reach `desk.local` asks for it by name, by multicast, on whatever network
   it's on. Someone there can see the names of your machines.
@@ -169,7 +169,7 @@ the same membership from the same records.
 
 ## Starting over
 
-Run `agentlink setup --new-network` on one machine. It creates a new key and a new network with
+Run `natter setup --new-network` on one machine. It creates a new key and a new network with
 that machine as its only member; join the other machines with fresh invites.
 
 ## Reporting a vulnerability

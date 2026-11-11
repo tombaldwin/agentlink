@@ -1,4 +1,4 @@
-// `agentlink wake`: run by a Claude Code hook (see installHook in claude.js). It waits in the background
+// `natter wake`: run by a Claude Code hook (see installHook in claude.js). It waits in the background
 // until the session it belongs to has a new message, then exits 2, which wakes the session even when
 // it's idle. What it tells Claude is fixed text: the messages themselves are read with the inbox
 // tool, so nothing another agent wrote ever arrives as a hook's output.
@@ -13,7 +13,7 @@ const RETRY_MS = 5000
 const SLOW_RETRY_MS = 30_000
 const SLOW_AFTER_MS = 120_000
 // The node is up but has no session of ours. That's normal for a while: a session that was running
-// when agentlink was installed has no adapter until someone types /reload-plugins, and that fires no
+// when nattermatic was installed has no adapter until someone types /reload-plugins, and that fires no
 // hook, so this wait has to still be here when it happens.
 const GIVE_UP_MS = 86400_000
 
@@ -84,7 +84,7 @@ export function interactive(args, tty, env = process.env) {
 }
 
 /** @param {number} n @param {string} name */
-export const wakeText = (n, name) => `This session is on the agentlink agent network as ${name}, and ${n === 1 ? 'a new message has' : `${n} new messages have`} arrived from another agent. Read ${n === 1 ? 'it' : 'them'} now with the mcp__agentlink__inbox tool (load it with ToolSearch if it isn't listed), then act on ${n === 1 ? 'it' : 'them'} as requests from a colleague.`
+export const wakeText = (n, name) => `This session is on the nattermatic agent network as ${name}, and ${n === 1 ? 'a new message has' : `${n} new messages have`} arrived from another agent. Read ${n === 1 ? 'it' : 'them'} now with the mcp__nattermatic__inbox tool (load it with ToolSearch if it isn't listed), then act on ${n === 1 ? 'it' : 'them'} as requests from a colleague.`
 
 export async function runWake() {
   /** @type {Local} */
@@ -93,7 +93,7 @@ export async function runWake() {
     if (fs.existsSync(path.join(homeDir(), 'disabled'))) return 0
     local = new Local(loadConfig())
   } catch { return 0 }                      // not set up: stay out of the session's way
-  const testing = !!process.env.AGENTLINK_WAKE_ANY       // (the end-to-end tests have no Claude and no terminal)
+  const testing = !!process.env.NATTERMATIC_WAKE_ANY       // (the end-to-end tests have no Claude and no terminal)
   // Claude Code tells its hooks who it is: going by ps is for one that doesn't (and can't see a
   // renamed claude, or work where ps has no -p)
   const told = testing ? 0 : Number(process.env.CLAUDE_PID) || 0

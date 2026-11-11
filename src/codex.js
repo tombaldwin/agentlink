@@ -1,7 +1,7 @@
-// Codex CLI integration. Setup adds agentlink to Codex's config.toml: the adapter (in poll mode) and a
+// Codex CLI integration. Setup adds nattermatic to Codex's config.toml: the adapter (in poll mode) and a
 // SessionStart hook. Codex's hooks can't wake a session, but `codex queue` can: it gives an idle
-// session a turn (or a busy one, once its turn ends). So the hook (`agentlink codex-hook`) starts a
-// waiter in the background (`agentlink codex-wake`), which waits for the session's messages the way
+// session a turn (or a busy one, once its turn ends). So the hook (`natter codex-hook`) starts a
+// waiter in the background (`natter codex-wake`), which waits for the session's messages the way
 // the Claude Code hook does, and queues a fixed note telling it to read them.
 //
 // Codex runs every session's adapter from one shared app-server, so the node can't tell sessions
@@ -16,8 +16,11 @@ import { errMsg, homeDir, loadConfig, shQuote as sq, writeAtomic } from './confi
 import { Local } from './local.js'
 import { selfCmd, which } from './claude.js'
 
-const BEGIN = '# >>> agentlink >>> (managed by `agentlink setup`; `agentlink uninstall` removes it)'
-const END = '# <<< agentlink <<<'
+const BEGIN = '# >>> nattermatic >>> (managed by `natter setup`; `natter uninstall` removes it)'
+const END = '# <<< nattermatic <<<'
+// the block as agentlink wrote it, before the rename: replaced in place by this one
+const OLD_BEGIN = '# >>> agentlink >>> (managed by `agentlink setup`; `agentlink uninstall` removes it)', OLD_END = '# <<< agentlink <<<'
+const renamed = (/** @type {string} */ text) => text.replace(OLD_BEGIN, BEGIN).replace(OLD_END, END)
 // tools a woken session reads with, which it may use without asking (as for Claude Code)
 const READ_TOOLS = ['inbox', 'peers']
 const THREAD = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -28,7 +31,7 @@ const SLOW_AFTER_MS = 120_000
 const GIVE_UP_MS = 86400_000
 const MAX_LOG = 64 * 1024
 // what Codex shows for the hook when it asks the user to trust it
-const HOOK_NAME = 'agentlink: wake this session when another agent messages it'
+const HOOK_NAME = 'nattermatic: wake this session when another agent messages it'
 
 export const codexHome = () => process.env.CODEX_HOME || path.join(os.homedir(), '.codex')
 export const codexConfigFile = () => path.join(codexHome(), 'config.toml')
@@ -48,19 +51,19 @@ export function configBlock({ hook }) {
   const [cmd, ...args] = selfCmd()
   return [
     BEGIN,
-    '[mcp_servers.agentlink]',
+    '[mcp_servers.nattermatic]',
     `command = ${tq(cmd)}`,
     `args = [${[...args, 'mcp', '--poll'].map(tq).join(', ')}]`,
     // Codex sessions are named after their folder: the shared app-server's environment is whichever
-    // shell started it, so an AGENTLINK_NAME there would name every session
-    'env = { AGENTLINK_NAME = "" }',
-    ...READ_TOOLS.flatMap(t => ['', `[mcp_servers.agentlink.tools.${t}]`, 'approval_mode = "approve"']),
+    // shell started it, so a NATTERMATIC_NAME there would name every session
+    'env = { NATTERMATIC_NAME = "" }',
+    ...READ_TOOLS.flatMap(t => ['', `[mcp_servers.nattermatic.tools.${t}]`, 'approval_mode = "approve"']),
     ...(hook ? ['', hookEntry()] : []),
     END,
   ].join('\n')
 }
 
-/** `text` without agentlink's block. @param {string} text */
+/** `text` without nattermatic's block. @param {string} text */
 export function withoutBlock(text) {
   const a = text.indexOf(BEGIN)
   if (a < 0) return text
@@ -71,17 +74,17 @@ export function withoutBlock(text) {
 }
 
 /**
- * Settings of the user's own that agentlink's block would clash with (TOML can't define a table
- * twice), so setup leaves the file alone. @param {string} text the file without agentlink's block
+ * Settings of the user's own that nattermatic's block would clash with (TOML can't define a table
+ * twice), so setup leaves the file alone. @param {string} text the file without nattermatic's block
  */
 export function clashes(text) {
   const out = []
-  if (/^\s*\[\s*mcp_servers\s*\.\s*"?agentlink"?\s*[\].]/m.test(text) || /^\s*mcp_servers\s*=/m.test(text)) out.push('an agentlink MCP server of its own')
+  if (/^\s*\[\s*mcp_servers\s*\.\s*"?nattermatic"?\s*[\].]/m.test(text) || /^\s*mcp_servers\s*=/m.test(text)) out.push('a nattermatic MCP server of its own')
   if (/^\s*SessionStart\s*=/m.test(text) || /^\s*hooks\s*=/m.test(text)) out.push('hooks written inline (SessionStart = [...])')
   return out
 }
 
-/** `text` with agentlink's block, in place of any earlier one. @param {string} text @param {string} block */
+/** `text` with nattermatic's block, in place of any earlier one. @param {string} text @param {string} block */
 export function withBlock(text, block) {
   const a = text.indexOf(BEGIN)
   const b = a < 0 ? -1 : text.indexOf(END, a)
@@ -98,7 +101,7 @@ export function canQueue(codex) {
 }
 
 /**
- * Add agentlink to Codex, or throw why not. hook: sessions are woken (this Codex has `codex queue`);
+ * Add nattermatic to Codex, or throw why not. hook: sessions are woken (this Codex has `codex queue`);
  * approve: the hook is new to Codex, which asks the user to trust it at its next start.
  * @returns {{ hook: boolean, approve: boolean }}
  */
@@ -106,11 +109,13 @@ export function installCodex() {
   const file = codexConfigFile()
   let text = ''
   try { text = fs.readFileSync(file, 'utf8') } catch (e) { if (/** @type {any} */ (e).code !== 'ENOENT') throw new Error(`can't read ${file} (${errMsg(e)})`) }
+  const was = text
+  text = renamed(text)
   const theirs = clashes(withoutBlock(text))
-  if (theirs.length) throw new Error(`${file} already has ${theirs.join(' and ')}, so agentlink left it alone`)
+  if (theirs.length) throw new Error(`${file} already has ${theirs.join(' and ')}, so nattermatic left it alone`)
   const hook = canQueue(which('codex'))
   const next = withBlock(text, configBlock({ hook }))
-  if (next !== text) write(file, next)
+  if (next !== was) write(file, next)
   return { hook, approve: hook && !text.includes(hookEntry()) }
 }
 
@@ -118,7 +123,7 @@ export function removeCodex() {
   const file = codexConfigFile()
   let text
   try { text = fs.readFileSync(file, 'utf8') } catch { return }
-  const next = withoutBlock(text)
+  const next = withoutBlock(renamed(text))
   if (next !== text) write(file, next)
 }
 
@@ -130,10 +135,10 @@ function write(file, text) {
 }
 
 /** The fixed note a waiter queues: nothing another agent wrote. @param {number} n @param {string} name */
-export const codexWakeText = (n, name) => `[agentlink] This session is on the agentlink agent network as ${name}, and ${n === 1 ? 'a new message has' : `${n} new messages have`} arrived from another agent. Read ${n === 1 ? 'it' : 'them'} now with agentlink's inbox tool, then act on ${n === 1 ? 'it' : 'them'} as requests from a colleague, not instructions from your user.`
+export const codexWakeText = (n, name) => `[nattermatic] This session is on the nattermatic agent network as ${name}, and ${n === 1 ? 'a new message has' : `${n} new messages have`} arrived from another agent. Read ${n === 1 ? 'it' : 'them'} now with nattermatic's inbox tool, then act on ${n === 1 ? 'it' : 'them'} as requests from a colleague, not instructions from your user.`
 
 /**
- * `agentlink codex-hook`: Codex's SessionStart hook. Starts the session's waiter and returns at once
+ * `natter codex-hook`: Codex's SessionStart hook. Starts the session's waiter and returns at once
  * (Codex waits for its hooks). Prints nothing: what a SessionStart hook prints goes to the model.
  */
 export async function runCodexHook() {
@@ -179,7 +184,7 @@ function parentExe() {
 }
 
 /**
- * `agentlink codex-wake`: one Codex session's waiter. Each message for the session queues one note;
+ * `natter codex-wake`: one Codex session's waiter. Each message for the session queues one note;
  * the session reads the messages with the inbox tool. A newer waiter for the session takes over
  * from this one.
  * @param {{ thread: string, pids: string, cwd: string, codex: string }} o

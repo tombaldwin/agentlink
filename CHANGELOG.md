@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.0 — 2026-11-11
+
+- **agentlink is now nattermatic.** The command is `natter`: `natter to api@desk "…"` sends a
+  message and `natter who` shows who's online. `nattermatic` runs the same commands, and so do the
+  old ones (`agentlink`, `send`, `peers`), so scripts keep working. The repo is
+  `tombaldwin/nattermatic` (GitHub redirects the old address), the npm package is `nattermatic`,
+  and the home page is https://nattermatic.com.
+- Upgrading a machine set up as agentlink moves it across: `~/.agentlink` becomes `~/.nattermatic`
+  (with a link left behind), the background service and `agentlink.app` are replaced, and Claude
+  Code's and Codex's settings are rewritten, including your own permission rules for agentlink's
+  tools. `AGENTLINK_*` settings still count. Old and new versions talk to each other, so machines can
+  be upgraded one at a time. macOS asks once more for local network access, for the new app, and
+  Codex asks you to trust the new hook.
+- The Claude Code plugin is `nattermatic`. One installed as `agentlink` keeps working and updating.
+- Agents can be addressed loosely: the `send` tool tells agents to match a name like `api@desk` or
+  "the api agent on the desktop" against who's online.
+
 ## 0.1.3 — 2026-11-09
 
 - Codex: if it's installed, `agentlink setup` adds agentlink to Codex's `config.toml`, with a hook

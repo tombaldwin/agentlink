@@ -3,7 +3,7 @@
 /** A configured or command-line peer: a name, plus an explicit address if one was given. */
 export interface PeerSpec { host: string; addr: string | null }
 
-/** The loaded configuration (config.json merged with AGENTLINK_* environment overrides). */
+/** The loaded configuration (config.json merged with NATTERMATIC_* environment overrides). */
 export interface Config {
   dir: string
   /** This machine's key and certificate (PEM) and its fingerprint. */

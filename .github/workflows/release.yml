@@ -1,6 +1,6 @@
 name: Release
 
-# Pushing a tag vX.Y.Z builds agentlink.app (signed with Developer ID, notarized, stapled) and
+# Pushing a tag vX.Y.Z builds nattermatic.app (signed with Developer ID, notarized, stapled) and
 # creates a DRAFT GitHub Release with it and the npm package. Check the draft, then publish it:
 # the installer downloads the app from the latest published release.
 # Publishing that release then publishes the same npm package to npm, through npm's trusted
@@ -26,7 +26,7 @@ jobs:
     runs-on: macos-latest          # Apple silicon
     timeout-minutes: 45
     steps:
-      - run: echo "KEYCHAIN=$RUNNER_TEMP/agentlink-signing.keychain-db" >> "$GITHUB_ENV"
+      - run: echo "KEYCHAIN=$RUNNER_TEMP/nattermatic-signing.keychain-db" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
@@ -76,26 +76,26 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PW" "$KEYCHAIN" >/dev/null
           rm -f "$RUNNER_TEMP/cert.p12"
           echo "$KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
-          xcrun notarytool store-credentials agentlink-notary --key "$RUNNER_TEMP/notary.p8" --key-id "$KEY_ID" --issuer "$ISSUER" --keychain "$KEYCHAIN"
+          xcrun notarytool store-credentials nattermatic-notary --key "$RUNNER_TEMP/notary.p8" --key-id "$KEY_ID" --issuer "$ISSUER" --keychain "$KEYCHAIN"
           rm -f "$RUNNER_TEMP/notary.p8"
           security find-identity -v -p codesigning "$KEYCHAIN" | grep -q 'Developer ID Application' ||
             { echo "the certificate in MACOS_CERT_P12 is not a Developer ID Application certificate"; exit 1; }
 
-      - name: Build, sign and notarize agentlink.app
-        run: npm run build:app -- --sign "Developer ID Application" --notarize agentlink-notary
+      - name: Build, sign and notarize nattermatic.app
+        run: npm run build:app -- --sign "Developer ID Application" --notarize nattermatic-notary
 
       - name: Run the end-to-end tests against the built app
-        run: AGENTLINK_TEST_EXE=dist/arm64/agentlink.app/Contents/MacOS/agentlink npm run test:e2e
+        run: NATTERMATIC_TEST_EXE=dist/arm64/nattermatic.app/Contents/MacOS/nattermatic npm run test:e2e
 
       - name: Release files
         run: |
           V=$(node -p 'require("./package.json").version')
           mkdir -p release
-          cp "dist/agentlink-$V-macos-arm64.zip" release/
-          cp "dist/agentlink-$V-macos-arm64.zip.sha256" release/
+          cp "dist/nattermatic-$V-macos-arm64.zip" release/
+          cp "dist/nattermatic-$V-macos-arm64.zip.sha256" release/
           # unversioned names: what the installer fetches from releases/latest/download
-          cp "dist/agentlink-$V-macos-arm64.zip" release/agentlink-macos-arm64.zip
-          (cd release && shasum -a 256 agentlink-macos-arm64.zip > agentlink-macos-arm64.zip.sha256)
+          cp "dist/nattermatic-$V-macos-arm64.zip" release/nattermatic-macos-arm64.zip
+          (cd release && shasum -a 256 nattermatic-macos-arm64.zip > nattermatic-macos-arm64.zip.sha256)
           npm pack --silent --pack-destination release >/dev/null
           # this version's CHANGELOG section as the release notes
           awk -v v="$V" '$0 ~ "^## "v" " {on=1; next} on && /^## / {exit} on' CHANGELOG.md > release-notes.md
@@ -105,14 +105,14 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
-          name: agentlink-release
+          name: nattermatic-release
           path: release/
 
       - name: Create a draft release
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release/* --draft --verify-tag --title "agentlink ${GITHUB_REF_NAME#v}" --notes-file release-notes.md
+        run: gh release create "$GITHUB_REF_NAME" release/* --draft --verify-tag --title "nattermatic ${GITHUB_REF_NAME#v}" --notes-file release-notes.md
 
       - name: Remove the signing keychain
         if: always()
@@ -138,11 +138,11 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
         run: |
           V=${TAG#v}
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "tombaldwin-agentlink-$V.tgz"
-          if npm view "@tombaldwin/agentlink@$V" version >/dev/null 2>&1; then
-            echo "@tombaldwin/agentlink@$V is already on npm"; exit 0
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "nattermatic-$V.tgz"
+          if npm view "nattermatic@$V" version >/dev/null 2>&1; then
+            echo "nattermatic@$V is already on npm"; exit 0
           fi
-          npm publish "./tombaldwin-agentlink-$V.tgz" --provenance --access public
+          npm publish "./nattermatic-$V.tgz" --provenance --access public
 
   mcp-registry:
     # the MCP Registry entry (server.json) for the version just published to npm: the registry checks
@@ -179,7 +179,7 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
         run: |
           for i in $(seq 1 40); do
-            curl -fsS "https://registry.npmjs.org/@tombaldwin%2fagentlink/${TAG#v}" >/dev/null 2>&1 && exit 0
+            curl -fsS "https://registry.npmjs.org/nattermatic/${TAG#v}" >/dev/null 2>&1 && exit 0
             sleep 15
           done
           echo "npm still doesn't serve ${TAG#v} after 10 minutes"; exit 1

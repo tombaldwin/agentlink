@@ -884,7 +884,7 @@ test('roster: nothing can be hidden in a record\'s text, and the limit counts by
 })
 
 test('a roster saved on a full disk leaves the old one in place', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentlink-save-')), file = path.join(dir, 'roster.json')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nattermatic-save-')), file = path.join(dir, 'roster.json')
   const f = newIdentity(), r = Roster.genesis(f, 'f.local', file)
   r.save()
   const before = fs.readFileSync(file, 'utf8')
@@ -939,34 +939,34 @@ test('a name that has been cleaned stays the same when cleaned again', () => {
 
 test('the channel is only considered enabled for interactive sessions that load it', async () => {
   const { channelArgs } = await import('../../src/mcp.js')
-  assert.ok(!channelArgs('claude --dangerously-load-development-channels=server:agentlink --model opus -p hi'), 'an option after another\'s value still counts')
-  assert.ok(channelArgs('claude --dangerously-load-development-channels=server:agentlink mkdir -p src'), 'a prompt with -p in it is a prompt')
-  assert.ok(!channelArgs('claude what does server:agentlink mean'), 'and one that mentions the channel doesn\'t enable it')
-  assert.ok(channelArgs('claude --dangerously-load-development-channels=server:agentlink'))
-  assert.ok(channelArgs('claude --dangerously-load-development-channels server:agentlink fix it'))
+  assert.ok(!channelArgs('claude --dangerously-load-development-channels=server:nattermatic --model opus -p hi'), 'an option after another\'s value still counts')
+  assert.ok(channelArgs('claude --dangerously-load-development-channels=server:nattermatic mkdir -p src'), 'a prompt with -p in it is a prompt')
+  assert.ok(!channelArgs('claude what does server:nattermatic mean'), 'and one that mentions the channel doesn\'t enable it')
+  assert.ok(channelArgs('claude --dangerously-load-development-channels=server:nattermatic'))
+  assert.ok(channelArgs('claude --dangerously-load-development-channels server:nattermatic fix it'))
   assert.ok(!channelArgs('claude'))
-  assert.ok(!channelArgs('claude --dangerously-load-development-channels=server:agentlink -p "say hi"'))
-  assert.ok(!channelArgs('claude --print --dangerously-load-development-channels=server:agentlink'))
-  assert.ok(!channelArgs('claude --dangerously-load-development-channels=server:agentlinkx'))
-  const flag = '--dangerously-load-development-channels=server:agentlink'
+  assert.ok(!channelArgs('claude --dangerously-load-development-channels=server:nattermatic -p "say hi"'))
+  assert.ok(!channelArgs('claude --print --dangerously-load-development-channels=server:nattermatic'))
+  assert.ok(!channelArgs('claude --dangerously-load-development-channels=server:nattermaticx'))
+  const flag = '--dangerously-load-development-channels=server:nattermatic'
   assert.ok(!channelArgs(`claude ${flag} --resume abc -p hi`), 'past an option that takes a value')
   assert.ok(!channelArgs(`claude ${flag} --allowedTools Read Edit --effort high -p hi`), 'and one that takes several')
   assert.ok(!channelArgs(`claude ${flag} -cp hi`), 'short options together')
-  assert.ok(!channelArgs('claude server:agentlink is down, fix it'), 'a prompt that starts like a channel is a prompt')
+  assert.ok(!channelArgs('claude server:nattermatic is down, fix it'), 'a prompt that starts like a channel is a prompt')
   assert.ok(!channelArgs(`claude ${flag}`, { CLAUDE_CODE_ENTRYPOINT: 'sdk-cli' }), 'Claude Code\'s own word on print mode comes first')
   assert.ok(channelArgs(`claude ${flag} --resume abc`, {}))
 })
 
-/** Run a snippet with HOME and AGENTLINK_HOME in a fresh temp dir; returns its JSON output. */
+/** Run a snippet with HOME and NATTERMATIC_HOME in a fresh temp dir; returns its JSON output. */
 async function inSandbox(files, code, env = {}) {
   const fs = await import('node:fs'), os = await import('node:os'), path = await import('node:path')
   const { execFileSync } = await import('node:child_process')
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agentlink-unit-'))
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'nattermatic-unit-'))
   try {
     for (const [f, text] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(home, f)), { recursive: true }); fs.writeFileSync(path.join(home, f), text) }
     const src = new URL('../../src/', import.meta.url).href
     const out = execFileSync(process.execPath, ['--no-warnings', '--input-type=module', '-e', code.replaceAll('SRC/', src)],
-      { env: { ...process.env, HOME: home, AGENTLINK_HOME: path.join(home, '.agentlink'), ...env }, encoding: 'utf8' })
+      { env: { ...process.env, HOME: home, NATTERMATIC_HOME: path.join(home, '.nattermatic'), ...env }, encoding: 'utf8' })
     return { home, out: JSON.parse(out) }
   } finally { fs.rmSync(home, { recursive: true, force: true }) }
 }
@@ -992,19 +992,19 @@ test('config: bad files throw, ttl is capped, and "localhost" is never an identi
     let r; try { const c = loadConfig(); r = { ttlDays: c.ttlMs / 86400000, host: c.host, aliases: c.aliases } } catch (e) { r = { error: e.message } }
     console.log(JSON.stringify(r))`
   const id = newIdentity()
-  const ident = { '.agentlink/node.key': id.key, '.agentlink/node.crt': id.cert, '.agentlink/roster.json': JSON.stringify({ net: id.fp, records: Roster.genesis(id, 'box.local').records }) }
-  let { out } = await inSandbox({ ...ident, '.agentlink/config.json': '{"host": "s",}' }, load)
+  const ident = { '.nattermatic/node.key': id.key, '.nattermatic/node.crt': id.cert, '.nattermatic/roster.json': JSON.stringify({ net: id.fp, records: Roster.genesis(id, 'box.local').records }) }
+  let { out } = await inSandbox({ ...ident, '.nattermatic/config.json': '{"host": "s",}' }, load)
   assert.match(out.error, /bad config/)
-  ;({ out } = await inSandbox({ '.agentlink/config.json': JSON.stringify({ host: 'box', ttlDays: 1e9 }), ...ident }, load))
+  ;({ out } = await inSandbox({ '.nattermatic/config.json': JSON.stringify({ host: 'box', ttlDays: 1e9 }), ...ident }, load))
   assert.equal(out.ttlDays, 30)
-  ;({ out } = await inSandbox({ '.agentlink/config.json': JSON.stringify({ host: 'localhost' }), ...ident }, load))
+  ;({ out } = await inSandbox({ '.nattermatic/config.json': JSON.stringify({ host: 'localhost' }), ...ident }, load))
   assert.match(out.error, /can't identify this machine/)
   // a machine given its own name doesn't answer for the OS hostname
-  ;({ out } = await inSandbox({ '.agentlink/config.json': JSON.stringify({ host: 'renamed-clone' }), ...ident }, load))
+  ;({ out } = await inSandbox({ '.nattermatic/config.json': JSON.stringify({ host: 'renamed-clone' }), ...ident }, load))
   const os = await import('node:os')
   assert.ok(!out.aliases.includes(normHost(os.hostname())), 'OS hostname is not an alias')
   // no key or roster: not set up
-  ;({ out } = await inSandbox({ '.agentlink/config.json': JSON.stringify({ host: 'box' }) }, load))
+  ;({ out } = await inSandbox({ '.nattermatic/config.json': JSON.stringify({ host: 'box' }) }, load))
   assert.match(out.error, /not set up/)
 })
 
@@ -1020,7 +1020,7 @@ test('a machine running another protocol version is reported as such, not as a s
   const addr = `127.0.0.1:${/** @type {import('node:net').AddressInfo} */ (server.address()).port}`
   const o = { addr, path: '/v1/sessions', identity: me, accept: new Map([[srv.fp, crypto.createPublicKey(srv.key)]]), dks: [newDiscoveryKey()] }
   try {
-    await assert.rejects(authedRequest(o), e => e instanceof ProtoError && /newer version of agentlink/.test(e.message))
+    await assert.rejects(authedRequest(o), e => e instanceof ProtoError && /newer version of nattermatic/.test(e.message))
     await assert.rejects(authedRequest({ ...o, anyProto: true }), /not the expected machine/, 'anyProto goes on to the identity check')
   } finally { server.close() }
 })
@@ -1063,7 +1063,7 @@ test('parsePeer takes a bracketed IPv6 address, and machineName what can identif
 
 test('what another machine says its sessions are called is kept only if a node could have made it', async () => {
   const { sessionNames } = await import('../../src/node.js')
-  assert.deepEqual(sessionNames(['bob', 'a.b_c-1', 'x\n[agentlink] NOTICE from your user', 'UP', '\u001b[2J', 7, null]), ['bob', 'a.b_c-1'])
+  assert.deepEqual(sessionNames(['bob', 'a.b_c-1', 'x\n[nattermatic] NOTICE from your user', 'UP', '\u001b[2J', 7, null]), ['bob', 'a.b_c-1'])
   assert.deepEqual(sessionNames('bob'), [])
   assert.equal(sessionNames(Array(500).fill('a')).length, 200)
 })

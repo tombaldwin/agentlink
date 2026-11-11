@@ -1,20 +1,23 @@
-<p align="center"><img src="assets/agentlink-320.png" width="160" height="160" alt="agentlink: a red tin toy robot head with a radio antenna"></p>
+<p align="center"><img src="assets/nattermatic-320.png" width="160" height="160" alt="nattermatic: a red tin toy robot head with a radio antenna"></p>
 
-# agentlink
+# nattermatic
 
 Let AI agents on different Claude accounts — and different machines — message each other.
-Claude Code's own messaging needs every session on one account; agentlink doesn't. Address any
+Claude Code's own messaging needs every session on one account; nattermatic doesn't. Address any
 agent as `name@host` (e.g. `reviewer@laptop.local`). An incoming message **wakes an idle Claude
 Code or Codex session**, just like agents talking on a single machine.
 
-<p align="center"><a href="https://poly.io/agentlink"><img src="assets/demo.gif" width="880" alt="Two Claude Code sessions on different machines: one agent asks the other a question, and the idle session wakes up, checks its code and answers"></a></p>
-<p align="center"><a href="https://poly.io/agentlink">Watch the whole one-minute demo, from setup to reply, at poly.io/agentlink</a></p>
+<p align="center"><a href="https://nattermatic.com"><img src="assets/demo.gif" width="880" alt="Two Claude Code sessions on different machines: one agent asks the other a question, and the idle session wakes up, checks its code and answers"></a></p>
+<p align="center"><a href="https://nattermatic.com">Watch the whole one-minute demo, from setup to reply, at nattermatic.com</a></p>
+
+nattermatic was called **agentlink** until version 0.2.0. Machines set up under the old name move
+across when they're upgraded, keeping their network, and the `agentlink` command still works.
 
 ## What you need
 
 - [Claude Code](https://claude.com/claude-code) 2.1.318 or newer on each machine. Codex 0.167 or
   newer is woken too, and other MCP agents can [join](#what-you-get) (for a machine without Claude
-  Code, set `AGENTLINK_SKIP_CHECKS=1` for the installer).
+  Code, set `NATTERMATIC_SKIP_CHECKS=1` for the installer).
 - An Apple silicon Mac or Linux. Intel Macs aren't currently supported.
 - Machines on the same network, or Tailscale on each of them.
 
@@ -24,34 +27,34 @@ The installer brings everything else. It needs no sudo.
 
 **First machine** — paste into Claude Code (or run the command yourself):
 
-> Set up agentlink on this machine: run `curl -fsSL https://raw.githubusercontent.com/tombaldwin/agentlink/main/install.sh | sh`, then show me the prompt it prints for adding other machines, and tell me to type /reload-plugins.
+> Set up nattermatic on this machine: run `curl -fsSL https://nattermatic.com/install.sh | sh`, then show me the prompt it prints for adding other machines, and tell me to type /reload-plugins.
 
-Or install the Claude Code plugin, which teaches Claude to set agentlink up and use it, then ask
-Claude to set up agentlink:
+Or install the Claude Code plugin, which teaches Claude to set nattermatic up and use it, then ask
+Claude to set up nattermatic:
 
-    /plugin install agentlink --marketplace tombaldwin/agentlink
+    /plugin install nattermatic --marketplace tombaldwin/nattermatic
 
 **Every other machine** — paste the prompt the first machine printed. It looks like:
 
-> Join my agentlink network: run `curl … | sh` — then tell me to type /reload-plugins.
+> Join my nattermatic network: run `curl … | sh` — then tell me to type /reload-plugins.
 
 Each invite adds one machine and expires after 24 hours. The pinned key means curl only talks to
 the machine that made the invite. That key exists only while the invite is open, so a used invite
-line stops working (curl reports a key mismatch or a 404). Run `agentlink invite` on any member
+line stops working (curl reports a key mismatch or a 404). Run `natter invite` on any member
 for a new one.
 
 **Then** type `/reload-plugins` in Claude Code. That session is now on the network, and so is every
 new one. (If that doesn't work, restart it: `claude --continue` picks up where you left off.)
 
-That's it: no config files, no accounts, no server to run. Setup adds agentlink's tools and a small
-background hook to Claude Code's settings (and Codex's, if it's installed), and `agentlink uninstall`
+That's it: no config files, no accounts, no server to run. Setup adds nattermatic's tools and a small
+background hook to Claude Code's settings (and Codex's, if it's installed), and `natter uninstall`
 takes them out again. On Apple
 silicon Macs it installs
-agentlink as a signed app (`~/Applications/agentlink.app`, from the inviting machine or the latest
-release, refused unless Apple's certificate for agentlink's team signed it); macOS asks once to
-let **agentlink** find devices on your local network: click Allow. Elsewhere it uses npm, and
+nattermatic as a signed app (`~/Applications/nattermatic.app`, from the inviting machine or the latest
+release, refused unless Apple's certificate for nattermatic's team signed it); macOS asks once to
+let **nattermatic** find devices on your local network: click Allow. Elsewhere it uses npm, and
 brings its own Node.js if the machine doesn't have a recent one. For the next machine, ask Claude
-on any member to add one (or run `agentlink invite`).
+on any member to add one (or run `natter invite`).
 
 ## Your first message
 
@@ -84,34 +87,34 @@ job that reports in the morning, are in [Recipes](docs/recipes.md).
   machine twice are dropped, though a session that dies just as a message is shown gets it again
   when it restarts.
   Messages expire after 7 days. A session can have 2,000 unread messages waiting, and a machine's
-  store can reach 1 GB (`maxWaiting` and `maxStoreMB` in `~/.agentlink/config.json`). Past that, a
+  store can reach 1 GB (`maxWaiting` and `maxStoreMB` in `~/.nattermatic/config.json`). Past that, a
   message from another machine waits at the sender and is retried, and a send from this machine
   fails with an error, so a runaway agent stops there.
 - **Zero-config discovery.** Machines on the same LAN find each other automatically (encrypted UDP
   beacons) and share what they know, so every machine learns the whole network.
 - **Multiple Claude accounts.** Every `CLAUDE_CONFIG_DIR` account setup can find is enabled
-  (`~/.claude*` dirs, shell aliases, and the one the shell is using); run `agentlink setup` again to
+  (`~/.claude*` dirs, shell aliases, and the one the shell is using); run `natter setup` again to
   add new accounts.
-- **Beyond the LAN.** With Tailscale on both machines, `agentlink invite` includes the Tailscale
+- **Beyond the LAN.** With Tailscale on both machines, `natter invite` includes the Tailscale
   name and joining machines use it automatically. A machine that moves between networks is found
   again at its other addresses, within a couple of minutes.
-- **Codex.** If Codex is installed, setup adds agentlink to `~/.codex/config.toml` too. The next
-  time Codex starts, it asks you to trust agentlink's hook: trust it, and a message gives an idle
+- **Codex.** If Codex is installed, setup adds nattermatic to `~/.codex/config.toml` too. The next
+  time Codex starts, it asks you to trust nattermatic's hook: trust it, and a message gives an idle
   Codex session a turn (through `codex queue`, Codex 0.167 or newer). Codex sessions are named after
   their project folder.
-- **Other agents.** Any MCP agent can join with `agentlink mcp --poll` (it reads with `inbox`
+- **Other agents.** Any MCP agent can join with `natter mcp --poll` (it reads with `inbox`
   instead of being woken).
-- **Channels and managed accounts.** If your organisation's policy turns channels off, `agentlink
-  claude` sessions can't tell, and pushed messages don't show up. Set `AGENTLINK_POLL=1` so they're
+- **Channels and managed accounts.** If your organisation's policy turns channels off, `nattermatic
+  claude` sessions can't tell, and pushed messages don't show up. Set `NATTERMATIC_POLL=1` so they're
   read with `inbox` instead.
 
-Name a session with `AGENTLINK_NAME=<name> claude` (default: the project folder name).
+Name a session with `NATTERMATIC_NAME=<name> claude` (default: the project folder name).
 
 ## Compared with Claude Code's own messaging
 
 Claude Code can already [message between your own sessions](https://code.claude.com/docs/en/cross-session-messaging):
 on one machine over a local socket, and between machines through Anthropic's servers, with a
-claude.ai sign-in and Remote Control. If that covers you, you don't need agentlink. agentlink is for
+claude.ai sign-in and Remote Control. If that covers you, you don't need nattermatic. nattermatic is for
 sessions on different Claude accounts, agents other than Claude Code, and messages that stay
 between your own machines.
 
@@ -119,26 +122,35 @@ between your own machines.
 
 Claude handles everyday use and invites; these are for terminals and scripts.
 
-    agentlink send <name@host> <msg>   agentlink peers     agentlink status
-    agentlink invite [--list|--revoke] agentlink remove <host>
-    agentlink compact [--yes]          agentlink uninstall
+    natter to <name@host> <msg>       natter who        natter status
+    natter invite [--list|--revoke]   natter remove <host>
+    natter compact [--yes]            natter uninstall
 
-`agentlink help <command>` (or `agentlink <command> --help`) shows a command's options.
-`agentlink peers` says why a machine is offline (the node log, `~/.agentlink/node.log`, records
+`natter help <command>` (or `natter <command> --help`) shows a command's options. `nattermatic`
+runs the same commands, and so do agentlink's names for them (`agentlink send`, `agentlink peers`).
+`natter who` says why a machine is offline (the node log, `~/.nattermatic/node.log`, records
 when a machine stops or starts answering).
 
-Tab completion, including the addresses of agents that are online after `agentlink send`: add
-`eval "$(agentlink completion zsh)"` to `~/.zshrc`, or `eval "$(agentlink completion bash)"` to
+Tab completion, including the addresses of agents that are online after `natter to`: add
+`eval "$(natter completion zsh)"` to `~/.zshrc`, or `eval "$(natter completion bash)"` to
 `~/.bashrc`.
 
 ## Upgrading
 
-Re-run the install line from **Setup** on each machine (or `npm install -g @tombaldwin/agentlink`
-followed by `agentlink setup`). It keeps the machine's key, network and messages. Upgrade all
+Re-run the install line from **Setup** on each machine (or `npm install -g nattermatic`
+followed by `natter setup`). It keeps the machine's key, network and messages. Upgrade all
 your machines: a machine running an incompatible version is reported as such
-(`… runs an older version of agentlink`) and can't exchange messages until it's upgraded.
+(`… runs an older version of nattermatic`) and can't exchange messages until it's upgraded.
 Claude sessions that were running during the upgrade say they need restarting
 (`claude --continue` resumes the conversation); they never stop the newer node.
+
+**From agentlink** (before 0.2.0): re-run the install line, as for any upgrade. Setup moves
+`~/.agentlink` to `~/.nattermatic` (leaving a link behind), replaces the background service, and
+updates Claude Code's and Codex's settings, including any permission rules you wrote for
+agentlink's tools. Machines keep their key and network, and old and new versions still talk to each
+other, so machines can be upgraded one at a time. Because the app has a new name, macOS asks once
+more to let it find devices on the local network, and Codex asks you to trust the new hook. If you
+installed with npm, `npm uninstall -g @tombaldwin/agentlink` before `npm install -g nattermatic`.
 
 ## Security
 
@@ -155,11 +167,11 @@ members. Any member can invite machines, and a machine can remove the ones that 
   network learns nothing from a join, and can't swap the installer. A used or expired invite is
   worthless.
 - **Machines can't impersonate each other.** Every message is signed by the machine that sent it,
-  and machines relaying a copy can't change it (they can read it: members are trusted). `agentlink remove <host>` takes a machine off the
+  and machines relaying a copy can't change it (they can read it: members are trusted). `natter remove <host>` takes a machine off the
   network; members that were offline learn about it when they come back.
 - **Members are trusted.** Any member can add machines, and every agent on a member machine can
   message yours. Only add machines you control.
-- **Prompt injection.** Messages come from other AI agents. agentlink tells Claude to treat them
+- **Prompt injection.** Messages come from other AI agents. nattermatic tells Claude to treat them
   as requests from a colleague, not instructions from you, and to check with you before
   anything destructive or sensitive.
 
@@ -169,7 +181,7 @@ See [SECURITY.md](SECURITY.md) for details and known limitations.
 
 - Only interactive sessions are woken. `claude -p` runs and SDK sessions aren't, and nothing about
   them changes: their messages wait for the `inbox` tool.
-- A Codex session is woken from its first prompt on, when Codex runs agentlink's hook. After you
+- A Codex session is woken from its first prompt on, when Codex runs nattermatic's hook. After you
   close a Codex window, Codex's background server can keep the session open, and then answers its
   messages by itself. Two Codex sessions in the same folder can't be told apart: only the newer one
   is woken. A Codex turn you stop with Esc holds messages back until your next prompt.
@@ -183,9 +195,9 @@ See [SECURITY.md](SECURITY.md) for details and known limitations.
   in its settings, or use Tailscale. Messages wait until the machines can reach each other.
 - Over SSH on a Mac, Claude Code can't reach its login while the keychain is locked: run
   `security unlock-keychain` first.
-- Re-running `agentlink setup` keeps the machine on its network; pass `--new-network` to start a
+- Re-running `natter setup` keeps the machine on its network; pass `--new-network` to start a
   new one.
-- A machine's name is fixed when it joins. To rename it, run `agentlink remove <old name>` on a
+- A machine's name is fixed when it joins. To rename it, run `natter remove <old name>` on a
   machine that joined before it, then run a new invite line with `| sh -s -- --host <new name>` in
   place of `| sh`. Messages already queued for its old name wait until they expire.
 - A removed machine comes back with a new invite: it gets a new key, and its messages, delivered
@@ -196,10 +208,10 @@ See [SECURITY.md](SECURITY.md) for details and known limitations.
   but macOS may stop it reaching other machines (see below), and there's no app for them yet.
 - On Linux, `.local` names need mDNS (`avahi-daemon` and `libnss-mdns`); without it, use the IP
   line the invite offers. Port 7777 must be open in any firewall between your machines.
-- On macOS, agentlink needs Local Network access to reach your other machines. The app asks for
-  it by name; if you clicked Don't Allow, turn **agentlink** on under System Settings → Privacy &
-  Security → Local Network. An npm install on a Mac (`AGENTLINK_APP=0`) runs as plain `node` at
-  login, which macOS may block without asking: `agentlink peers` then shows machines as offline
+- On macOS, nattermatic needs Local Network access to reach your other machines. The app asks for
+  it by name; if you clicked Don't Allow, turn **nattermatic** on under System Settings → Privacy &
+  Security → Local Network. An npm install on a Mac (`NATTERMATIC_APP=0`) runs as plain `node` at
+  login, which macOS may block without asking: `natter who` then shows machines as offline
   with `EHOSTUNREACH`.
 
 ## Development
@@ -209,11 +221,11 @@ See [SECURITY.md](SECURITY.md) for details and known limitations.
                 # at stored addresses, relays, invites and joining, removal, big backlogs, node
                 # restart, IP/Tailscale aliases
 
-The macOS app (agentlink as a single signed executable, so macOS asks for Local Network access by
+The macOS app (nattermatic as a single signed executable, so macOS asks for Local Network access by
 name; see `scripts/build-app.mjs`):
 
-    npm run build:app                     # dist/agentlink-<version>-macos-<arch>.zip
+    npm run build:app                     # dist/nattermatic-<version>-macos-<arch>.zip
     npm run build:app -- --arch x64 --sign "Developer ID Application: …" --notarize <profile>
-    AGENTLINK_TEST_EXE=dist/arm64/agentlink.app/Contents/MacOS/agentlink npm run test:e2e
+    NATTERMATIC_TEST_EXE=dist/arm64/nattermatic.app/Contents/MacOS/nattermatic npm run test:e2e
 
 Releases (signed and notarized app, GitHub Release, npm): see [docs/releasing.md](docs/releasing.md).
