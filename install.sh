@@ -110,7 +110,10 @@ install_app() {
       return 1
     fi
   else
-    if ! curl -fsSL "$RELEASES/nattermatic-macos-arm64.zip" -o "$TMP/app.zip" ||
+    # about 40 MB, so it can take a minute or two: say so, with a progress bar when there's a terminal to see it
+    echo "Downloading nattermatic.app (about 40 MB)..."
+    BAR=-s; [ -t 2 ] && BAR=-#
+    if ! curl -fSL "$BAR" "$RELEASES/nattermatic-macos-arm64.zip" -o "$TMP/app.zip" ||
        ! curl -fsSL "$RELEASES/nattermatic-macos-arm64.zip.sha256" -o "$TMP/app.sha256"; then
       no_app "from the latest release" && link_app && return 0
       return 1
