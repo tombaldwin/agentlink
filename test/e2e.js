@@ -692,7 +692,10 @@ try {
     const took = Date.now() - t
     assert.equal(Object.keys(r.data.results).length, 2000)
     assert.ok(took < 5000, `batch handled in ${took} ms`)
-    await waitFor(() => bob.got.filter(g => g.content.startsWith('batch ')).length === 2000, 45000, 'all batch messages pushed')
+    // each push waits for the session's acknowledgement: about 11 s for all of them on an idle machine,
+    // but more than 45 s on a busy one (all cores in use). What this step is about is the 5 s above.
+    const batch = () => new Set(bob.got.filter(g => g.content.startsWith('batch ')).map(g => g.meta.msg_id)).size
+    await waitFor(() => batch() === 2000, 150_000, 'all batch messages pushed').catch(e => { throw new Error(`${e.message} (${batch()} of 2000)`) })
   })
 
   await step('a gossiped address is only used once the machine there proves who it is', async () => {
@@ -1244,8 +1247,9 @@ try {
     const e = envelope('afterjunk@b.test', 'still gets through')
     assert.equal((await memberPost('a', '/v1/deliver', { messages: [e] })).data.results[e.id], 'held')
     await waitFor(async () => (await localOf('b').req('GET', '/local/history', undefined, '?name=afterjunk&limit=1')).messages.length === 1, 6000, 'delivery')
-    const st = JSON.parse(cli('a', 'status'))
-    assert.ok(st.pending.filter(p => /made-up/.test(p.to_addr)).some(p => p.attempts > 0), 'and they are tried in turn')
+    // and they are tried in turn: a name lookup can take longer than the delivery above, so wait for one
+    // (asserting it straight away failed about one run in twenty, when the lookups were slow)
+    await waitFor(async () => JSON.parse(cli('a', 'status')).pending.filter(p => /made-up/.test(p.to_addr)).some(p => p.attempts > 0), 15000, 'a made-up name to be tried')
   })
 
   await step('send keeps every word of the message, -- included', async () => {
