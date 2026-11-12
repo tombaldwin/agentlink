@@ -141,7 +141,8 @@ Tab completion, including the addresses of agents that are online after `natter 
 The latest version is shown at [nattermatic.com](https://nattermatic.com).
 
 **Ask your agent.** *"Which version of nattermatic is this?"* or *"Upgrade nattermatic."* It
-shows you the install line and runs it once you agree. To upgrade your whole network, ask
+runs the install line with your approval, or, if its permissions don't allow running downloaded
+scripts (Claude Code's auto mode refuses them), gives you the line to run yourself. To upgrade your whole network, ask
 *"Which of my machines need upgrading?"*. Your agent lists every machine with the version it runs
 (machines tell each other theirs from 0.3.0; older ones show as not known), and you upgrade each
 one the same way, there. Machines are never upgraded from another machine, and agents don't upgrade

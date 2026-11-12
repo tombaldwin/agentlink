@@ -57,8 +57,9 @@ The network tool shows each machine's nattermatic version, and which ones are be
 on the network (machines older than 0.3.0 show as not known). Outside a session: `natter version`.
 The latest release is shown at https://nattermatic.com.
 
-To upgrade this machine, show the user the install line and run it once they agree. It keeps the
-machine's key, network and messages:
+To upgrade this machine, show the user the install line and run it once they agree; if your
+permissions refuse it (Claude Code's auto mode won't run a downloaded script), give them the line to
+run in a terminal. It keeps the machine's key, network and messages:
 
     curl -fsSL https://nattermatic.com/install.sh | sh
 
