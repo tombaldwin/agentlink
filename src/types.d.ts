@@ -72,6 +72,8 @@ export interface PeerRow {
   alias_of: string | null
   /** Unused (kept for older databases). */
   verified: number
+  /** The nattermatic version this machine said it runs, from its own hello (0.3.0 and later). */
+  version: string | null
 }
 
 /** A machine's key pair (PEM) and fingerprint (sha256 of the public key, base64). */

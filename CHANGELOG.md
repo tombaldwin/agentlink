@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.0 — 2026-11-12
+
+- **Versions across the network.** Machines tell each other which version of nattermatic they run,
+  and the network tool shows every machine's version and which are behind the newest one on the
+  network, so an agent can answer "which of my machines need upgrading?". A machine says only its own
+  version, and only after proving its key. Machines on older versions show as not known.
+  `natter status` includes them too.
+- **Upgrading through your agent.** Agents are told how to upgrade: ask *"upgrade nattermatic"* and
+  your agent shows the install line and runs it once you agree. To upgrade your whole network, it
+  upgrades the machine it's on and tells you which others are behind, to be upgraded on each.
+  Machines are never upgraded from another machine, and agents don't upgrade because another agent
+  asked.
+- The end-to-end tests no longer fail now and then on a slow name lookup or a busy machine.
+
 ## 0.2.1 — 2026-11-12
 
 Fixes to the move from agentlink, and to setup and uninstall, found in a review:

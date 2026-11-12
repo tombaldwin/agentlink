@@ -138,12 +138,23 @@ Tab completion, including the addresses of agents that are online after `natter 
 
 ## Upgrading
 
-Re-run the install line from **Setup** on each machine (or `npm install -g nattermatic`
-followed by `natter setup`). It keeps the machine's key, network and messages. Upgrade all
-your machines: a machine running an incompatible version is reported as such
-(`… runs an older version of nattermatic`) and can't exchange messages until it's upgraded.
-Claude sessions that were running during the upgrade say they need restarting
-(`claude --continue` resumes the conversation); they never stop the newer node.
+The latest version is shown at [nattermatic.com](https://nattermatic.com).
+
+**Ask your agent.** *"Which version of nattermatic is this?"* or *"Upgrade nattermatic."* It
+shows you the install line and runs it once you agree. To upgrade your whole network, ask
+*"Which of my machines need upgrading?"*. Your agent lists every machine with the version it runs
+(machines tell each other theirs from 0.3.0; older ones show as not known), and you upgrade each
+one the same way, there. Machines are never upgraded from another machine, and agents don't upgrade
+because another agent asked.
+
+**Or in a terminal.** `natter version` shows this machine's version. Re-run the install line from
+**Setup** on each machine (or `npm install -g nattermatic` followed by `natter setup`).
+
+Upgrading keeps the machine's key, network and messages. Upgrade all your machines: a machine running
+an incompatible version is reported as such (`… runs an older version of nattermatic`) and can't
+exchange messages until it's upgraded. Claude sessions that were running during the upgrade say they
+need restarting (`claude --continue` resumes the conversation, or `/reload-plugins`); they never stop
+the newer node.
 
 **From agentlink** (before 0.2.0): re-run the install line, as for any upgrade. Setup moves
 `~/.agentlink` to `~/.nattermatic` (leaving a link behind), replaces the background service, and

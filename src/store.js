@@ -35,5 +35,6 @@ export function openStore(file) {
       hash TEXT PRIMARY KEY, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER);
   `)
   try { db.exec(`ALTER TABLE peers ADD COLUMN alias_of TEXT`) } catch {}  // older databases
+  try { db.exec(`ALTER TABLE peers ADD COLUMN version TEXT`) } catch {}   // from 0.3.0: the version each machine says it runs
   return db
 }

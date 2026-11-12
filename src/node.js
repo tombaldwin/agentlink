@@ -143,6 +143,8 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     peer: db.prepare(`SELECT * FROM peers WHERE host=?`),
     peers: db.prepare(`SELECT * FROM peers ORDER BY host`),
     setAlias: db.prepare(`UPDATE peers SET alias_of=? WHERE host=?`),
+    setVersion: db.prepare(`INSERT INTO peers(host,last_seen,configured,version) VALUES(?,?,0,?)
+      ON CONFLICT(host) DO UPDATE SET version=excluded.version`),
     deletePeer: db.prepare(`DELETE FROM peers WHERE host=?`),
     clearAddr: db.prepare(`UPDATE peers SET addr=NULL WHERE host=?`),
     forgetPeers: db.prepare(`DELETE FROM peers WHERE configured=0 AND last_seen < ?`),
@@ -278,7 +280,16 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
 
   // ---------- peers ----------
   const addrOf = (/** @type {string} */ host) => cfg.routes[host] || peerRow(host)?.addr || `${host}:${cfg.port}`
-  const helloBody = () => ({ peers: shareablePeers(), records: roster.records })
+  const helloBody = () => ({ peers: shareablePeers(), records: roster.records, version: VERSION })
+  /**
+   * The version a member says it runs. Only from that member's own hello (request or reply), whose
+   * sender proved its key: what one machine says about another's version is never taken.
+   * @param {string} host @param {unknown} v
+   */
+  function noteVersion(host, v) {
+    if (typeof v !== 'string' || !/^\d{1,5}\.\d{1,5}\.\d{1,6}(?:-[0-9A-Za-z.-]{1,20})?$/.test(v) || !member(host) || host === cfg.host) return
+    if (peerRow(host)?.version !== v) q.setVersion.run(host, now(), v)
+  }
 
   /**
    * Request to another member. The machine at the address must prove it holds that member's key
@@ -341,7 +352,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     } catch (e) { throw new Error(e instanceof PinError ? `${addr}: not a machine on this network` : `${addr}: ${errMsg(e)}`) }
     const m = roster.members.get(r.peerFp)
     if (!m) throw new Error(`${addr}: not a machine on this network`)
-    if (r.status === 200 && m.fp !== me.fp) { try { const d = JSON.parse(r.text); mergeRoster(d.records); learnPeers(d.peers) } catch {} }
+    if (r.status === 200 && m.fp !== me.fp) { try { const d = JSON.parse(r.text); mergeRoster(d.records); learnPeers(d.peers); noteVersion(m.host, d.version) } catch {} }
     return m
   }
 
@@ -388,6 +399,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
         const data = await call(host, 'POST', '/v1/hello', helloBody(), { addr, timeout: 2500 })
         if (!cfg.routes[host]) q.upsertPeer.run(host, addr, now(), 0)
         learnPeers(data.peers)
+        noteVersion(host, data.version)
         log(`${host} is at ${addr}`)
         if (q.wake.run(host).changes) kick()
       } catch { probeFailed.set(key, now()) } finally { probing.delete(key) }
@@ -455,6 +467,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     try {
       const r = await call(host, 'POST', '/v1/hello', helloBody(), { timeout: 2500 })
       learnPeers(r.peers)
+      noteVersion(host, r.version)
       if (q.wake.run(host).changes) kick()   // it's reachable: retry anything waiting for it now
     } catch {
       // nothing answers where we think it is: look for it. Each address must prove it holds the key.
@@ -924,6 +937,8 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     // in joining order: each machine can remove the ones listed after it
     return [...roster.members.values()].sort((a, b) => a.rank - b.rank).map(m => ({
       host: m.host, fp: shortFp(m.fp), added_by: m.by === m.fp ? '(founded the network)' : hostOfFp(m.by), added_at: m.at, self: m.fp === me.fp,
+      // the version it said it runs when last heard from: null for one older than 0.3.0, or not heard from yet
+      version: m.fp === me.fp ? VERSION : peerRow(m.host)?.version ?? null,
     }))
   }
 
@@ -1114,8 +1129,9 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
           if (q.wake.run(peer.host).changes) kick()
           mergeRoster(d.records)
           learnPeers(d.peers)
+          noteVersion(peer.host, d.version)
         }
-        return reply(res, 200, { host: cfg.host, peers: shareablePeers(), records: roster.records })
+        return reply(res, 200, { host: cfg.host, peers: shareablePeers(), records: roster.records, version: VERSION })
       }
       case 'GET /v1/sessions':
         return reply(res, 200, { host: cfg.host, sessions: [...sessions.keys()] })

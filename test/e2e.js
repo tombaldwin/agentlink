@@ -16,7 +16,7 @@ import { Roster } from '../src/roster.js'
 import { signEnvelope, sealBeacon } from '../src/crypto.js'
 import { authedRequest, peerCertificate } from '../src/tls.js'
 import { Local } from '../src/local.js'
-import { readIdentity } from '../src/config.js'
+import { readIdentity, VERSION } from '../src/config.js'
 import { openStore } from '../src/store.js'
 
 const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'natter.js')
@@ -193,7 +193,7 @@ try {
   await step('an agent can show the network and make (or cancel) an invite for its user', async () => {
     const net = await bob.call('network')
     assert.match(net, /This machine: b\.test/)
-    assert.match(net, /in joining order[^\n]*\n  a\.test — online; founded the network\n  b\.test — this machine; added by a\.test/)
+    assert.match(net, /in joining order[^\n]*\n  a\.test — online; nattermatic [\d.]+; founded the network\n  b\.test — this machine; nattermatic [\d.]+; added by a\.test/)
     assert.match(net, /natter remove <host>/)
     const inv = await bob.call('invite')
     assert.match(inv, /Join my nattermatic network: run  curl -fsSL -k --pinnedpubkey "sha256\/\/[^"]+" "https:\/\/b\.test:\d+\/join\/install\?t=/)
@@ -1250,6 +1250,23 @@ try {
     // and they are tried in turn: a name lookup can take longer than the delivery above, so wait for one
     // (asserting it straight away failed about one run in twenty, when the lookups were slow)
     await waitFor(async () => JSON.parse(cli('a', 'status')).pending.filter(p => /made-up/.test(p.to_addr)).some(p => p.attempts > 0), 15000, 'a made-up name to be tried')
+  })
+
+  await step('machines tell each other the version they run, and only their own', async () => {
+    await ensureNode('a'); await ensureNode('b')
+    // a member's hello says its version, and the reply says the other's
+    const r = await memberPost('a', '/v1/hello', { peers: [], records: [], version: '9.9.9' })
+    assert.equal(r.status, 200)
+    assert.equal(r.data.version, VERSION)
+    const versionOf = (n, host) => JSON.parse(cli(n, 'status')).members.find(m => m.host === host)?.version
+    assert.equal(versionOf('a', 't.test'), '9.9.9')
+    assert.equal(versionOf('a', 'a.test'), VERSION, 'its own')
+    // nonsense isn't stored, and what one machine says about another's version isn't taken
+    await memberPost('a', '/v1/hello', { peers: [{ host: 'b.test', addr: `127.0.0.1:${NODES.b}`, version: '0.0.1' }], records: [], version: 'x; rm -rf' })
+    assert.equal(versionOf('a', 't.test'), '9.9.9')
+    assert.notEqual(versionOf('a', 'b.test'), '0.0.1')
+    // between real nodes: b's version reaches a through their hellos
+    await waitFor(() => versionOf('a', 'b.test') === VERSION, 30_000, 'b\'s version at a')
   })
 
   await step('send keeps every word of the message, -- included', async () => {
