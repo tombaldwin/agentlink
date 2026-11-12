@@ -49,6 +49,8 @@ export function removeOldService() {
  * still use the old path. Only for the usual home, and only if `home` doesn't exist yet or holds
  * nothing but what the installer has just put there (bin, pkg, node): entries already in `home`
  * win, and what's left of the old home is the old program, which the new one replaces.
+ * If ~/.agentlink is itself a link (to a folder on another disk, say), the data stays where it is:
+ * the installer's entries go into that folder and `home` becomes a link to it too.
  * Returns what happened, or null if there was nothing to move.
  * @param {string} home @returns {string | null}
  */
@@ -56,13 +58,32 @@ export function moveOldHome(home) {
   const old = oldHome()
   let st
   try { st = fs.lstatSync(old) } catch { return null }
-  if (!st.isDirectory() || path.resolve(home) === old) return null
+  /** @type {string | null} */
+  let target = null          // where a linked ~/.agentlink really is
+  if (st.isSymbolicLink()) {
+    try { target = fs.realpathSync(old) } catch { return `${old} was left alone: it is a link to a folder that isn't there` }
+    if (!fs.statSync(target).isDirectory()) return null
+    let real = null
+    try { real = fs.realpathSync(home) } catch {}
+    if (real === target) return null                 // moved already: both names lead to the same folder
+  } else if (!st.isDirectory()) return null
+  if (path.resolve(home) === old) return null
   const installed = new Set(['bin', 'pkg', 'node'])
   /** @type {string[]} */
   let have = []
   try { have = fs.readdirSync(home) } catch {}
   if (have.some(e => !installed.has(e))) return `${old} was left alone: ${home} is already in use`
   removeOldService()
+  if (target) {
+    // the new program replaces the old one in that folder; then home leads there
+    for (const e of have) {
+      fs.rmSync(path.join(target, e), { recursive: true, force: true })
+      moveEntry(path.join(home, e), path.join(target, e))
+    }
+    fs.rmSync(home, { recursive: true, force: true })
+    fs.symlinkSync(target, home)
+    return `linked ${home} to ${target}, where ${old} leads`
+  }
   if (!have.length) {
     fs.rmSync(home, { recursive: true, force: true })
     fs.renameSync(old, home)
@@ -72,6 +93,15 @@ export function moveOldHome(home) {
   }
   fs.symlinkSync(home, old)
   return `moved ${old} to ${home}`
+}
+
+/** rename, or copy and remove when the two are on different disks. @param {string} from @param {string} to */
+function moveEntry(from, to) {
+  try { fs.renameSync(from, to) } catch (e) {
+    if (/** @type {NodeJS.ErrnoException} */ (e).code !== 'EXDEV') throw e
+    fs.cpSync(from, to, { recursive: true, verbatimSymlinks: true })
+    fs.rmSync(from, { recursive: true, force: true })
+  }
 }
 
 /**

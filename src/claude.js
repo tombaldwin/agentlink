@@ -202,11 +202,16 @@ export function register(dir) {
   if (wakeSupport().ok) installHook(dir)
 }
 
-/** @param {string} dir */
+/**
+ * Remove nattermatic from a Claude account. Returns false if Claude Code wasn't found to remove its
+ * MCP server registration (only the hook was removed).
+ * @param {string} dir
+ */
 export function unregister(dir) {
   const claude = claudeBin()
   if (claude) for (const name of ['nattermatic', 'agentlink']) spawnSync(claude, ['mcp', 'remove', '-s', 'user', name], { stdio: 'ignore', env: envFor(dir) })
   removeHook(dir)
+  return !!claude
 }
 
 // The hook that wakes idle sessions. It ends when it wakes the session, so each of these arms it

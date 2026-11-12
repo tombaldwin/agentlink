@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.1 — 2026-11-12
+
+Fixes to the move from agentlink, and to setup and uninstall, found in a review:
+
+- A machine set up as agentlink that started a new network (`--new-network`), or joined another one,
+  during the upgrade kept the old network's unused invites and its messages. An unused invite could
+  then let a machine into the new network. Both are now cleared, as they are for any change of
+  network.
+- A `~/.agentlink` that is a link (to a folder on another disk, say) is now moved too: the data stays
+  where the link leads, and `~/.nattermatic` leads there as well. Before, setup started a new network
+  and the old background service kept the port.
+- Upgrading with an invite line checks the invite before changing anything, so an invite that was used
+  or has expired leaves the machine as it was.
+- Sessions that were running when this machine started a new network or joined another one now pick
+  up its new key, instead of reporting that something else is using the port.
+- `natter uninstall` says so when it can't find Claude Code to remove nattermatic's MCP server, and
+  gives the command to run.
+
 ## 0.2.0 — 2026-11-11
 
 - **agentlink is now nattermatic.** The command is `natter`: `natter to api@desk "…"` sends a

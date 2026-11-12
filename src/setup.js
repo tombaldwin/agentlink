@@ -50,11 +50,19 @@ export async function setup({ host, peers = [], noService, noClaude, noCodex, no
   if (join && (!pin || !token)) throw new Error('--join needs --pin and --token (use the line printed by `natter invite`)')
   if (join && !validAddr(join)) throw new Error(`--join: "${join}" is not a host:port address`)
   console.log(`natter setup`)
+  // a join first checks the machine at the invite's address presents the key the invite names (its
+  // invite key): before anything here is changed, so a used or expired invite leaves this machine as it was
+  /** @type {{ pem: string, fp: string } | undefined} */
+  let inviter
+  if (join) {
+    try { inviter = await peerCertificate(join) } catch (e) { throw new Error(`cannot reach ${join}: ${errMsg(e)}`) }
+    if (inviter.fp !== pin) throw new Error(`the machine at ${join} is not presenting this invite's key. Either the invite was already used, expired or was revoked (run \`natter invite\` on a member for a new one), or something else is answering at that address. Not joining.`)
+  }
   // a machine set up as agentlink, before the rename: it keeps its key, network and messages
   if (!homeElsewhere()) {
     try {
       const moved = moveOldHome(homeDir())
-      if (moved) (moved.startsWith('moved') ? ok : warn)(moved)
+      if (moved) (moved.includes('left alone') ? warn : ok)(moved)
       if (removeOldService()) ok('removed agentlink\'s background service')
       if (removeOldApp(appBundle())) ok('removed agentlink.app')
     } catch (e) { throw new Error(`could not move this machine's agentlink setup to nattermatic: ${errMsg(e)}`) }
@@ -97,10 +105,7 @@ export async function setup({ host, peers = [], noService, noClaude, noCodex, no
   let invite = false
 
   if (join) {
-    // 1. the machine at the invite's address must present the key the invite names (its invite key)
-    let inviter
-    try { inviter = await peerCertificate(join) } catch (e) { throw new Error(`cannot reach ${join}: ${errMsg(e)}`) }
-    if (inviter.fp !== pin) throw new Error(`the machine at ${join} is not presenting this invite's key. Either the invite was already used, expired or was revoked (run \`natter invite\` on a member for a new one), or something else is answering at that address. Not joining.`)
+    // 1. checked above: the machine at the invite's address presents the key the invite names
     // 2. keep this machine's key only if it is already a member of that same network (a key that
     // isn't carried between networks can't be used to link them)
     let same = member && !!netFp && roster?.net === netFp && !!identity
@@ -108,7 +113,7 @@ export async function setup({ host, peers = [], noService, noClaude, noCodex, no
     // 3. join: the inviter checks the token and adds our key under our name
     const ask = async () => {
       try {
-        return await pinnedRequest({ addr: join, method: 'POST', path: '/join', body: JSON.stringify({ token, host: myHost, cert: certDer(id.cert) }), trust: [{ pem: inviter.pem, fp: pin }], timeout: 20_000 })
+        return await pinnedRequest({ addr: join, method: 'POST', path: '/join', body: JSON.stringify({ token, host: myHost, cert: certDer(id.cert) }), trust: [/** @type {{ pem: string, fp: string }} */ (inviter)], timeout: 20_000 })
       } catch (e) { throw new Error(`could not join via ${join}: ${errMsg(e)}`) }
     }
     let r = await ask()
@@ -245,7 +250,12 @@ function restoreCert(roster) {
  */
 function leaveNetwork() {
   fs.rmSync(path.join(homeDir(), 'invite.key'), { force: true })
-  const file = path.join(homeDir(), 'nattermatic.db')
+  // agentlink.db: the database of a machine set up as agentlink, which the node renames when it next starts
+  for (const name of ['nattermatic.db', 'agentlink.db']) clearDb(path.join(homeDir(), name))
+}
+
+/** @param {string} file */
+function clearDb(file) {
   if (!fs.existsSync(file)) return
   try {
     const db = openStore(file)
@@ -430,9 +440,12 @@ export async function uninstall() {
   }
   if (homeElsewhere()) warn(`NATTERMATIC_HOME is ${homeDir()}, so the Claude accounts and shell files of ${os.homedir()} were left alone`)
   else {
+    let unfound = false
     for (const acct of claudeAccounts()) {
-      try { unregister(acct.dir) } catch (e) { warn(errMsg(e)) }     // one account's settings mustn't stop the rest
+      try { if (!unregister(acct.dir)) unfound = true } catch (e) { warn(errMsg(e)) }     // one account's settings mustn't stop the rest
     }
+    // its sessions would go on starting nattermatic's MCP server, which can only say it's uninstalled
+    if (unfound) warn('Claude Code was not found, so nattermatic is still registered with it: run `claude mcp remove -s user nattermatic` where claude is installed')
     removeShellBlock().forEach(warn)
     try { removeCodex() } catch (e) { warn(`Codex: ${errMsg(e)}`) }
   }

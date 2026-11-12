@@ -9,7 +9,7 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import { authedRequest, authedRaw, PinError, PROTO } from './tls.js'
-import { cmpVersion, ensureHomeDir, errMsg, rosterPath, sleep, VERSION } from './config.js'
+import { cmpVersion, ensureHomeDir, errMsg, readIdentity, rosterPath, sleep, VERSION } from './config.js'
 import { Roster } from './roster.js'
 import { selfCmd } from './claude.js'
 
@@ -55,6 +55,20 @@ export class Local {
     this.accept = new Map([[cfg.identity.fp, crypto.createPublicKey(cfg.identity.key)]])
   }
 
+  /**
+   * This machine's key as it is on disk now: `natter setup --new-network` (or joining another
+   * network) replaces it while long-lived clients, like MCP adapters, keep running, and the node
+   * they reach then proves the new key. Returns whether it changed.
+   */
+  reloadIdentity() {
+    let id = null
+    try { id = readIdentity(this.cfg.dir) } catch {}
+    if (!id || id.fp === this.cfg.identity.fp) return false
+    this.cfg.identity = id
+    this.accept = new Map([[id.fp, crypto.createPublicKey(id.key)]])
+    return true
+  }
+
   /** @param {{ path: string, method?: 'GET' | 'POST', body?: string, timeout?: number, signal?: AbortSignal }} o */
   // anyProto: after an upgrade the running node may be the previous version; setup must still reach it to stop it
   opts(o) { return { addr: this.addr, identity: this.cfg.identity, accept: this.accept, dks: readDks(this.cfg.dir), anyProto: true, ...o } }
@@ -74,9 +88,14 @@ export class Local {
    */
   async req(method, p, obj, query = '', timeout = 15_000) {
     let r
+    const send = () => authedRequest(this.opts({ method, path: p + query, body: obj === undefined ? '' : JSON.stringify(obj), timeout }), MAX_LOCAL_REPLY)
     try {
-      r = await authedRequest(this.opts({ method, path: p + query, body: obj === undefined ? '' : JSON.stringify(obj), timeout }), MAX_LOCAL_REPLY)
-    } catch (e) { throw this.wrap(e) }
+      r = await send()
+    } catch (e) {
+      // refused before anything was sent: if this machine's key was replaced meanwhile, try again with the new one
+      if (!(e instanceof PinError) || !this.reloadIdentity()) throw this.wrap(e)
+      try { r = await send() } catch (e2) { throw this.wrap(e2) }
+    }
     /** @type {any} */
     let data = {}
     try { data = r.text ? JSON.parse(r.text) : {} } catch {}
@@ -90,6 +109,13 @@ export class Local {
    * @returns {Promise<import('./types.js').Health | { foreign: true } | null>}
    */
   async health() {
+    const h = await this.health1()
+    // the node may be this machine's under a key replaced since this process started
+    return h && 'foreign' in h && this.reloadIdentity() ? this.health1() : h
+  }
+
+  /** @returns {Promise<import('./types.js').Health | { foreign: true } | null>} */
+  async health1() {
     try {
       const r = await authedRequest(this.opts({ path: '/health', timeout: 1000 }))
       return r.status === 200 ? JSON.parse(r.text) : { foreign: true }
