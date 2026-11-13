@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { normHost, sanitizeName, parseAddr, parsePeer, validAddr, errMsg, errCode } from '../../src/config.js'
-import { versionOf } from '../../src/local.js'
+import { nodeAction, Local, StaleError } from '../../src/local.js'
 import { PROTO } from '../../src/tls.js'
 import { signEnvelope, verifyEnvelope, sealBeacon, openBeacon, newDiscoveryKey, randomToken, gateTags, gateOk, proveAuth, checkAuth, signRecord } from '../../src/crypto.js'
 import { newIdentity, fingerprint, certDer } from '../../src/cert.js'
@@ -1035,15 +1035,42 @@ test('connection errors to several addresses are readable', () => {
   assert.equal(errMsg(new Error('x', { cause: at('ECONNREFUSED') })), 'x (ECONNREFUSED)')
 })
 
-test('only an older node is replaced; a newer one means this process is out of date', () => {
-  const h = (/** @type {string} */ version, /** @type {number | undefined} */ proto) => ({ ok: true, host: 'h', net: 'n', fp: 'f', pid: 1, version, proto })
-  const v = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
-  assert.deepEqual(versionOf(h(v, PROTO)), { differs: false, newer: false })
-  assert.deepEqual(versionOf(h(v, undefined)), { differs: true, newer: false }, 'from before protocol numbers')
-  assert.deepEqual(versionOf(h(v, PROTO + 1)), { differs: true, newer: true })
-  assert.deepEqual(versionOf(h('999.0.0', PROTO)), { differs: true, newer: true })
-  assert.deepEqual(versionOf(h('0.0.1', PROTO)), { differs: true, newer: false })
-  assert.deepEqual(versionOf(h('999.0.0', PROTO - 1)), { differs: true, newer: false }, 'the protocol decides first')
+const healthOf = (/** @type {string} */ version, /** @type {number | undefined} */ proto) => ({ ok: true, host: 'h', net: 'n', fp: 'f', pid: 1, version, proto })
+const thisVersion = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
+
+test('an older node is replaced; a newer one is used unless it speaks a newer protocol', () => {
+  const h = healthOf, v = thisVersion
+  assert.equal(nodeAction(h(v, PROTO)), 'use')
+  assert.equal(nodeAction(h('999.0.0', PROTO)), 'use', 'upgraded under a running session: not cut off')
+  assert.equal(nodeAction(h('999.0.0', PROTO + 1)), 'stale', 'a newer protocol needs a restart')
+  assert.equal(nodeAction(h(v, PROTO + 1)), 'stale')
+  assert.equal(nodeAction(h('0.0.1', PROTO)), 'replace', 'an older node is replaced')
+  assert.equal(nodeAction(h(v, undefined)), 'replace', 'from before protocol numbers')
+  assert.equal(nodeAction(h('999.0.0', PROTO - 1)), 'replace', 'the protocol decides first')
+})
+
+test('ensureNode: a session from before an upgrade keeps using the new node, unless its protocol changed', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nm-ensure-'))
+  /** @param {any[]} healths what the node says, in turn @returns {Local & { calls: string[] }} */
+  const local = healths => {
+    const l = /** @type {any} */ (new Local({ identity: newIdentity(), port: 1, dir }))
+    l.calls = []
+    l.health = async () => healths.length > 1 ? healths.shift() : healths[0]
+    l.req = async (/** @type {string} */ m, /** @type {string} */ p) => { l.calls.push(`${m} ${p}`) }
+    return l
+  }
+  const newer = healthOf('999.0.0', PROTO)
+  let l = local([newer])
+  assert.equal(await l.ensureNode(), newer, 'used as it is')
+  assert.deepEqual(l.calls, [], 'and never shut down')
+  await assert.rejects(local([healthOf(thisVersion, PROTO + 1)]).ensureNode(), StaleError)
+  // an older node is replaced; what comes up in its place is checked too
+  l = local([healthOf('0.0.1', PROTO), healthOf('999.0.0', PROTO + 1)])
+  await assert.rejects(l.ensureNode(), StaleError, 'the replacement speaks a newer protocol')
+  assert.deepEqual(l.calls, ['POST /local/shutdown'])
+  l = local([healthOf('0.0.1', PROTO), newer])
+  assert.equal(await l.ensureNode(), newer)
+  fs.rmSync(dir, { recursive: true, force: true })
 })
 
 test('invites offer an IP for machines that cannot look up .local names, unless Tailscale is there', () => {

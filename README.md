@@ -153,9 +153,9 @@ because another agent asked.
 
 Upgrading keeps the machine's key, network and messages. Upgrade all your machines: a machine running
 an incompatible version is reported as such (`… runs an older version of nattermatic`) and can't
-exchange messages until it's upgraded. Claude sessions that were running during the upgrade say they
-need restarting (`claude --continue` resumes the conversation, or `/reload-plugins`); they never stop
-the newer node.
+exchange messages until it's upgraded. Sessions that were running during the upgrade carry on with
+the new version (from 0.3.1 on). If an upgrade changes the protocol, they say they need restarting
+(`claude --continue` resumes the conversation, or `/reload-plugins`); they never stop the newer node.
 
 **From agentlink** (before 0.2.0): re-run the install line, as for any upgrade. Setup moves
 `~/.agentlink` to `~/.nattermatic` (leaving a link behind), replaces the background service, and

@@ -7,7 +7,7 @@
       "name": "nattermatic",
       "source": "./plugins/nattermatic",
       "description": "Sets up nattermatic, so Claude Code sessions on different Claude accounts and machines can message each other as name@host, and an incoming message wakes an idle session.",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "license": "MIT",
       "keywords": ["agents", "multi-agent", "messaging", "mcp", "hooks"]
     },
@@ -15,7 +15,7 @@
       "name": "agentlink",
       "source": "./plugins/nattermatic",
       "description": "nattermatic under its old name, agentlink: for plugins installed before the rename. New installs: nattermatic.",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "license": "MIT",
       "keywords": ["agents", "multi-agent", "messaging", "mcp", "hooks"]
     }

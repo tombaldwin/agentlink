@@ -16,17 +16,39 @@ import { selfCmd } from './claude.js'
 const MAX_LOCAL_REPLY = 64 << 20   // the most an inbox read can come to: 100 messages of 64 KB, escaped
 
 /**
- * The running node is a newer nattermatic than this process: this process (a session's adapter
- * started before an upgrade, say) is the one that is out of date, and must not replace the node.
+ * The running node speaks a newer protocol than this process: this process (a session's adapter
+ * started before an upgrade, say) is out of date and has to be restarted. It must not replace the
+ * node, which would downgrade it.
  */
 export class StaleError extends Error {}
 
-/** Is the node behind `h` a different version from this process, and is it newer? @param {import('./types.js').Health} h */
-export function versionOf(h) {
+/**
+ * What a client should do about the node it found. 'use' it; 'replace' it with this version (it's
+ * older); or 'stale': nattermatic was upgraded while this process was running and the node speaks a
+ * newer protocol, so this process has to be restarted. A newer node that speaks the same protocol is
+ * used as it is: refusing it would cut off every session running when the machine upgraded.
+ * @param {import('./types.js').Health} h @returns {'use' | 'replace' | 'stale'}
+ */
+export function nodeAction(h) {
   const proto = h.proto ?? 0     // nodes from before the protocol number count as older
-  const differs = proto !== PROTO || h.version !== VERSION
-  const newer = proto !== PROTO ? proto > PROTO : cmpVersion(h.version, VERSION) > 0
-  return { differs, newer: differs && newer }
+  if (proto !== PROTO) return proto > PROTO ? 'stale' : 'replace'
+  return h.version === VERSION || cmpVersion(h.version, VERSION) > 0 ? 'use' : 'replace'
+}
+
+/** @param {import('./types.js').Health} h */
+function staleError(h) {
+  return new StaleError(`nattermatic on this machine was upgraded (to ${h.version}, protocol ${h.proto}) while this program (${VERSION}, protocol ${PROTO}) was running, so it can't use the node any more`)
+}
+
+/**
+ * Is `h` a node this process can use? For a node found after starting or replacing one, whose
+ * program on disk may be newer than this process: one speaking a newer protocol throws.
+ * @param {import('./types.js').Health | { foreign: true } | null} h @returns {h is import('./types.js').Health}
+ */
+function usable(h) {
+  if (!h || 'foreign' in h) return false
+  if (nodeAction(h) === 'stale') throw staleError(h)
+  return true
 }
 
 /** @type {{ stamp: string, dks: string[] } | null} */
@@ -128,16 +150,15 @@ export class Local {
   async ensureNode() {
     let h = await this.health()
     if (h && 'foreign' in h) throw new Error(`port ${this.cfg.port} is used by something that is not this machine's nattermatic node`)
-    if (h && versionOf(h).newer) {
-      // nattermatic was upgraded while this process was running: replacing the node would downgrade it
-      throw new StaleError(`nattermatic on this machine was upgraded (to ${h.version}, protocol ${h.proto}) while this program (${VERSION}, protocol ${PROTO}) was running, so it can't use the node any more`)
-    }
-    // nattermatic was upgraded under a running node: replace it with this version
-    if (h && versionOf(h).differs) {
+    if (h) {
+      const action = nodeAction(h)
+      if (action === 'stale') throw staleError(h)
+      if (action === 'use') return h
+      // an older node (nattermatic was upgraded under it): replace it with this version
       try { await this.req('POST', '/local/shutdown') } catch {}
-      for (let i = 0; i < 30 && (h = await this.health()) && !('foreign' in h) && versionOf(h).differs; i++) await sleep(100)
+      for (let i = 0; i < 30 && (h = await this.health()) && !('foreign' in h) && nodeAction(h) === 'replace'; i++) await sleep(100)
+      if (usable(h) && nodeAction(h) === 'use') return h
     }
-    if (h && !('foreign' in h) && !versionOf(h).differs) return h
     if (fs.existsSync(path.join(this.cfg.dir, 'disabled'))) throw new Error('nattermatic is uninstalled on this machine (run `natter setup` to re-enable)')
     ensureHomeDir(this.cfg.dir)
     const out = fs.openSync(path.join(this.cfg.dir, 'node.log'), 'a', 0o600)
@@ -154,11 +175,11 @@ export class Local {
     for (let i = 0; i < 60; i++) {
       await sleep(100)
       const h2 = await this.health()
-      if (h2 && !('foreign' in h2)) return h2
+      if (usable(h2)) return h2
       if (exited && i > 5) break   // it died (lost the race to a node still starting, or failed): one last look below
     }
     const h3 = await this.health()
-    if (h3 && !('foreign' in h3)) return h3
+    if (usable(h3)) return h3
     throw new Error(`could not start the nattermatic node${spawnErr ? ` (${spawnErr})` : ''} (see ${path.join(this.cfg.dir, 'node.log')})`)
   }
 

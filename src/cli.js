@@ -106,7 +106,7 @@ const line = (/** @type {Command} */ c) => {
 /** @param {string} version */
 export function mainHelp(version) {
   const shown = COMMANDS.filter(c => !c.hidden)
-  return `nattermatic ${version} — lets AI agents on different Claude accounts and machines natter to each other
+  return `nattermatic ${version} — lets AI agents natter to each other across different agents, accounts and machines
 
 Usage: natter <command> [options]
 

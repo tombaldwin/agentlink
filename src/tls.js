@@ -33,9 +33,12 @@ export class ProtoError extends Error {
 }
 
 /**
- * The version of the machine-to-machine protocol (the identity exchange, roster and message
- * formats). Machines exchange it first, so a mismatch is reported as such instead of looking like
- * a stranger. Bump it on any incompatible change.
+ * The version of the protocol: between machines (the identity exchange, roster and message formats)
+ * and between a node and the programs on its own machine (the /local/* routes, their events and
+ * the ack/told/nack/wake rules). Machines exchange it first, so a mismatch is reported as such
+ * instead of looking like a stranger. Bump it on any incompatible change to either: a session's
+ * adapter started before an upgrade keeps using the new node while the protocol is the same (see
+ * nodeAction in local.js).
  */
 export const PROTO = 1
 /** The largest request or response between machines. A roster always fits (see roster.js). */

@@ -118,7 +118,7 @@ export async function runAdapter(cfg, { name, poll = false, channel } = {}) {
   /** @type {(hello: unknown) => void} */
   let firstHello = () => {}
   const helloP = new Promise(r => { firstHello = r })
-  /** set when nattermatic was upgraded under this session: it has to be restarted */
+  /** set when nattermatic was upgraded under this session to a newer protocol: it has to be restarted */
   let stale = ''
   ;(async () => {
     let delay = 500
@@ -138,7 +138,7 @@ export async function runAdapter(cfg, { name, poll = false, channel } = {}) {
       } catch (e) {
         if (e instanceof StaleError) {
           if (!stale) log(errMsg(e))
-          stale = `${errMsg(e)}. Restart this Claude session to reconnect: exit, then start it again with \`claude --continue\`.`
+          stale = `${errMsg(e)}. Restart this session to reconnect: in Claude Code, exit and start it again with \`claude --continue\`; in Codex, start a new session.`
           firstHello(null)
           await sleep(60_000)   // keep checking slowly, in case the node goes back to this version
           continue

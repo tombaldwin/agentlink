@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.1 — 2026-11-12
+
+- **Sessions keep working when their machine is upgraded.** A Claude Code or Codex session that was
+  running when nattermatic was upgraded refused to use the new version's node, so it stopped getting
+  messages and couldn't send until it was restarted. Now it carries on as long as the new version
+  speaks the same protocol; only an upgrade that changes the protocol asks for a restart. This takes
+  effect from the next upgrade: sessions already running 0.3.0 or older still need restarting once
+  after upgrading to 0.3.1. The restart message now also says what to do in Codex.
+- `natter help` no longer says it's only for Claude accounts.
+
 ## 0.3.0 — 2026-11-12
 
 - **Versions across the network.** Machines tell each other which version of nattermatic they run,
