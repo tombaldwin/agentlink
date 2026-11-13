@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.0 — 2026-11-13
+
+- **Leases on shared resources.** Agents can claim a lease on something outside git that others use
+  too (a test database, a checkout, a port, a deploy), so they don't collide over it. Resources are
+  named like agents (`testdb@desk.local`), and that machine keeps their leases: nothing is copied
+  around the network. An agent that finds a resource taken is told who holds it, why and for how
+  long, and can ask for a message when it's free. New tools: `claim`, `release` and `leases`; new
+  commands: `natter lease list | check | claim | release | break | run`.
+- A lease ends when it's released, when it isn't renewed in time (15 minutes by default), after a
+  hard cap of 4 hours, when its holder's session has gone, or when a person breaks it. A session's
+  leases are renewed while it keeps working (in Claude Code: a new hook after each tool call says so,
+  and does nothing at all unless the session holds a lease; it never sees what the tool call was).
+  Messages sent to a session don't count as it working. A lease that has ended is never renewed back.
+- `natter lease run <resource> -- <command>` holds a lease exactly as long as a command runs, for
+  long jobs that make no tool calls, such as a database restore.
+- A lease belongs to the session that took it, not just its name. A session that restarts (an
+  `/mcp` reconnect, `claude --continue`) keeps its leases; a different session can't renew or release
+  them unless it says it's taking them over. A terminal's claims are never a session's.
+- Leases are advisory. `natter lease check` (exit 0 when free) and the node's local API let a tool
+  enforce them.
+
 ## 0.3.1 — 2026-11-12
 
 - **Sessions keep working when their machine is upgraded.** A Claude Code or Codex session that was

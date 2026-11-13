@@ -170,7 +170,9 @@ export function isRegistered(dir) {
     if (servers?.agentlink) return false      // still registered under the old name
     if (!s || JSON.stringify([s.command, ...(s.args || [])]) !== JSON.stringify(adapterCmd())) return false
     // (a Claude Code too old for the hook is registered without it)
-    return WAKE_EVENTS.every(ev => readSettings(settingsFile(dir)).hooks?.[ev]?.some((/** @type {any} */ g) => g.hooks?.some((/** @type {any} */ h) => isWakeHook(h) && h.command === wakeCmd()))) || !wakeSupport().ok
+    const hooks = readSettings(settingsFile(dir)).hooks
+    const has = (/** @type {string} */ ev, /** @type {string} */ cmd) => hooks?.[ev]?.some((/** @type {any} */ g) => g.hooks?.some((/** @type {any} */ h) => h.command === cmd))
+    return (WAKE_EVENTS.every(ev => has(ev, wakeCmd())) && has('PostToolUse', beatCmd())) || !wakeSupport().ok
   } catch { return false }
 }
 
@@ -229,9 +231,17 @@ const WAKE_TOOLS = ['mcp__nattermatic__inbox', 'mcp__nattermatic__peers']
 
 const settingsFile = (/** @type {string} */ dir) => path.join(dir || path.join(HOME, '.claude'), 'settings.json')
 const wakeCmd = () => [...selfCmd().map(a => a.startsWith('-') ? a : sq(a)), 'wake'].join(' ')
+// The heartbeat, after every tool call: a session's leases are renewed while it's active. It does
+// nothing unless the session holds a lease, and finds that out in the shell, from the mark the node
+// leaves (hold-<pid>), without starting anything. Without CLAUDE_PID it asks the node, which knows,
+// but only while some session on this machine holds a lease.
+const beatCmd = () => {
+  const mark = sq(path.join(homeDir(), 'hold-'))
+  return `if [ -n "$CLAUDE_PID" ]; then [ -e ${mark}"$CLAUDE_PID" ] || exit 0; else ls -d ${mark}* >/dev/null 2>&1 || exit 0; fi; exec ${[...selfCmd().map(a => a.startsWith('-') ? a : sq(a)), 'beat'].join(' ')}`
+}
 /** @param {any} h */
 // (agentlink: the hook as it was before the rename, replaced by this one)
-const isWakeHook = h => typeof h?.command === 'string' && /(^|[\s'"/])(natter|nattermatic|agentlink)(\.js)?['"]? wake$/.test(h.command)
+const isWakeHook = h => typeof h?.command === 'string' && /(^|[\s'"/])(natter|nattermatic|agentlink)(\.js)?['"]? (wake|beat)$/.test(h.command)
 
 /** @param {string} file @returns {Record<string, any>} */
 function readSettings(file) {
@@ -283,6 +293,7 @@ export function installHook(dir) {
   const s = withoutHook(readSettings(file))
   s.hooks ??= {}
   for (const ev of WAKE_EVENTS) (s.hooks[ev] ??= []).push({ ...(ev === 'PostToolUse' ? { matcher: 'mcp__nattermatic__inbox' } : {}), hooks: [{ type: 'command', command: wakeCmd(), async: true, asyncRewake: true, timeout: WAKE_TIMEOUT_S }] })
+  s.hooks.PostToolUse.push({ hooks: [{ type: 'command', command: beatCmd(), async: true, timeout: 5 }] })
   s.permissions ??= {}
   // rules the user wrote for agentlink's tools, such as allowing send, keep applying under the new name
   for (const k of ['allow', 'ask', 'deny']) if (Array.isArray(s.permissions[k])) s.permissions[k] = [...new Set(s.permissions[k].map(renamedRule))]

@@ -10,16 +10,17 @@ const [first, ...rest] = process.argv.slice(2)
 const cmd = resolve(first)
 // Only these are flags; anything else (a message that happens to start with "--") is an argument,
 // and "--" ends the flags.
-const VALUE_FLAGS = ['name', 'from', 'host', 'peer', 'join', 'pin', 'net', 'token', 'thread', 'codex', 'pids', 'cwd']
+const VALUE_FLAGS = ['name', 'from', 'host', 'peer', 'join', 'pin', 'net', 'token', 'thread', 'codex', 'pids', 'cwd', 'note', 'minutes', 'max', 'as']
 const BOOL_FLAGS = ['yes', 'force', 'no-service', 'no-claude', 'no-codex', 'no-alias', 'new-network', 'poll', 'channel', 'on-demand', 'revoke', 'list', 'check']
 /** @type {Record<string, any>} */
 const flags = {}
 /** @type {string[]} */
 const pos = []
+let dashAt = -1           // where what came after "--" starts in pos
 for (let i = 0; i < rest.length; i++) {
   const a = rest[i]
   if (cmd === 'to' && pos.length) { pos.push(a); continue }    // past the address it's the message, whatever it looks like
-  if (a === '--') { pos.push(...rest.slice(i + 1)); break }
+  if (a === '--') { dashAt = pos.length; pos.push(...rest.slice(i + 1)); break }
   const eq = a.indexOf('=')
   const k = a.startsWith('--') ? a.slice(2, eq < 0 ? undefined : eq) : ''
   if (VALUE_FLAGS.includes(k)) {
@@ -48,7 +49,9 @@ if (helpAsked) {
 }
 // a mistyped option (e.g. `invite --lsit`) must not run the command as if it weren't there; send
 // takes free text and claude passes everything on to Claude Code
-if (!['to', 'claude'].includes(cmd)) { const bad = pos.find(a => a.startsWith('-')); if (bad) usage(`unknown option ${bad} (see natter ${cmd} --help)`) }
+// `lease run` needs "--" before its command, so nothing in the command is taken for natter's options
+if (cmd === 'lease' && pos[0] === 'run' && dashAt < 0) usage('lease run needs -- before the command: natter lease run <resource> -- <command...>')
+if (!['to', 'claude'].includes(cmd)) { const bad = pos.slice(0, dashAt < 0 ? undefined : dashAt).find(a => a.startsWith('-')); if (bad) usage(`unknown option ${bad} (see natter ${cmd} --help)`) }
 
 async function main() {
   switch (cmd) {
@@ -90,6 +93,14 @@ async function main() {
     case 'wake': {                              // run by the Claude Code hook, not by people
       const { runWake } = await import('../src/wake.js')
       process.exit(await runWake())
+    }
+    case 'beat': {                              // run by the Claude Code heartbeat hook
+      const { runBeat } = await import('../src/lease-cli.js')
+      process.exit(await runBeat())
+    }
+    case 'lease': {
+      const { runLease } = await import('../src/lease-cli.js')
+      process.exit(await runLease(pos, flags, client))
     }
     case 'codex-hook': {                        // run by Codex's SessionStart hook
       const { runCodexHook } = await import('../src/codex.js')

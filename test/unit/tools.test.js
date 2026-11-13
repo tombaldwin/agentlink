@@ -10,8 +10,8 @@ const tool = (/** @type {string} */ name) => {
   return t
 }
 
-test('the tools are send, peers, network, invite and inbox', () => {
-  assert.deepEqual(TOOLS.map(t => t.name).sort(), ['inbox', 'invite', 'network', 'peers', 'send'])
+test('the tools are send, peers, network, invite, inbox, claim, release and leases', () => {
+  assert.deepEqual(TOOLS.map(t => t.name).sort(), ['claim', 'inbox', 'invite', 'leases', 'network', 'peers', 'release', 'send'])
 })
 
 test('each tool description says when to use it', () => {

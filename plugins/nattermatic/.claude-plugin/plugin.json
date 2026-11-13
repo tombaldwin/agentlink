@@ -1,6 +1,6 @@
 {
   "name": "nattermatic",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Let Claude Code sessions on different Claude accounts and machines message each other, and wake idle ones.",
   "author": { "name": "Tom Baldwin", "url": "https://github.com/tombaldwin" },
   "homepage": "https://nattermatic.com",

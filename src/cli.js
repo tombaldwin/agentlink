@@ -38,6 +38,26 @@ Prints whether it was delivered, is waiting in an inbox, or is held until the ma
 Example: natter to reviewer@laptop.local "the build is green"`,
     flags: [['--from <name>', 'the sender name to show (default: cli)']],
   },
+  {
+    name: 'lease', args: '[list | check | claim | release | break | run] ...', summary: 'claim shared resources, or see who has them',
+    help: `A lease says a shared resource outside git (a test database, a checkout, a port) is in use,
+so agents on the network don't collide over it. Resources are named like agents: testdb@laptop.local
+(a bare name means this machine).
+  natter lease list [--host <machine>]          the leases on a machine's resources
+  natter lease check <resource>                  exit 0 if it's free, 1 if it's held (for scripts)
+  natter lease claim <resource> --note <why>    claim it from this terminal (--minutes, default 15)
+  natter lease release <resource>                release a claim made from this terminal
+  natter lease run <resource> -- <command...>    hold it exactly as long as the command runs
+  natter lease break <resource>                  end someone else's lease (its holder is told)
+Agents claim leases with their claim tool. Only people break them.`,
+    flags: [
+      ['--note <why>', 'what it\'s being used for, shown to anyone who finds it taken'],
+      ['--minutes <n>', 'how long a claim lasts unless renewed (default 15, at most 240)'],
+      ['--max <minutes>', 'lease run: the most it may hold the lease (default and most: 240)'],
+      ['--as <name>', 'the holder name to show (default: cli; for lease run, this folder\'s name)'],
+      ['--host <machine>', 'list: whose leases to show'],
+    ],
+  },
   { name: 'who', summary: 'show which agents are online, here and on other machines' },
   { name: 'status', summary: 'show this machine\'s node status as JSON' },
   {
@@ -85,6 +105,7 @@ tool rather than being woken (use this for agents other than Claude Code).`,
     ],
   },
   { name: 'wake', summary: 'run by the Claude Code hook', hidden: true },
+  { name: 'beat', summary: 'run by the Claude Code heartbeat hook', hidden: true },
   { name: 'codex-hook', summary: 'run by the Codex hook', hidden: true },
   { name: 'codex-wake', summary: 'started by the Codex hook', hidden: true },
   { name: '__complete', summary: 'used by the completion scripts', hidden: true },

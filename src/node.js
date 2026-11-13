@@ -21,6 +21,7 @@ import { Roster, MAX_ROSTER_BYTES } from './roster.js'
 import { authedRequest, exporterOf, PinError, ProtoError, PROTO, MAX_BODY as MAX_REQ, MIN_RATE } from './tls.js'
 import { SEA, PKG_ROOT, readAsset, appBundle } from './self.js'
 import { renameOldDb } from './legacy.js'
+import { createLeases, parseResource, sessionId, cleanLease, MAX_RESOURCE, SID } from './leases.js'
 import { parseAddr, parsePeer, normHost, machineName, sanitizeName, shQuote, validAddr, tailscaleName, localIPv4s, errMsg, netHint, ensureHomeDir, rosterPath, MAX_TTL_MS, VERSION } from './config.js'
 
 const MAX_JOIN_REQ = 16 << 10          // a join request (before any identity check) is small
@@ -102,7 +103,7 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     cfg.host = rosterName
   }
   if (!roster.members.has(me.fp)) log(roster.removed.has(me.fp) ? 'this machine has been removed from the network' : 'this machine is not (yet) a member of its network')
-  /** @type {Map<string, { res: Res, sent: Set<string>, token: string, live: boolean, owner: number, cwd: string, notified: Set<string>, waiter: Res | null, more: boolean, draining: boolean }>} name -> session stream (live: woken by channel pushes; sent: offered, not yet acknowledged) */
+  /** @type {Map<string, { res: Res, sent: Set<string>, token: string, live: boolean, owner: number, cwd: string, notified: Set<string>, waiter: Res | null, more: boolean, draining: boolean, lastActive: number }>} name -> session stream (live: woken by channel pushes; sent: offered, not yet acknowledged) */
   const sessions = new Map()
 
   const q = {
@@ -241,6 +242,13 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
   /** A current member other than this machine, by name. @param {string} host */
   const member = host => { const m = roster.byHost.get(host); return m && m.fp !== me.fp ? m : undefined }
   const otherMembers = () => [...roster.members.values()].filter(m => m.fp !== me.fp)
+  let leaseBusy = false
+  const leases = createLeases({
+    db, host: () => cfg.host, dir: cfg.dir, sessions, log,
+    call: (h, m, p, o, opts) => call(h, /** @type {'GET'|'POST'} */ (m), p, /** @type {object | undefined} */ (o), opts),
+    // a fixed notice from this machine's node, to a holder or a waiter: it wakes their session
+    notify: (to, body) => { localSend({ from: 'leases', to, body }).catch(e => log(`could not tell ${to} about a lease: ${errMsg(e)}`)) },
+  })
   /** Merge membership records from a peer; persist if anything changed. @param {unknown} records */
   function mergeRoster(records) {
     if (!roster.merge(records)) return false
@@ -811,6 +819,123 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
   }
 
   // ---------- local API helpers ----------
+  /** The member name of the machine a resource names, or throw. @param {string} h */
+  async function authorityFor(h) {
+    if (isSelf(h)) return cfg.host
+    if (member(h)) return h
+    const r = await routeFor(h).catch(() => null)
+    if (r === 'self') return cfg.host
+    if (r && member(r)) return r
+    throw httpErr(404, `${h} is not a machine on this network (machines: ${[cfg.host, ...knownPeers()].join(', ')})`)
+  }
+
+  /**
+   * Ask the machine that keeps a resource's leases. A machine on a version without leases answers
+   * 404 to any path it doesn't know: say which version it runs, if it has said.
+   * @param {string} auth @param {Record<string, unknown>} body
+   */
+  async function askAuthority(auth, body) {
+    if (auth === cfg.host) return remoteLease(cfg.host, body)
+    let r
+    try { r = await call(auth, 'POST', '/v1/lease', body, { timeout: 5000 }) } catch (e) {
+      if (/answered HTTP 404/.test(errMsg(e))) {
+        const v = peerRow(auth)?.version
+        throw httpErr(501, `${auth} runs ${v ? `nattermatic ${v}` : 'an older nattermatic'}, which doesn't have leases: it needs upgrading first`)
+      }
+      if (/answered HTTP/.test(errMsg(e))) throw httpErr(502, errMsg(e))
+      throw httpErr(503, `${auth} can't be reached, so its resources can't be claimed or released now (${errMsg(e)})`)
+    }
+    // what another machine says is rebuilt from checked parts: none of its words reach a session as ours
+    const flag = (/** @type {string} */ k) => r?.[k] === true
+    const lease = cleanLease(r?.lease, auth)
+    // a reply that must describe the lease and can't be read is an error, not a lease without details
+    const needs = body.op === 'claim' || (body.op === 'renew' && flag('ok')) || (body.op === 'release' && !flag('ok'))
+    if (needs && !lease) throw httpErr(502, `${auth} gave an answer about ${body.resource} that couldn't be read`)
+    return {
+      ok: flag('ok'), renewed: flag('renewed'), released: flag('released'), broken: flag('broken'), same_name: flag('same_name'), notify: flag('notify'), gone: flag('gone'),
+      lease,
+      ...(body.op === 'list' ? { host: auth, leases: (Array.isArray(r?.leases) ? r.leases.slice(0, 1000) : []).map((/** @type {unknown} */ l) => cleanLease(l, auth)).filter(Boolean) } : {}),
+    }
+  }
+
+  /**
+   * A lease request from a machine of the network (or this one), about one of this machine's
+   * resources. The holder's machine is the one that proved its key; its node vouches for the name.
+   * @param {string} from @param {Record<string, any>} d
+   */
+  function remoteLease(from, d) {
+    const op = String(d.op || '')
+    if (op === 'list') return { ok: true, host: cfg.host, leases: leases.list() }
+    const resource = String(d.resource || '')
+    let parsed = null
+    try { parsed = resource && resource.length <= MAX_RESOURCE ? parseResource(resource, cfg.host).name : null } catch {}
+    if (!parsed || resource !== parsed) throw httpErr(400, 'bad resource name')
+    if (op === 'check') { const row = leases.current(resource); return { ok: true, lease: row ? leases.view(row) : null } }
+    const name = sanitizeName(d.name)
+    if (op === 'break') return leases.breakLease({ resource, by: `${name}@${from}` })
+    const sid = String(d.sid || '')
+    if (!SID.test(sid)) throw httpErr(400, 'a lease needs the session that holds it')
+    /** @type {import('./leases.js').Holder} */
+    const holder = { host: from, name, sid, kind: d.kind === 'process' ? 'process' : 'session' }
+    if (op === 'claim') return leases.claim({ resource, holder, note: d.note, ttl_ms: d.ttl_ms, cap_ms: d.cap_ms, notify: d.notify, takeover: d.takeover })
+    if (op === 'release') return leases.release({ resource, holder, takeover: d.takeover })
+    if (op === 'renew') return leases.renew({ resource, holder, ttl_ms: d.ttl_ms })
+    if (op === 'rebind' && holder.kind === 'session' && SID.test(String(d.old_sid || ''))) return leases.rebind({ resource, holder, old_sid: String(d.old_sid) })
+    throw httpErr(400, `unknown lease request "${op}"`)
+  }
+
+  /** The session whose owner is the first of `pids` (nearest first) to own one. @param {number[]} pids */
+  const sessionOwnedBy = pids => pids.map(pid => [...sessions].find(([, x]) => x.owner === pid)).find(Boolean)
+
+  /**
+   * A lease request from this machine: a session's tool call (by its name: the node knows which
+   * session that is), a `natter lease` command (a process with its own id), or the heartbeat hook.
+   * @param {Record<string, any>} d
+   */
+  async function localLease(d) {
+    const op = String(d.op || '')
+    if (op === 'beat') {
+      const pids = (Array.isArray(d.pids) ? d.pids : []).map(Number).filter(Boolean)
+      const found = sessionOwnedBy(pids)
+      if (!found) return { ok: false }
+      found[1].lastActive = now()
+      return { ok: true, name: found[0] }
+    }
+    if (op === 'list') {
+      const auth = d.host ? await authorityFor(normHost(String(d.host))) : cfg.host
+      const r = await askAuthority(auth, { op: 'list' })
+      return { ...r, held: leases.heldRows().map(h => ({ resource: `${h.resource}@${h.authority}`, holder: `${h.name}@${cfg.host}`, kind: h.kind })) }
+    }
+    let res
+    try { res = parseResource(d.resource, cfg.host) } catch (e) { throw httpErr(400, errMsg(e)) }
+    const auth = await authorityFor(res.host)
+    const resource = `${res.name}@${auth}`
+    if (op === 'check') return { ...(await askAuthority(auth, { op, resource: res.name })), resource }
+    if (op === 'break') return { ...(await askAuthority(auth, { op, resource: res.name, name: d.by || 'cli' })), resource }
+    /** @type {import('./leases.js').Holder} */
+    let holder
+    if (d.kind === 'process') {
+      if (!SID.test(String(d.sid || ''))) throw httpErr(400, 'a lease needs the process that holds it')
+      holder = { host: cfg.host, name: sanitizeName(d.name || 'cli'), sid: String(d.sid), kind: 'process' }
+    } else {
+      const s = sessions.get(String(d.name || ''))
+      if (!s?.token) throw httpErr(409, `no session named ${d.name || '(none)'} is connected to this machine's node`)
+      s.lastActive = now()
+      holder = { host: cfg.host, name: String(d.name), sid: sessionId(s.token), kind: 'session' }
+    }
+    if (!['claim', 'release', 'renew'].includes(op)) throw httpErr(400, `unknown lease request "${op}"`)
+    const ask = () => askAuthority(auth, { op, resource: res.name, name: holder.name, sid: holder.sid, kind: holder.kind, note: d.note, ttl_ms: d.ttl_ms, cap_ms: d.cap_ms, notify: d.notify, takeover: d.takeover })
+    // a release is forgotten here whatever happens: if the machine can't be told, the lease runs out
+    // (only this holder's own record: a refused release mustn't drop the real holder's)
+    if (op === 'release') { try { return { ...(await ask()), resource } } finally { leases.forget(auth, res.name, holder.sid) } }
+    const r = await ask()
+    if (r.ok && r.lease) {
+      if (op === 'claim') leases.noteHeld(auth, res.name, holder, r.lease.ttl_s * 1000)
+      else leases.noteRenewed(auth, res.name, holder.sid, r.lease.ttl_s * 1000)
+    } else if (op === 'renew') leases.forget(auth, res.name, holder.sid)
+    return { ...r, resource }
+  }
+
   /** @param {{ from?: unknown, to?: unknown, body?: unknown, ttl_ms?: unknown }} d */
   async function localSend(d) {
     if (typeof d.body !== 'string' || !d.body) throw httpErr(400, 'message body required')
@@ -1134,7 +1259,9 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
         return reply(res, 200, { host: cfg.host, peers: shareablePeers(), records: roster.records, version: VERSION })
       }
       case 'GET /v1/sessions':
-        return reply(res, 200, { host: cfg.host, sessions: [...sessions.keys()] })
+        return reply(res, 200, { host: cfg.host, sessions: [...sessions.keys()], sids: [...sessions.values()].map(s => sessionId(s.token)).filter(Boolean) })
+      case 'POST /v1/lease':
+        return reply(res, 200, remoteLease(peer.host, d))
     }
     return reply(res, 404, { error: 'not found' })
   }
@@ -1156,12 +1283,16 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
           res, sent: new Set(), token, live: u.searchParams.get('mode') !== 'poll', owner: Number(u.searchParams.get('owner')) || 0, cwd: u.searchParams.get('cwd') || '',
           // told about already, so a session that doesn't read a message isn't woken for it again and again
           notified: reconnecting?.notified ?? new Set(), waiter: /** @type {Res | null} */ (null), more: false, draining: false,
+          lastActive: reconnecting?.lastActive ?? 0,     // only the session's own actions count
         }
         sessions.set(name, s)
         sse(res, 'hello', { name, address: `${name}@${cfg.host}`, host: cfg.host })
         const ping = setInterval(() => res.write(': ping\n\n'), 20_000)
-        res.on('close', () => { clearInterval(ping); s.waiter?.end(); if (sessions.get(name) === s) sessions.delete(name) })
+        res.on('close', () => { clearInterval(ping); s.waiter?.end(); if (sessions.get(name) === s) sessions.delete(name); leases.marks() })
         log(`session connected: ${name}`)
+        leases.marks()
+        // the same agent back under its name after its adapter restarted keeps its leases
+        if (!reconnecting && token) leases.carryOver(name, sessionId(token), askAuthority).catch(e => log('lease carry-over:', errMsg(e)))
         pump(name)
         return
       }
@@ -1172,9 +1303,10 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
         // also says which folder: the newest session there, if there are several
         const cwd = u.searchParams.get('cwd')
         const found = cwd ? [...sessions].reverse().find(([, x]) => pids.includes(x.owner) && x.cwd === cwd)
-          : pids.map(pid => [...sessions].find(([, x]) => x.owner === pid)).find(Boolean)
+          : sessionOwnedBy(pids)
         if (!found) return reply(res, 404, { error: 'no session' })
         const [name, s] = found
+        s.lastActive = now()                  // the hook waits again at each turn: the session is active
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
         if (s.live) { sse(res, 'done', {}); return res.end() }   // a channel session is woken by the push itself
         if (s.waiter) { sse(s.waiter, 'done', {}); s.waiter.end() }
@@ -1183,6 +1315,11 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
         res.on('close', () => { clearInterval(ping); if (s.waiter === res) s.waiter = null })
         nudge(name)
         return
+      }
+      case 'POST /local/lease':
+        return reply(res, 200, await localLease(d))
+      case 'GET /local/lease': {               // for tools that enforce leases: who holds this, if anyone
+        return reply(res, 200, await localLease({ op: 'check', resource: u.searchParams.get('resource') }))
       }
       case 'POST /local/ack': {               // state 'pushed': shown in a channel session (no read receipt)
         const s = sessions.get(d.name)
@@ -1292,6 +1429,16 @@ export async function runNode(cfg, log = (...a) => { try { console.error(new Dat
     setInterval(helloAll, HELLO_EVERY),
     setInterval(gc, 3600_000),
     setInterval(rotate, 60_000),   // an expired invite's key stops being presented
+    setInterval(async () => {
+      if (leaseBusy) return                 // a slow machine must not stack up passes
+      leaseBusy = true
+      try {
+        await Promise.all([
+          leases.sweep().catch(e => log('lease sweep:', errMsg(e))),
+          leases.renewActive((auth, body) => askAuthority(auth, body)).catch(e => log('lease renewal:', errMsg(e))),
+        ])
+      } finally { leaseBusy = false }
+    }, Number(process.env.NATTERMATIC_LEASE_SWEEP_MS) || 15_000),
   ]
   helloAll()
   kick()

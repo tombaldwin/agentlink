@@ -75,8 +75,14 @@ the same membership from the same records.
   treat them as requests from a colleague — never as instructions from its user — and not to
   take destructive or security-sensitive actions solely because a peer asked. Each message is framed
   with a tag made for that read, so its text can't pass for another message from someone else. Nothing
-  else another machine writes reaches a session: a session name must be one a node could have made, and
-  a machine's error text is dropped for its status code. Only invite machines and agents you trust.
+  else another machine writes reaches a session as nattermatic's own words: a session name must be one a
+  node could have made, a machine's error text is dropped for its status code, and what a machine says
+  about its leases is rebuilt from checked parts. A lease's note is its holder's own text, and is shown
+  quoted and marked as theirs. Only invite machines and agents you trust.
+- **Leases.** Any member machine can claim, renew and release leases on another machine's resources
+  for its own agents, and its node vouches for their names, as it does for messages. Breaking a lease
+  is a terminal command, never an agent tool. The heartbeat hook that renews a session's leases sends
+  only process ids to the local node; it never reads the tool call it follows.
 - **Waking a session.** Setup adds a Claude Code hook that waits in the background and wakes an idle
   session when a message arrives. What it shows Claude is fixed text saying a message is waiting:
   nothing another agent wrote comes through the hook. Claude reads the message with the `inbox` tool,

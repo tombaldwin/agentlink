@@ -5,7 +5,7 @@ import crypto from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { fingerprint } from './cert.js'
 
-export const VERSION = '0.3.1'
+export const VERSION = '0.4.0'
 
 export function homeDir() {
   return process.env.NATTERMATIC_HOME || path.join(os.homedir(), '.nattermatic')

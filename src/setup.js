@@ -8,6 +8,7 @@ import net from 'node:net'
 import { writeConfig, readConfigFile, loadConfig, homeDir, ensureHomeDir, normHost, machineName, detectHost, validAddr, readIdentity, writeIdentity, keyPath, certPath, rosterPath, errMsg, sleep, writeAtomic } from './config.js'
 import { newIdentity, certDer, shortFp, fingerprint } from './cert.js'
 import { Roster } from './roster.js'
+import { leaseTables } from './leases.js'
 import { peerCertificate, pinnedRequest } from './tls.js'
 import { Local } from './local.js'
 import { openStore } from './store.js'
@@ -261,7 +262,9 @@ function clearDb(file) {
     const db = openStore(file)
     try {
       const left = Number(/** @type {any} */ (db.prepare(`SELECT count(*) n FROM messages WHERE state IN ('pending','queued')`).get()).n)
-      db.exec('BEGIN IMMEDIATE; DELETE FROM messages; DELETE FROM invites; DELETE FROM peers; COMMIT')
+      leaseTables(db)
+      // (the old network's leases, holders and waiters too: nobody on the new one should see them)
+      db.exec('BEGIN IMMEDIATE; DELETE FROM messages; DELETE FROM invites; DELETE FROM peers; DELETE FROM leases; DELETE FROM lease_waiters; DELETE FROM held; COMMIT')
       if (left) warn(`dropped ${left} undelivered message(s) for the old network`)
     } finally { db.close() }
   } catch (e) {

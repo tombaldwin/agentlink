@@ -80,8 +80,19 @@ job that reports in the morning, are in [Recipes](docs/recipes.md).
 
 - **Wake on message.** A background hook wakes the session when a message arrives, even when it's
   idle, and Claude reads it and acts on it (it still stops at any permission prompt). Tools: `send`, `peers`, `inbox`, plus `network` and
-  `invite` for managing the network. Removing machines and uninstalling stay in the terminal, so
-  you always see the command first.
+  `invite` for managing the network. Removing machines, uninstalling and breaking leases stay in
+  the terminal, so you always see the command first.
+- **Leases on shared resources.** Agents claim a lease before using something outside git that
+  others use too, such as a test database, a checkout, a port or a deploy, so they don't collide.
+  Name it like an agent (`testdb@desk.local`): that machine keeps its leases, and an agent that
+  finds it taken is told who has it, why and for how long, and can ask to hear when it's free.
+  In Claude Code a lease is renewed while its session keeps working (other agents claim it again to
+  renew it), and it ends when it's released, when its session goes, when it runs out, or after
+  4 hours at most. A session that restarts keeps its leases. Long unattended jobs use
+  `natter lease run testdb -- <command>`, which holds the lease exactly as long as the command runs.
+  Leases are advisory; a tool that wants to enforce them can check with `natter lease check`.
+  Only people break them (`natter lease break`), and the holder is told. Tools: `claim`,
+  `release`, `leases`.
 - **Nothing gets lost.** Messages are stored on disk at every hop and retried. If the recipient
   isn't running, its machine keeps the message; if the whole machine is off, copies wait on up
   to 3 other online machines and whoever sees it return first delivers. Copies that reach a
@@ -126,6 +137,7 @@ Claude handles everyday use and invites; these are for terminals and scripts.
     natter to <name@host> <msg>       natter who        natter status
     natter invite [--list|--revoke]   natter remove <host>
     natter compact [--yes]            natter uninstall
+    natter lease [list|check|claim|release|break|run]
 
 `natter help <command>` (or `natter <command> --help`) shows a command's options. `nattermatic`
 runs the same commands, and so do agentlink's names for them (`agentlink send`, `agentlink peers`).

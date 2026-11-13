@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
 
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'nattermatic-home-'))
 process.env.HOME = HOME
@@ -326,7 +327,21 @@ test('the hook is only ever nattermatic\'s, and a user\'s other hooks stay as th
   fs.writeFileSync(file, JSON.stringify(theirs))
   c.installHook(dir)
   const on = JSON.parse(fs.readFileSync(file, 'utf8'))
-  assert.equal(on.hooks.PostToolUse.at(-1).matcher, 'mcp__nattermatic__inbox', 'reading the inbox arms it again: an interrupted turn fires nothing else')
+  assert.equal(on.hooks.PostToolUse.at(-2).matcher, 'mcp__nattermatic__inbox', 'reading the inbox arms it again: an interrupted turn fires nothing else')
+  const beat = on.hooks.PostToolUse.at(-1)
+  assert.equal(beat.matcher, undefined, 'the heartbeat follows every tool call')
+  assert.equal(beat.hooks[0].async, true, 'in the background')
+  // it does nothing, in the shell, unless the session holds a lease (or, not told which session it's
+  // in, unless some session here does)
+  const cmd = beat.hooks[0].command
+  assert.match(cmd, /exec .* beat$/)
+  const marks = path.dirname(/'([^']*)hold-'/.exec(cmd)?.[1] + 'x')
+  fs.mkdirSync(marks, { recursive: true })
+  const runs = (/** @type {string} */ pid) => spawnSync('sh', ['-c', cmd.replace(/exec .* beat$/, 'echo RAN')], { env: { PATH: process.env.PATH, ...(pid ? { CLAUDE_PID: pid } : {}) }, encoding: 'utf8' }).stdout.trim() === 'RAN'
+  assert.equal(runs('4242'), false); assert.equal(runs(''), false)
+  fs.writeFileSync(path.join(marks, 'hold-4242'), '')
+  assert.equal(runs('4242'), true); assert.equal(runs('99'), false); assert.equal(runs(''), true)
+  fs.rmSync(path.join(marks, 'hold-4242'))
   assert.equal(on.hooks.Stop.length, 3)
   c.removeHook(dir)
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).hooks, theirs.hooks)

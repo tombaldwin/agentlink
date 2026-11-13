@@ -18,7 +18,7 @@ const SLOW_AFTER_MS = 120_000
 const GIVE_UP_MS = 86400_000
 
 /** This process's ancestors, nearest first: one of them is the Claude session that started us. */
-function ancestors() {
+export function ancestors() {
   const out = []
   let pid = process.ppid
   for (let i = 0; i < 8 && pid > 1; i++) {
